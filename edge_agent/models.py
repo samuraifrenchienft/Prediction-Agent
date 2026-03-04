@@ -19,11 +19,15 @@ class QualificationState(str, Enum):
 
 
 @dataclass
-class AIAnalysis:
+class Catalyst:
     source: str
     quality: float
     direction: float
     confidence: float
+
+
+# Backward-compat alias — adapters previously used AIAnalysis as the catalyst type
+AIAnalysis = Catalyst
 
 
 @dataclass

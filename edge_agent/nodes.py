@@ -3,8 +3,9 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime, timezone
 
+from .ai_service import get_ai_response
 from .models import (
-    AIAnalysis,
+    Catalyst,
     MarketSnapshot,
     PortfolioState,
     QualificationState,
@@ -42,40 +43,42 @@ def _base_fee_for_venue(venue: Venue) -> float:
     return 0.003
 
 
-from .ai_service import get_ai_response
-
 def probability_node(snapshot: MarketSnapshot, catalysts: list[Catalyst]) -> ProbabilityOutput:
     """Analyzes market data and catalysts to predict the probability of a market resolving to 'yes'.
 
-    This function now uses an AI model to get a more sophisticated probability assessment.
+    Uses an AI model for probability assessment with a deterministic fallback.
     """
-
     system_prompt = (
-        "You are a world-class prediction market analyst. Your task is to analyze market data and catalysts "
-        "and return your analysis as a structured JSON object. The JSON object should conform to the following schema: "
-        '{"p_true": float, "bull_thesis": list[str], "key_catalysts": list[str], "disconfirming_evidence": list[str], "market_positioning": str}'
+        "You are a world-class prediction market analyst. "
+        "Analyze the provided market data and catalysts, then respond with ONLY a JSON object "
+        "containing exactly these fields: "
+        '{"p_true": <float 0-1>, "bull_thesis": <list of strings>, '
+        '"disconfirming_evidence": <list of strings>}. '
+        "No extra keys, no markdown, no explanation outside the JSON object."
     )
 
+    catalyst_lines = "\n".join(
+        f"- Source: {c.source}, Quality: {c.quality:.2f}, Direction: {c.direction:+.2f}, Confidence: {c.confidence:.2f}"
+        for c in catalysts
+    )
     prompt = (
-        f"Analyze the following market data and catalysts. "
         f"Market Data:\n"
         f"- Market ID: {snapshot.market_id}\n"
         f"- Venue: {snapshot.venue}\n"
-        f"- Current Market Probability: {snapshot.market_prob}\n"
+        f"- Current Market Probability: {snapshot.market_prob:.3f}\n"
         f"- Time to Resolution (hours): {snapshot.time_to_resolution_hours}\n\n"
-        f"Catalysts:\n"
+        f"Catalysts:\n{catalyst_lines}\n\n"
+        f"Return your analysis as the JSON object described in the system prompt."
     )
-    for c in catalysts:
-        prompt += f"- Source: {c.source}, Quality: {c.quality}, Direction: {c.direction}, Confidence: {c.confidence}\n"
 
     ai_analysis = get_ai_response(prompt, task_type="complex", system_prompt=system_prompt)
 
-    if ai_analysis:
-        p_true = ai_analysis.p_true
-        thesis = ai_analysis.bull_thesis
-        disconfirming = ai_analysis.disconfirming_evidence
+    if ai_analysis and "p_true" in ai_analysis:
+        p_true = float(ai_analysis["p_true"])
+        thesis = ai_analysis.get("bull_thesis", [])
+        disconfirming = ai_analysis.get("disconfirming_evidence", [])
     else:
-        # Fallback to original logic if AI fails
+        # Fallback to weighted catalyst scoring when AI is unavailable
         weighted_signal = sum(c.direction * c.confidence * c.quality for c in catalysts)
         catalyst_strength = min(0.12, max(-0.12, weighted_signal))
         p_true = min(0.99, max(0.01, snapshot.market_prob + catalyst_strength))
@@ -84,7 +87,7 @@ def probability_node(snapshot: MarketSnapshot, catalysts: list[Catalyst]) -> Pro
             f"Catalyst-adjusted estimate moved by {p_true - snapshot.market_prob:+.3f}.",
         ]
         disconfirming = [
-            "AI analysis failed. Using simplified logic.",
+            "AI analysis unavailable. Using simplified fallback logic.",
             "Low-liquidity periods can distort short-term market probability.",
         ]
 

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from .models import AIAnalysis, MarketSnapshot, PortfolioState, Recommendation, RiskPolicy
+from .models import Catalyst, MarketSnapshot, PortfolioState, Recommendation, RiskPolicy
 from .nodes import (
     edge_ev_node,
     probability_node,
