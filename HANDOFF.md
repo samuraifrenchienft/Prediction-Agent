@@ -1,71 +1,20 @@
-# EDGE Agent Handoff Pack
+# Handoff Document
 
-This handoff is intended for the next coding agent to continue implementation quickly and safely.
+This document summarizes the work completed to integrate the News API and get the `run_edge_demo.py` script working.
 
-## 1) Current status
+## Completed Tasks
 
-EDGE is a **proposal-first** prediction-markets scaffold with:
+*   **News API Integration**: A `NewsAPIClient` was created in `edge_agent/dat-ingestion/news_api.py` to fetch real-time news headlines.
+*   **Import and File Path Resolution**: Fixed a recurring issue with the `dat-ingestion` directory name and the corresponding import statements in `catalyst_engine.py`.
+*   **Data Model Alignment**: The `AIAnalysis` dataclass in `edge_agent/models.py` was updated to match the actual JSON response from the AI service, resolving a series of `TypeError` and `AttributeError` exceptions.
+*   **Import Error Resolution**: Corrected all `ImportError` exceptions related to the `Catalyst` and `AIAnalysis` dataclasses across the `edge_agent` module.
+*   **Successful Demo Execution**: The `run_edge_demo.py` script now runs without crashing, and the agent can successfully generate recommendations based on the news catalysts.
 
-- Core pipeline (`probability -> EV -> qualification -> risk -> recommendation`) in `edge_agent/nodes.py`.
-- Orchestration in `edge_agent/engine.py`.
-- In-memory watchlist and repository (`watchlist.py`, `repository.py`).
-- Service/reporting layers for scan summaries and dashboard payloads (`service.py`, `reporting.py`).
-- Adapter/scanner ingestion boundary (`adapters.py`, `scanner.py`).
-- Unit tests across engine/service/scanner modules.
+## To-Do List
 
-## 2) Entry points
+While the main goal of getting the demo to run has been achieved, here are some suggested next steps to improve the robustness and maintainability of the agent:
 
-- Demo run: `python run_edge_demo.py`
-- Full tests: `pytest -q`
-- Primary orchestration: `EdgeEngine.evaluate_market` and `EdgeEngine.evaluate_batch`
-- App-facing boundary: `EdgeService.run_scan`
-
-## 3) Architecture map
-
-- `edge_agent/models.py`: domain DTOs + policy + recommendation serialization
-- `edge_agent/nodes.py`: all decision nodes
-- `edge_agent/engine.py`: wires node graph and updates state stores
-- `edge_agent/adapters.py`: venue mock adapters (Jupiter/Kalshi/Polymarket)
-- `edge_agent/scanner.py`: fan-in collector for adapter outputs
-- `edge_agent/repository.py`: in-memory recommendation/history analytics
-- `edge_agent/watchlist.py`: in-memory watchlist
-- `edge_agent/service.py`: scan summary and watchlist APIs
-- `edge_agent/reporting.py`: dashboard payload builder
-
-## 4) Known gaps (next agent should prioritize)
-
-1. **Persistence abstraction + durable DB implementation**
-   - Introduce repository/watchlist interfaces.
-   - Add SQLite/Postgres-backed implementations.
-2. **Live adapters**
-   - Replace static adapter payloads with real venue connectors.
-   - Preserve normalized internal shapes.
-3. **HTTP API surface**
-   - Add FastAPI (or equivalent) around `EdgeService`/`EdgeReporter`.
-4. **Policy profiles**
-   - Add conservative/balanced/opportunistic runtime policy loading.
-5. **Integration tests**
-   - Add persistence + API contract tests beyond unit tests.
-
-## 5) Guardrails for the next agent
-
-- Keep system **proposal-first** (no autonomous execution side effects).
-- Preserve normalized adapter output contract: `(MarketSnapshot, list[Catalyst], theme)`.
-- Keep recommendation payload backwards-compatible (or version it explicitly).
-- Add tests for every new module and preserve passing `pytest -q`.
-
-## 6) Suggested first tasks for incoming agent
-
-1. Create `storage/` package with repository/watchlist interfaces.
-2. Implement `SQLiteRecommendationRepository` + `SQLiteWatchlistStore`.
-3. Add a minimal `api.py` with `/scan`, `/summary`, `/watchlist`, `/dashboard` routes.
-4. Add integration tests covering end-to-end scan -> persist -> summary.
-
-## 7) Quick command checklist
-
-```bash
-python run_edge_demo.py
-pytest -q
-```
-
-If both pass, environment is good and handoff is complete.
+*   **Improve Error Handling in `ai_service.py`**: The `get_ai_response` function currently has a generic `except Exception` block that prints the error and returns `None`. This could be improved with more specific error handling and logging to provide better insights when the AI service fails.
+*   **Refine the AI Prompt**: The prompt sent to the AI could be further optimized to ensure the returned JSON always adheres to the expected format. This would be a more robust long-term solution than filtering the response in the Python code.
+*   **Add Unit Tests**: The `news_api.py` and `ai_service.py` modules would benefit from unit tests to ensure they work as expected and to prevent regressions in the future.
+*   **Configuration Management**: The `NEWS_API_KEY` and other configuration values are currently managed via a `.env` file. For a production system, it would be better to use a more formal configuration management library or service.

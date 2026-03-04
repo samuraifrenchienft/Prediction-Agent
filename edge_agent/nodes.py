@@ -4,7 +4,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 
 from .models import (
-    Catalyst,
+    AIAnalysis,
     MarketSnapshot,
     PortfolioState,
     QualificationState,
@@ -42,10 +42,51 @@ def _base_fee_for_venue(venue: Venue) -> float:
     return 0.003
 
 
+from .ai_service import get_ai_response
+
 def probability_node(snapshot: MarketSnapshot, catalysts: list[Catalyst]) -> ProbabilityOutput:
-    weighted_signal = sum(c.direction * c.confidence * c.quality for c in catalysts)
-    catalyst_strength = min(0.12, max(-0.12, weighted_signal))
-    p_true = min(0.99, max(0.01, snapshot.market_prob + catalyst_strength))
+    """Analyzes market data and catalysts to predict the probability of a market resolving to 'yes'.
+
+    This function now uses an AI model to get a more sophisticated probability assessment.
+    """
+
+    system_prompt = (
+        "You are a world-class prediction market analyst. Your task is to analyze market data and catalysts "
+        "and return your analysis as a structured JSON object. The JSON object should conform to the following schema: "
+        '{"p_true": float, "bull_thesis": list[str], "key_catalysts": list[str], "disconfirming_evidence": list[str], "market_positioning": str}'
+    )
+
+    prompt = (
+        f"Analyze the following market data and catalysts. "
+        f"Market Data:\n"
+        f"- Market ID: {snapshot.market_id}\n"
+        f"- Venue: {snapshot.venue}\n"
+        f"- Current Market Probability: {snapshot.market_prob}\n"
+        f"- Time to Resolution (hours): {snapshot.time_to_resolution_hours}\n\n"
+        f"Catalysts:\n"
+    )
+    for c in catalysts:
+        prompt += f"- Source: {c.source}, Quality: {c.quality}, Direction: {c.direction}, Confidence: {c.confidence}\n"
+
+    ai_analysis = get_ai_response(prompt, task_type="complex", system_prompt=system_prompt)
+
+    if ai_analysis:
+        p_true = ai_analysis.p_true
+        thesis = ai_analysis.bull_thesis
+        disconfirming = ai_analysis.disconfirming_evidence
+    else:
+        # Fallback to original logic if AI fails
+        weighted_signal = sum(c.direction * c.confidence * c.quality for c in catalysts)
+        catalyst_strength = min(0.12, max(-0.12, weighted_signal))
+        p_true = min(0.99, max(0.01, snapshot.market_prob + catalyst_strength))
+        thesis = [
+            "Probability shifted from venue implied odds after weighted catalyst scoring (FALLBACK).",
+            f"Catalyst-adjusted estimate moved by {p_true - snapshot.market_prob:+.3f}.",
+        ]
+        disconfirming = [
+            "AI analysis failed. Using simplified logic.",
+            "Low-liquidity periods can distort short-term market probability.",
+        ]
 
     source_confidence = 0.5
     if catalysts:
@@ -54,15 +95,6 @@ def probability_node(snapshot: MarketSnapshot, catalysts: list[Catalyst]) -> Pro
 
     uncertainty = max(0.02, 0.18 - (confidence * 0.12))
     band = (max(0.01, p_true - uncertainty), min(0.99, p_true + uncertainty))
-
-    thesis = [
-        "Probability shifted from venue implied odds after weighted catalyst scoring.",
-        f"Catalyst-adjusted estimate moved by {catalyst_strength:+.3f}.",
-    ]
-    disconfirming = [
-        "Low-liquidity periods can distort short-term market probability.",
-        "Headline reversals could invalidate the catalyst-driven probability uplift.",
-    ]
 
     return ProbabilityOutput(
         p_true=p_true,
