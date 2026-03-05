@@ -1,7 +1,10 @@
 from __future__ import annotations
 
-from .models import AIAnalysis, MarketSnapshot, PortfolioState, Recommendation, RiskPolicy
+from .cross_market import CrossMarketCorrelator
+from .game_tracker import GameTracker
+from .models import Catalyst, MarketSnapshot, PortfolioState, Recommendation, RiskPolicy
 from .nodes import (
+    SignalType,
     edge_ev_node,
     probability_node,
     qualification_gate,
@@ -24,10 +27,14 @@ class EdgeEngine:
         risk_policy: RiskPolicy | None = None,
         watchlist: WatchlistStore | None = None,
         repository: RecommendationRepository | None = None,
+        game_tracker: GameTracker | None = None,
+        cross_market_correlator: CrossMarketCorrelator | None = None,
     ) -> None:
         self.risk_policy = risk_policy or RiskPolicy()
         self.watchlist = watchlist or WatchlistStore()
         self.repository = repository or RecommendationRepository()
+        self.game_tracker = game_tracker or GameTracker()
+        self.cross_market_correlator = cross_market_correlator or CrossMarketCorrelator()
 
     def evaluate_market(
         self,
@@ -36,7 +43,26 @@ class EdgeEngine:
         portfolio: PortfolioState,
         theme: str,
     ) -> Recommendation:
+        # If this market is already being tracked (pre-game injury registered),
+        # patch opening_prob from tracker data so _classify_signal has a valid reference.
+        snapshot = self.game_tracker.enrich_snapshot(snapshot)
+
+        # Check if this live game should fire a tracker-based trigger (Q2 condition).
+        # This runs before probability_node so the signal propagates correctly.
+        tracker_signal = self.game_tracker.update(snapshot)
+        if tracker_signal == SignalType.INJURY_MOMENTUM_REVERSAL and snapshot.opening_prob == 0.0:
+            # Ensure opening_prob is set so _classify_signal confirms the signal
+            snapshot.opening_prob = self.game_tracker.get_game(
+                snapshot.venue, snapshot.market_id
+            ).pre_game_market_prob if self.game_tracker.get_game(snapshot.venue, snapshot.market_id) else 0.5
+
         prob = probability_node(snapshot, catalysts)
+
+        # If the AI confirmed a PRE_GAME_INJURY_LAG signal, register the game
+        # in the tracker so we actively monitor it once it goes live.
+        if prob.signal == SignalType.PRE_GAME_INJURY_LAG:
+            self.game_tracker.register(snapshot, catalysts, theme)
+
         ev = edge_ev_node(snapshot, prob.p_true)
         qualification_state, gate_reasons = qualification_gate(snapshot, prob, ev, self.risk_policy)
         capped_size, policy_reasons = risk_policy_node(
@@ -64,6 +90,9 @@ class EdgeEngine:
         inputs: list[tuple[MarketSnapshot, list[Catalyst], str]],
         portfolio: PortfolioState,
     ) -> list[Recommendation]:
+        # Pre-process: inject cross-market correlation catalysts where applicable
+        inputs = self.cross_market_correlator.enrich_batch(inputs)
+
         recommendations = [
             self.evaluate_market(snapshot=snapshot, catalysts=catalysts, portfolio=portfolio, theme=theme)
             for snapshot, catalysts, theme in inputs

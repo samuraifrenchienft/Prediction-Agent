@@ -1,5 +1,7 @@
 from .adapters import AdapterMarket, JupiterAdapter, KalshiAdapter, MarketAdapter, PolymarketAdapter
+from .cross_market import CorrelationAlert, CrossMarketCorrelator
 from .engine import EdgeEngine
+from .game_tracker import GamePhase, GameTracker, TrackedGame
 from .models import Catalyst, MarketSnapshot, PortfolioState, QualificationState, Recommendation, RiskPolicy, Venue
 from .reporting import EdgeDashboard, EdgeReporter
 from .repository import RecommendationRecord, RecommendationRepository
@@ -14,6 +16,11 @@ __all__ = [
     "EdgeScanner",
     "EdgeReporter",
     "EdgeDashboard",
+    "GameTracker",
+    "GamePhase",
+    "TrackedGame",
+    "CrossMarketCorrelator",
+    "CorrelationAlert",
     "AdapterMarket",
     "MarketAdapter",
     "JupiterAdapter",

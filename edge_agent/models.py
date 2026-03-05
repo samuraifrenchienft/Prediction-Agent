@@ -27,6 +27,14 @@ class AIAnalysis:
 
 
 @dataclass
+class Catalyst:
+    source: str
+    quality: float
+    direction: float
+    confidence: float
+
+
+@dataclass
 class MarketSnapshot:
     market_id: str
     venue: Venue
@@ -38,6 +46,8 @@ class MarketSnapshot:
     updated_at: datetime
     ambiguity_score: float = 0.0
     volatility_entropy_score: float = 0.0
+    question: str = ""          # human-readable market question
+    opening_prob: float = 0.0   # pre-game / market-open probability (0 = unknown)
 
 
 @dataclass
