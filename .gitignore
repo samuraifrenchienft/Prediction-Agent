@@ -3,3 +3,7 @@ __pycache__/
 .pytest_cache/
 # Environment variables - do not commit
 .env
+.env.txt
+.env.local
+.env*.local
+.claude/
