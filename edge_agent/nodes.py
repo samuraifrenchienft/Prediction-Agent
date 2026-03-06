@@ -5,6 +5,7 @@ from datetime import datetime, timezone
 
 from .models import (
     AIAnalysis,
+    Catalyst,
     MarketSnapshot,
     PortfolioState,
     QualificationState,
@@ -71,9 +72,13 @@ def probability_node(snapshot: MarketSnapshot, catalysts: list[AIAnalysis]) -> P
     ai_analysis = get_ai_response(prompt, task_type="complex", system_prompt=system_prompt)
 
     if ai_analysis:
-        p_true = ai_analysis.p_true
-        thesis = ai_analysis.bull_thesis
-        disconfirming = ai_analysis.disconfirming_evidence
+        p_true = float(ai_analysis.get("p_true", snapshot.market_prob))
+        thesis = ai_analysis.get("bull_thesis") or ai_analysis.get("key_catalysts") or []
+        disconfirming = ai_analysis.get("disconfirming_evidence", [])
+        if isinstance(thesis, str):
+            thesis = [thesis]
+        if isinstance(disconfirming, str):
+            disconfirming = [disconfirming]
     else:
         # Fallback to original logic if AI fails
         weighted_signal = sum(c.direction * c.confidence * c.quality for c in catalysts)

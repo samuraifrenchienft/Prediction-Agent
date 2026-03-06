@@ -4,11 +4,10 @@ from edge_agent import (
     EdgeEngine,
     EdgeReporter,
     EdgeScanner,
-    KalshiAdapter,
-    JupiterAdapter,
-    PolymarketAdapter,
+    EdgeService,
     PortfolioState,
 )
+from edge_agent.adapters import JupiterAdapter, KalshiAdapter, PolymarketAdapter
 from edge_agent.ai_service import get_ai_response
 
 def answer_question(question: str) -> bool:
@@ -36,15 +35,15 @@ def answer_question(question: str) -> bool:
     
     ai_response = get_ai_response(question, task_type="creative", system_prompt=system_prompt)
     
-    if ai_response and hasattr(ai_response, 'content') and ai_response.content:
-        print(f"\nAnswer: {ai_response.content}")
-        if hasattr(ai_response, 'confidence_level') and ai_response.confidence_level:
-            print(f"Confidence: {ai_response.confidence_level}")
-        if hasattr(ai_response, 'action_recommendation') and ai_response.action_recommendation:
-            print(f"Recommendation: {ai_response.action_recommendation}")
-        if hasattr(ai_response, 'entry_conditions') and ai_response.entry_conditions:
+    if ai_response and ai_response.get("content"):
+        print(f"\nAnswer: {ai_response['content']}")
+        if ai_response.get("confidence_level"):
+            print(f"Confidence: {ai_response['confidence_level']}")
+        if ai_response.get("action_recommendation"):
+            print(f"Recommendation: {ai_response['action_recommendation']}")
+        if ai_response.get("entry_conditions"):
             print("Entry Conditions:")
-            for condition in ai_response.entry_conditions:
+            for condition in ai_response["entry_conditions"]:
                 print(f"- {condition}")
     else:
         print("\nSorry, I couldn't generate a response in the expected format.")

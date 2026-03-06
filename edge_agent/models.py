@@ -19,7 +19,16 @@ class QualificationState(str, Enum):
 
 
 @dataclass
+class Catalyst:
+    source: str
+    quality: float
+    direction: float
+    confidence: float
+
+
+@dataclass
 class AIAnalysis:
+    """Extended AI response model used by the Q&A chatbot."""
     source: str | None = None
     quality: float | None = None
     direction: float | None = None
