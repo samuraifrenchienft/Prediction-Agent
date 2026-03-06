@@ -1,72 +1,37 @@
 """
-Kalshi authenticated REST API client.
+Kalshi REST API client.
 
-Authentication uses RSA-SHA256 signing:
-  - KALSHI_ACCESS_KEY   → your API key UUID from kalshi.com/profile/api
-  - KALSHI_PRIVATE_KEY_PATH → path to your .pem private key file (downloaded from same page)
+Public markets endpoint: https://api.elections.kalshi.com/trade-api/v2/markets (no auth needed)
+Authenticated endpoints (portfolio, etc.) require RSA-SHA256 signing — Bearer token alone is not
+supported by Kalshi's trading API.
 
-The access signature and access timestamp are generated automatically per-request.
 Docs: https://trading-api.readme.io/reference/getmarkets
 """
 
 from __future__ import annotations
 
-import base64
 import os
-import time
 
 import requests
 from dotenv import find_dotenv, load_dotenv
 
 load_dotenv(find_dotenv(usecwd=True) or find_dotenv())
 
+# Public endpoint (no auth required for market listing)
+KALSHI_PUBLIC_BASE = "https://api.elections.kalshi.com/trade-api/v2"
+# Authenticated endpoint (requires RSA-SHA256 signed requests, not just Bearer token)
 KALSHI_BASE = "https://trading-api.kalshi.com/trade-api/v2"
 
 _SESSION = requests.Session()
 _SESSION.headers.update({"User-Agent": "EdgeAgent/1.0"})
 
 
-def _get_auth_headers(method: str, path: str) -> dict:
-    """
-    Build Kalshi auth headers for a request.
-    Requires KALSHI_ACCESS_KEY and KALSHI_PRIVATE_KEY_PATH in .env
-    Returns empty dict if credentials are not configured.
-    """
+def _get_auth_headers() -> dict:
+    """Returns Bearer auth header if KALSHI_ACCESS_KEY is set."""
     access_key = os.environ.get("KALSHI_ACCESS_KEY", "").strip()
-    key_path = os.environ.get("KALSHI_PRIVATE_KEY_PATH", "").strip()
-
-    if not access_key or not key_path:
-        return {}
-
-    try:
-        from cryptography.hazmat.primitives import hashes, serialization
-        from cryptography.hazmat.primitives.asymmetric import padding
-
-        # Timestamp in milliseconds as string
-        timestamp_ms = str(int(time.time() * 1000))
-
-        # Message to sign: timestamp + METHOD + /trade-api/v2/path
-        message = f"{timestamp_ms}{method.upper()}{path}"
-
-        with open(key_path, "rb") as f:
-            private_key = serialization.load_pem_private_key(f.read(), password=None)
-
-        signature = base64.b64encode(
-            private_key.sign(message.encode("utf-8"), padding.PKCS1v15(), hashes.SHA256())
-        ).decode("utf-8")
-
-        return {
-            "KALSHI-ACCESS-KEY": access_key,
-            "KALSHI-ACCESS-TIMESTAMP": timestamp_ms,
-            "KALSHI-ACCESS-SIGNATURE": signature,
-        }
-
-    except FileNotFoundError:
-        print(f"[KalshiAPI] Private key file not found: {key_path}")
-        return {}
-    except Exception as e:
-        print(f"[KalshiAPI] Auth error: {e}")
-        return {}
+    if access_key and access_key not in ("paste_your_access_key_here", "your_kalshi_access_key_here"):
+        return {"Authorization": f"Bearer {access_key}"}
+    return {}
 
 
 def get_markets(
@@ -79,13 +44,12 @@ def get_markets(
     Fetch open markets from Kalshi, ordered by volume descending.
     Automatically uses authentication if KALSHI_ACCESS_KEY + KALSHI_PRIVATE_KEY_PATH are set.
     """
-    path = "/trade-api/v2/markets"
     params: dict = {"limit": limit, "status": status}
     if series_ticker:
         params["series_ticker"] = series_ticker
 
-    headers = _get_auth_headers("GET", path)
-    resp = _SESSION.get(f"{KALSHI_BASE}/markets", params=params, headers=headers, timeout=10)
+    # Use public endpoint (no auth needed for market listing)
+    resp = _SESSION.get(f"{KALSHI_PUBLIC_BASE}/markets", params=params, timeout=10)
     resp.raise_for_status()
     markets = resp.json().get("markets", [])
 
@@ -105,27 +69,13 @@ def get_markets(
 
 
 def get_portfolio_balance() -> dict | None:
-    """Fetch account balance — requires authentication."""
-    path = "/trade-api/v2/portfolio/balance"
-    headers = _get_auth_headers("GET", path)
-    if not headers:
-        print("[KalshiAPI] Auth headers missing — set KALSHI_ACCESS_KEY + KALSHI_PRIVATE_KEY_PATH")
-        return None
-    try:
-        resp = _SESSION.get(f"{KALSHI_BASE}/portfolio/balance", headers=headers, timeout=10)
-        resp.raise_for_status()
-        return resp.json()
-    except Exception as e:
-        print(f"[KalshiAPI] Portfolio fetch error: {e}")
-        return None
+    """Fetch account balance — requires RSA-SHA256 signed request (not supported in free mode)."""
+    print("[KalshiAPI] Portfolio requires RSA-SHA256 signing — not available without private key")
+    return None
 
 
 def is_authenticated() -> bool:
-    """Check whether Kalshi credentials are configured."""
-    return bool(
-        os.environ.get("KALSHI_ACCESS_KEY")
-        and os.environ.get("KALSHI_PRIVATE_KEY_PATH")
-    )
+    return bool(_get_auth_headers())
 
 
 # ── Parse helpers ─────────────────────────────────────────────────────────────
