@@ -19,11 +19,14 @@ class QualificationState(str, Enum):
 
 
 @dataclass
-class AIAnalysis:
+class Catalyst:
     source: str
     quality: float
     direction: float
     confidence: float
+
+
+AIAnalysis = Catalyst
 
 
 @dataclass
