@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from .engine import EdgeEngine
-from .models import Catalyst, MarketSnapshot, PortfolioState, QualificationState, Recommendation
+from .models import MarketSnapshot, PortfolioState, QualificationState, Recommendation
 
 
 @dataclass
@@ -25,7 +25,7 @@ class EdgeService:
 
     def run_scan(
         self,
-        inputs: list[tuple[MarketSnapshot, list[Catalyst], str]],
+        inputs: list[tuple[MarketSnapshot, list[AIAnalysis], str]],
         portfolio: PortfolioState,
     ) -> tuple[list[Recommendation], ScanSummary]:
         recommendations = self.engine.evaluate_batch(inputs=inputs, portfolio=portfolio)

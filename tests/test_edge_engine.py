@@ -1,7 +1,7 @@
 from datetime import datetime, timezone
 
 from edge_agent import (
-    Catalyst,
+    AIAnalysis,
     EdgeEngine,
     MarketSnapshot,
     PortfolioState,
@@ -22,10 +22,10 @@ def test_qualified_market_emits_buy_yes() -> None:
         time_to_resolution_hours=48,
         updated_at=datetime.now(timezone.utc),
     )
-    catalysts = [Catalyst(source="official", quality=0.9, direction=0.05, confidence=0.9)]
+    analyses = [AIAnalysis(source="official", quality=0.9, direction=0.05, confidence=0.9)]
     portfolio = PortfolioState(bankroll_usd=10000)
 
-    rec = engine.evaluate_market(snapshot, catalysts, portfolio, theme="sports")
+    rec = engine.evaluate_market(snapshot, analyses, portfolio, theme="sports")
 
     assert rec.qualification_state == QualificationState.QUALIFIED
     assert rec.action == "BUY_YES"
@@ -44,10 +44,10 @@ def test_low_depth_moves_to_watchlist() -> None:
         time_to_resolution_hours=24,
         updated_at=datetime.now(timezone.utc),
     )
-    catalysts = [Catalyst(source="official", quality=0.8, direction=0.08, confidence=0.8)]
+    analyses = [AIAnalysis(source="official", quality=0.8, direction=0.08, confidence=0.8)]
     portfolio = PortfolioState(bankroll_usd=10000)
 
-    rec = engine.evaluate_market(snapshot, catalysts, portfolio, theme="politics")
+    rec = engine.evaluate_market(snapshot, analyses, portfolio, theme="politics")
 
     assert rec.qualification_state == QualificationState.WATCHLIST
     assert rec.action == "HOLD"
@@ -68,10 +68,10 @@ def test_ambiguity_rejects_market() -> None:
         updated_at=datetime.now(timezone.utc),
         ambiguity_score=0.9,
     )
-    catalysts = [Catalyst(source="official", quality=0.9, direction=0.03, confidence=0.9)]
+    analyses = [AIAnalysis(source="official", quality=0.9, direction=0.03, confidence=0.9)]
     portfolio = PortfolioState(bankroll_usd=10000)
 
-    rec = engine.evaluate_market(snapshot, catalysts, portfolio, theme="macro")
+    rec = engine.evaluate_market(snapshot, analyses, portfolio, theme="macro")
 
     assert rec.qualification_state == QualificationState.REJECTED
     assert "AMBIGUITY_RISK" in rec.reject_reason_codes
@@ -88,18 +88,18 @@ def test_jupiter_fee_is_higher_than_kalshi_fee() -> None:
         time_to_resolution_hours=48,
         updated_at=datetime.now(timezone.utc),
     )
-    catalysts = [Catalyst(source="official", quality=0.9, direction=0.05, confidence=0.9)]
+    analyses = [AIAnalysis(source="official", quality=0.9, direction=0.05, confidence=0.9)]
     portfolio = PortfolioState(bankroll_usd=10000)
 
     jupiter = engine.evaluate_market(
         MarketSnapshot(market_id="j", venue=Venue.JUPITER_PREDICTION, **base_kwargs),
-        catalysts,
+        analyses,
         portfolio,
         theme="sports",
     )
     kalshi = engine.evaluate_market(
         MarketSnapshot(market_id="k", venue=Venue.KALSHI, **base_kwargs),
-        catalysts,
+        analyses,
         portfolio,
         theme="sports",
     )
@@ -123,7 +123,7 @@ def test_batch_and_repository_top_opportunities() -> None:
                 time_to_resolution_hours=48,
                 updated_at=datetime.now(timezone.utc),
             ),
-            [Catalyst(source="official", quality=0.9, direction=0.06, confidence=0.9)],
+            [AIAnalysis(source="official", quality=0.9, direction=0.06, confidence=0.9)],
             "sports",
         ),
         (
@@ -137,7 +137,7 @@ def test_batch_and_repository_top_opportunities() -> None:
                 time_to_resolution_hours=48,
                 updated_at=datetime.now(timezone.utc),
             ),
-            [Catalyst(source="official", quality=0.9, direction=0.04, confidence=0.9)],
+            [AIAnalysis(source="official", quality=0.9, direction=0.04, confidence=0.9)],
             "macro",
         ),
     ]

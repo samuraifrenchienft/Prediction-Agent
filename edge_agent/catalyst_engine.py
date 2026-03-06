@@ -19,7 +19,7 @@ class CatalystDetectionEngine:
                 catalysts.append(catalyst)
         return catalysts
 
-    def _create_catalyst_from_article(self, article: dict) -> Catalyst | None:
+    def _create_catalyst_from_article(self, article: dict) -> AIAnalysis | None:
         """Creates a catalyst from a news article."""
         system_prompt = (
             "You are a news analyst. Your task is to analyze a news headline and return a structured JSON object "

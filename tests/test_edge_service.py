@@ -1,6 +1,6 @@
 from datetime import datetime, timezone
 
-from edge_agent import Catalyst, EdgeReporter, EdgeService, MarketSnapshot, PortfolioState, QualificationState, Venue
+from edge_agent import AIAnalysis, EdgeReporter, EdgeService, MarketSnapshot, PortfolioState, QualificationState, Venue
 
 
 def _input(market_id: str, venue: Venue, prob: float, depth: float, spread: float, direction: float):
@@ -15,7 +15,7 @@ def _input(market_id: str, venue: Venue, prob: float, depth: float, spread: floa
             time_to_resolution_hours=48,
             updated_at=datetime.now(timezone.utc),
         ),
-        [Catalyst(source="official", quality=0.9, direction=direction, confidence=0.9)],
+        [AIAnalysis(source="official", quality=0.9, direction=direction, confidence=0.9)],
         "sports",
     )
 

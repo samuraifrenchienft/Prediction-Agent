@@ -3,12 +3,15 @@ from dotenv import load_dotenv
 from openai import OpenAI
 
 # Load environment variables from .env file
+if not os.path.exists(".env"):
+    with open(".env", "w") as f:
+        f.write("OPEN_ROUTER_API_KEY=")
 load_dotenv()
 
 MODEL_MAP = {
-    "simple": "meta-llama/llama-4-maverick",
-    "complex": "meta-llama/llama-4-maverick",
-    "creative": "meta-llama/llama-4-maverick",
+    "simple": "openrouter/free",
+    "complex": "openrouter/free",
+    "creative": "openrouter/free",
 }
 
 import json
@@ -18,7 +21,7 @@ def get_ai_response(prompt, task_type="simple", system_prompt=None) -> AIAnalysi
     """
     Gets a structured response from the AI model.
     """
-    model = MODEL_MAP.get(task_type, "meta-llama/llama-4-maverick")
+    model = MODEL_MAP.get(task_type, "openrouter/free")
     try:
         openrouter_api_key = os.environ.get("OPEN_ROUTER_API_KEY")
         if not openrouter_api_key:

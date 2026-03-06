@@ -44,7 +44,7 @@ def _base_fee_for_venue(venue: Venue) -> float:
 
 from .ai_service import get_ai_response
 
-def probability_node(snapshot: MarketSnapshot, catalysts: list[Catalyst]) -> ProbabilityOutput:
+def probability_node(snapshot: MarketSnapshot, catalysts: list[AIAnalysis]) -> ProbabilityOutput:
     """Analyzes market data and catalysts to predict the probability of a market resolving to 'yes'.
 
     This function now uses an AI model to get a more sophisticated probability assessment.
@@ -56,17 +56,17 @@ def probability_node(snapshot: MarketSnapshot, catalysts: list[Catalyst]) -> Pro
         '{"p_true": float, "bull_thesis": list[str], "key_catalysts": list[str], "disconfirming_evidence": list[str], "market_positioning": str}'
     )
 
+    # Limit the number of catalysts to prevent oversized prompts
+    catalysts_to_consider = catalysts[:5]
+
     prompt = (
-        f"Analyze the following market data and catalysts. "
-        f"Market Data:\n"
-        f"- Market ID: {snapshot.market_id}\n"
-        f"- Venue: {snapshot.venue}\n"
-        f"- Current Market Probability: {snapshot.market_prob}\n"
-        f"- Time to Resolution (hours): {snapshot.time_to_resolution_hours}\n\n"
+        f"Analyze market data and catalysts.\n"
+        f"Market: ID={snapshot.market_id}, Venue={snapshot.venue}, Prob={snapshot.market_prob}, "
+        f"HoursLeft={snapshot.time_to_resolution_hours}\n\n"
         f"Catalysts:\n"
     )
-    for c in catalysts:
-        prompt += f"- Source: {c.source}, Quality: {c.quality}, Direction: {c.direction}, Confidence: {c.confidence}\n"
+    for c in catalysts_to_consider:
+        prompt += f"- Src: {c.source}, Q: {c.quality}, Dir: {c.direction}, Conf: {c.confidence}\n"
 
     ai_analysis = get_ai_response(prompt, task_type="complex", system_prompt=system_prompt)
 

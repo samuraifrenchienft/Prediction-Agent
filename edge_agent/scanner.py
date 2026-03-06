@@ -13,14 +13,19 @@ class EdgeScanner:
         self.adapters = adapters
         self.catalyst_engine = CatalystDetectionEngine()
 
-    def collect(self) -> list[tuple]:
-        collected: list[tuple] = []
-        # For now, we'll use a generic query to get catalysts.
-        # In the future, this could be tailored to each market.
-        catalysts = self.catalyst_engine.detect_catalysts("US politics")
-
+    def fetch_markets(self) -> list[AdapterMarket]:
+        """Fetches markets from all adapters."""
+        all_markets: list[AdapterMarket] = []
         for adapter in self.adapters:
-            markets: list[AdapterMarket] = adapter.fetch_markets()
-            for market in markets:
-                collected.append((market.snapshot, catalysts, market.theme))
+            try:
+                all_markets.extend(adapter.fetch_markets())
+            except Exception as e:
+                print(f"[{adapter.__class__.__name__}] error: {e}")
+        return all_markets
+
+    def collect(self, markets: list[AdapterMarket], catalysts: list[AIAnalysis]) -> list[tuple]:
+        """Processes a list of markets and catalysts."""
+        collected: list[tuple] = []
+        for market in markets:
+            collected.append((market.snapshot, catalysts, market.theme))
         return collected

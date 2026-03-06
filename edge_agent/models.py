@@ -20,10 +20,15 @@ class QualificationState(str, Enum):
 
 @dataclass
 class AIAnalysis:
-    source: str
-    quality: float
-    direction: float
-    confidence: float
+    source: str | None = None
+    quality: float | None = None
+    direction: float | None = None
+    confidence: float | None = None
+    content: str | None = None
+    category: str | None = None
+    confidence_level: str | None = None
+    action_recommendation: str | None = None
+    entry_conditions: list[str] | None = None
 
 
 @dataclass

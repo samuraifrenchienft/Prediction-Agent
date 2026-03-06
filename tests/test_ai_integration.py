@@ -1,5 +1,5 @@
 from unittest.mock import patch
-from edge_agent.models import MarketSnapshot, Catalyst, Venue
+from edge_agent.models import MarketSnapshot, AIAnalysis, Venue
 from edge_agent.nodes import probability_node
 from datetime import datetime
 
@@ -17,7 +17,7 @@ def test_probability_node_with_ai():
         updated_at=datetime.now(),
     )
     catalysts = [
-        Catalyst(source="test_source", quality=0.8, direction=1, confidence=0.9)
+        AIAnalysis(source="test_source", quality=0.8, direction=1, confidence=0.9)
     ]
 
     # Mock the AI's response
