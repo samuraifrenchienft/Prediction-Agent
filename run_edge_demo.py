@@ -1,3 +1,6 @@
+from __future__ import annotations
+
+import importlib
 from pprint import pprint
 
 from edge_agent import (
@@ -7,103 +10,181 @@ from edge_agent import (
     EdgeService,
     PortfolioState,
 )
-from edge_agent.adapters import JupiterAdapter, KalshiAdapter, PolymarketAdapter
+from edge_agent.adapters import KalshiAdapter, PolymarketAdapter
 from edge_agent.ai_service import get_ai_response
 
+# Lazy import of kalshi_api for targeted market lookups in Q&A
+_kalshi_api = importlib.import_module(".dat-ingestion.kalshi_api", "edge_agent")
+
+# ── Keyword → Kalshi series mapping for on-demand Q&A lookups ────────────────
+_SERIES_MAP: list[tuple[list[str], list[str]]] = [
+    (["fed", "fomc", "interest rate", "rate cut", "rate hike"], ["KXFED"]),
+    (["inflation", "cpi", "pce"], ["KXINFL"]),
+    (["gdp", "recession", "economy", "growth"], ["KXGDP"]),
+    (["bitcoin", "btc"], ["KXBTC"]),
+    (["ethereum", "eth"], ["KXETH"]),
+    (["nba", "basketball", "championship"], ["KXNBA"]),
+    ([" nfl ", "football", "super bowl"], ["KXNFL"]),
+    (["president", "election", "trump", "democrat", "republican", "vote"], ["KXPRES"]),
+    (["highny", "weather", "new york"], ["KXHIGHNY"]),
+]
+
+# Cache: series → (markets, fetched_at)
+_series_cache: dict[str, tuple[list[dict], float]] = {}
+_CACHE_TTL = 300  # 5 minutes
+
+
+def _fetch_relevant_markets(question: str) -> list[dict]:
+    """
+    Returns live Kalshi market data only for series relevant to the question.
+    Returns empty list for non-prediction-market questions.
+    """
+    import time
+    q = question.lower()
+    series_to_fetch: list[str] = []
+    for keywords, series in _SERIES_MAP:
+        if any(kw in q for kw in keywords):
+            series_to_fetch.extend(series)
+
+    if not series_to_fetch:
+        return []
+
+    markets: list[dict] = []
+    for series in series_to_fetch[:3]:  # cap at 3 series per query
+        cached = _series_cache.get(series)
+        if cached and (time.time() - cached[1]) < _CACHE_TTL:
+            markets.extend(cached[0])
+            continue
+        try:
+            result = _kalshi_api.get_markets(limit=5, series_ticker=series, min_volume=1)
+            _series_cache[series] = (result, time.time())
+            markets.extend(result)
+        except Exception as e:
+            print(f"[MarketLookup] {series}: {e}")
+
+    return markets[:8]
+
+
+def _format_market_context(markets: list[dict]) -> str:
+    """Format live market data as a compact context string for the AI prompt."""
+    if not markets:
+        return ""
+    lines = ["\n\nLive prediction market data (Kalshi):"]
+    for m in markets:
+        prob = _kalshi_api.parse_market_prob(m)
+        vol = _kalshi_api.parse_volume(m)
+        title = m.get("title") or m.get("ticker", "")
+        lines.append(f"- {title}: {prob:.0%} yes | volume ${vol:,.0f}")
+    return "\n".join(lines)
+
+
 def answer_question(question: str) -> bool:
-    """Answers a question using the Q&A agent, and returns whether to exit."""
-    # Check for exit condition
-    if question.lower() in ["exit", "quit", "goodbye"]:
+    """Answers a prediction market question. Returns True if user wants to exit."""
+    if question.lower() in ("exit", "quit", "goodbye"):
         print("\nGoodbye!")
         return True
 
+    # Fetch live market data only if question is market-topic-specific
+    live_markets = _fetch_relevant_markets(question)
+    market_context = _format_market_context(live_markets)
+
+    if live_markets:
+        print(f"  [Edge] Pulled {len(live_markets)} live market(s) for context.")
+
     system_prompt = (
-        "You are a sophisticated and insightful expert on prediction markets named Edge. Your primary goal is to provide helpful and educational answers to users, ranging from beginners to experts. "
-        "When you greet a user, introduce yourself by name. "
-        "When a user asks a question, you must first understand the intent and then provide a nuanced response that is tailored to the user. "
-        
-        "## Your Capabilities: ##"
-        "1.  **Broad Category Knowledge**: You are an expert in all major prediction market categories, including politics, sports, weather, science, finance, and more. When asked about a topic, always connect it to the world of prediction markets. "
-        "2.  **Context-Aware Response Length**: You must adjust your response length based on the topic. "
-        "    - For core prediction market concepts (e.g., 'what is a prediction market?', 'how does liquidity work?', 'what are the risks?'), provide **longer, more detailed, and educational answers**. Assume the user is a beginner. "
-        "    - For questions about specific market categories (e.g., 'who will win the election?', 'will it rain tomorrow?', 'will this stock go up?'), provide **shorter, more direct answers** that reference how one might trade on this in a prediction market. "
-        "3.  **Data-Driven Insights**: You can use both current and historical data to enrich your answers. If the question is about a current event, you might reference real-time market odds. If it's a more general question, you can use historical examples to provide a learning lesson. "
-        "4.  **Confidence and Uncertainty**: You must assess your own confidence level (Low, Medium, or High) for each answer. When confidence is not High, explicitly state it. For low or medium confidence answers, you should recommend cautious actions like 'HOLD' or 'Do Not Trade.' You can also suggest specific conditions or entry points that would make a trade more attractive. "
-        "5.  **Graceful Handling of Unrelated Questions**: If a question is truly off-topic and cannot be connected to prediction markets, politely state that your focus is on prediction markets. "
-        "6.  **Handle Greetings and Goodbyes**: Respond to simple greetings and goodbyes in a friendly and natural way. "
+        "You are Edge, an expert prediction market analyst. "
+        "Answer concisely and connect every response to prediction markets. "
+        "When live market data is provided, reference specific odds and volumes in your answer. "
+        "For general prediction market concepts, give educational answers. "
+        "For specific market questions, give direct analysis with trading implications. "
+        "Assess confidence: Low / Medium / High. For Low or Medium, recommend HOLD. "
+        "If the question is off-topic, politely redirect to prediction markets. "
+        "Return JSON: {content, confidence_level, action_recommendation, entry_conditions}"
     )
-    
-    ai_response = get_ai_response(question, task_type="creative", system_prompt=system_prompt)
-    
+
+    prompt = question + market_context
+    ai_response = get_ai_response(prompt, task_type="creative", system_prompt=system_prompt)
+
     if ai_response and ai_response.get("content"):
-        print(f"\nAnswer: {ai_response['content']}")
+        print(f"\nEdge: {ai_response['content']}")
         if ai_response.get("confidence_level"):
             print(f"Confidence: {ai_response['confidence_level']}")
         if ai_response.get("action_recommendation"):
             print(f"Recommendation: {ai_response['action_recommendation']}")
         if ai_response.get("entry_conditions"):
-            print("Entry Conditions:")
-            for condition in ai_response["entry_conditions"]:
-                print(f"- {condition}")
+            print("Entry conditions:")
+            for c in ai_response["entry_conditions"]:
+                print(f"  - {c}")
     else:
-        print("\nSorry, I couldn't generate a response in the expected format.")
-        pprint(ai_response)
-        
+        print("\nCouldn't generate a response. Check your AI API key.")
+
     return False
 
 
 def main() -> None:
-    """Runs the edge agent demo."""
     engine = EdgeEngine()
     service = EdgeService(engine=engine)
     reporter = EdgeReporter(service=service)
-    scanner = EdgeScanner(adapters=[JupiterAdapter(), KalshiAdapter(), PolymarketAdapter()])
-    portfolio = PortfolioState(bankroll_usd=10_000, daily_drawdown_pct=0.01, theme_exposure_pct={"sports": 0.08})
-    markets = []  # Start with no markets
-    catalysts = []  # Start with no catalysts
+    # Jupiter removed — no live API available
+    scanner = EdgeScanner(adapters=[KalshiAdapter(), PolymarketAdapter()])
+    portfolio = PortfolioState(
+        bankroll_usd=10_000,
+        daily_drawdown_pct=0.01,
+        theme_exposure_pct={"sports": 0.08},
+    )
+    markets = []
+    catalysts = []
+
+    print("\n=== Edge — Prediction Market Agent ===")
+    print("Live data: Kalshi + Polymarket | AI: OpenRouter free models\n")
 
     while True:
-        print("\nSelect an action:")
         print("1. Run market scan")
-        print("2. Ask a question about prediction markets")
-        print("3. Fetch Latest News")
-        print("4. Fetch Latest Markets")
+        print("2. Ask Edge a question")
+        print("3. Fetch latest news catalysts")
+        print("4. Fetch latest markets")
         print("5. Exit")
-        choice = input("Enter your choice (1, 2, 3, 4, or 5): ")
+        choice = input("\nChoice: ").strip()
 
         if choice == "1":
             if not markets:
-                print("\nPlease fetch markets first (option 4).")
+                print("Fetch markets first (option 4).")
                 continue
-            print("Running market scan...")
-            recommendations, summary = service.run_scan(scanner.collect(markets, catalysts), portfolio=portfolio)
-
-            print("=== Ranked recommendations ===")
+            print(f"Scanning {len(markets)} markets...")
+            recommendations, summary = service.run_scan(
+                scanner.collect(markets, catalysts), portfolio=portfolio
+            )
+            print("\n=== Recommendations ===")
             for rec in recommendations:
                 pprint(rec)
-
-            print("\n=== Scan summary ===")
+            print("\n=== Summary ===")
             pprint(summary)
-
-            print("\n=== Dashboard payload ===")
+            print("\n=== Dashboard ===")
             pprint(reporter.build_dashboard(top_n=3))
+
         elif choice == "2":
-            question = input("What is your question? ")
+            question = input("Question: ").strip()
             if answer_question(question):
                 break
+
         elif choice == "3":
-            print("Fetching latest news...")
-            catalysts = scanner.catalyst_engine.detect_catalysts("US politics")
-            print(f"Found {len(catalysts)} new catalysts.")
+            topic = input("News topic (or press Enter for general): ").strip() or "US politics markets economy"
+            print(f"Fetching news for: {topic}")
+            catalysts = scanner.catalyst_engine.detect_catalysts(topic)
+            print(f"Found {len(catalysts)} catalysts.")
+
         elif choice == "4":
-            print("Fetching latest markets...")
+            print("Fetching live markets from Kalshi + Polymarket...")
             markets = scanner.fetch_markets()
-            print(f"Found {len(markets)} markets.")
+            print(f"Loaded {len(markets)} live markets.")
+            if not markets:
+                print("  No markets returned. Check API keys in .env")
+
         elif choice == "5":
-            print("Exiting...")
+            print("Exiting.")
             break
         else:
-            print("Invalid choice. Please try again.")
+            print("Invalid choice.")
 
 
 if __name__ == "__main__":

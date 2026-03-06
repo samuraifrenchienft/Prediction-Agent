@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from enum import Enum
 
 from .models import (
     AIAnalysis,
@@ -13,6 +14,15 @@ from .models import (
     RiskPolicy,
     Venue,
 )
+
+
+class SignalType(str, Enum):
+    INJURY_MOMENTUM_REVERSAL = "INJURY_MOMENTUM_REVERSAL"
+    PRE_GAME_INJURY_LAG = "PRE_GAME_INJURY_LAG"
+    NEWS_LAG = "NEWS_LAG"
+    FAVORITE_LONGSHOT_BIAS = "FAVORITE_LONGSHOT_BIAS"
+    CROSS_MARKET_CORRELATION = "CROSS_MARKET_CORRELATION"
+    NONE = "NONE"
 
 
 @dataclass

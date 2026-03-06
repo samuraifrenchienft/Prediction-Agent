@@ -1,4 +1,4 @@
-from .adapters import AdapterMarket, JupiterAdapter, KalshiAdapter, MarketAdapter, PolymarketAdapter
+from .adapters import AdapterMarket, KalshiAdapter, MarketAdapter, PolymarketAdapter
 from .engine import EdgeEngine
 from .models import MarketSnapshot, PortfolioState, QualificationState, Recommendation, RiskPolicy, Venue
 from .reporting import EdgeDashboard, EdgeReporter
@@ -16,7 +16,6 @@ __all__ = [
     "EdgeDashboard",
     "AdapterMarket",
     "MarketAdapter",
-    "JupiterAdapter",
     "KalshiAdapter",
     "PolymarketAdapter",
     "Catalyst",
