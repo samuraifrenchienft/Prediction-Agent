@@ -20,9 +20,13 @@ def test_probability_node_with_ai():
         AIAnalysis(source="test_source", quality=0.8, direction=1, confidence=0.9)
     ]
 
-    # Mock the AI's response
+    # Mock the AI's response — get_ai_response now returns a dict
     with patch("edge_agent.nodes.get_ai_response") as mock_get_ai_response:
-        mock_get_ai_response.return_value = "0.75"
+        mock_get_ai_response.return_value = {
+            "p_true": 0.75,
+            "bull_thesis": ["Strong momentum"],
+            "disconfirming_evidence": [],
+        }
 
         # Call the probability_node
         result = probability_node(snapshot, catalysts)

@@ -62,14 +62,20 @@ def test_system_prompt():
 
 def test_complex_prompt():
     """
-    Tests the AI's ability to handle a complex prompt.
+    Tests the AI's ability to handle a complex prompt about LLM benefits.
+    Assertions are topic-level (not word-exact) to avoid brittleness from
+    paraphrasing (e.g. "debugging" vs "bug detection").
     """
     prompt = "What are the top 3 benefits of using a large language model for a software engineer?"
     response = get_ai_response(prompt, task_type="complex")
     print(f"Complex prompt test response: {response}")
-    assert "code completion" in response.lower() or "code generation" in response.lower()
-    assert "debugging" in response.lower()
-    assert "documentation" in response.lower()
+    lower = response.lower()
+    # Topic 1: code assistance (completion, generation, suggestions, quality, etc.)
+    assert any(t in lower for t in ("code completion", "code generation", "coding", "code quality"))
+    # Topic 2: debugging / bug-related (model may phrase as debug, bug, fix, error)
+    assert any(t in lower for t in ("debug", "bug", "fix", "error"))
+    # Topic 3: documentation / communication
+    assert any(t in lower for t in ("documentation", "document", "comment"))
     print("test_complex_prompt passed!")
 
 def test_creative_prompt():

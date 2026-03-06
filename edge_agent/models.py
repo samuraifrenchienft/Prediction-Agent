@@ -26,6 +26,10 @@ class Catalyst:
     confidence: float
 
 
+# Backward-compat alias — adapters previously used AIAnalysis as the catalyst type
+AIAnalysis = Catalyst
+
+
 @dataclass
 class AIAnalysis:
     """Extended AI response model used by the Q&A chatbot."""
