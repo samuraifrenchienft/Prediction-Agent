@@ -4,7 +4,7 @@ from .adapters import AdapterMarket, MarketAdapter
 from .catalyst_engine import CatalystDetectionEngine
 from .models import Catalyst, MarketSnapshot
 
-# Map themes to relevant news search queries
+# Theme-aware news queries
 _THEME_QUERIES: dict[str, str] = {
     "politics": "US politics election government",
     "macro": "Federal Reserve interest rates inflation GDP",
@@ -22,20 +22,37 @@ class EdgeScanner:
         self.catalyst_engine = CatalystDetectionEngine()
         self._catalyst_cache: dict[str, list[Catalyst]] = {}
 
-    def collect(self) -> list[tuple[MarketSnapshot, list[Catalyst], str]]:
-        collected: list[tuple] = []
-
+    def fetch_markets(self) -> list[AdapterMarket]:
+        """Fetches markets from all adapters."""
+        all_markets: list[AdapterMarket] = []
         for adapter in self.adapters:
-            markets: list[AdapterMarket] = adapter.fetch_markets()
-            for market in markets:
+            try:
+                all_markets.extend(adapter.fetch_markets())
+            except Exception as e:
+                print(f"[{adapter.__class__.__name__}] error: {e}")
+        return all_markets
+
+    def collect(self, markets: list[AdapterMarket] | None = None, catalysts: list[Catalyst] | None = None) -> list[tuple]:
+        """
+        Processes markets into scan inputs.
+        If markets not provided, fetches from all adapters.
+        If catalysts not provided, fetches theme-aware news catalysts per market.
+        """
+        if markets is None:
+            markets = self.fetch_markets()
+
+        collected: list[tuple] = []
+        for market in markets:
+            if catalysts is not None:
+                all_catalysts = market.catalysts + catalysts
+            else:
+                # Theme-aware catalyst fetch with caching
                 theme = market.theme
-                # Cache catalysts per theme so we don't hit the news API repeatedly
                 if theme not in self._catalyst_cache:
                     query = _THEME_QUERIES.get(theme, _THEME_QUERIES["general"])
                     self._catalyst_cache[theme] = self.catalyst_engine.detect_catalysts(query)
-
-                # Merge adapter-provided catalysts with news-sourced catalysts
                 all_catalysts = market.catalysts + self._catalyst_cache[theme]
-                collected.append((market.snapshot, all_catalysts, theme))
+
+            collected.append((market.snapshot, all_catalysts, market.theme))
 
         return collected

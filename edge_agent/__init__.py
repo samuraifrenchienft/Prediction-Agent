@@ -1,6 +1,6 @@
 from .adapters import AdapterMarket, JupiterAdapter, KalshiAdapter, MarketAdapter, PolymarketAdapter
 from .engine import EdgeEngine
-from .models import Catalyst, MarketSnapshot, PortfolioState, QualificationState, Recommendation, RiskPolicy, Venue
+from .models import MarketSnapshot, PortfolioState, QualificationState, Recommendation, RiskPolicy, Venue
 from .reporting import EdgeDashboard, EdgeReporter
 from .repository import RecommendationRecord, RecommendationRepository
 from .scanner import EdgeScanner

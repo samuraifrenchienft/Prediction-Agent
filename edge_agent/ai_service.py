@@ -23,7 +23,6 @@ def _get_client() -> OpenAI:
     if groq_key:
         return OpenAI(base_url="https://api.groq.com/openai/v1", api_key=groq_key)
 
-    # Fallback: OpenRouter if Groq key not set
     openrouter_key = os.environ.get("OPEN_ROUTER_API_KEY")
     if openrouter_key:
         return OpenAI(base_url="https://openrouter.ai/api/v1", api_key=openrouter_key)

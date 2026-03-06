@@ -1,9 +1,15 @@
+import json
 import os
+from time import time
 
 import requests
 from dotenv import find_dotenv, load_dotenv
 
 load_dotenv(find_dotenv(usecwd=True) or find_dotenv())
+
+# File-based cache to avoid burning free API quota on repeated calls
+_CACHE_DIR = ".cache"
+os.makedirs(_CACHE_DIR, exist_ok=True)
 
 
 class NewsAPIClient:
@@ -24,11 +30,26 @@ class NewsAPIClient:
                 "(free at gnews.io — 100 req/day, no credit card needed)"
             )
 
-    def get_top_headlines(self, query: str, page_size: int = 10) -> list[dict]:
-        """Returns a list of article dicts with at least 'title' and 'source'."""
-        if self.gnews_key:
-            return self._fetch_gnews(query, page_size)
-        return self._fetch_newsapi(query, page_size)
+    def get_top_headlines(self, query: str, page_size: int = 10, ttl_seconds: int = 3600) -> list[dict]:
+        """Returns articles for a query, cached for ttl_seconds to save quota."""
+        cache_file = os.path.join(_CACHE_DIR, f"{query.replace(' ', '_')}_{page_size}.json")
+
+        if os.path.exists(cache_file):
+            with open(cache_file, "r") as f:
+                data = json.load(f)
+                if time() - data["timestamp"] < ttl_seconds:
+                    return data["articles"]
+
+        articles = (
+            self._fetch_gnews(query, page_size)
+            if self.gnews_key
+            else self._fetch_newsapi(query, page_size)
+        )
+
+        with open(cache_file, "w") as f:
+            json.dump({"timestamp": time(), "articles": articles}, f)
+
+        return articles
 
     def _fetch_gnews(self, query: str, max_results: int) -> list[dict]:
         params = {
@@ -40,7 +61,6 @@ class NewsAPIClient:
         response = requests.get("https://gnews.io/api/v4/search", params=params, timeout=10)
         response.raise_for_status()
         articles = response.json().get("articles", [])
-        # Normalise to the shape the rest of the code expects
         return [
             {
                 "title": a.get("title", ""),

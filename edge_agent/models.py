@@ -26,7 +26,18 @@ class Catalyst:
     confidence: float
 
 
-AIAnalysis = Catalyst
+@dataclass
+class AIAnalysis:
+    """Extended AI response model used by the Q&A chatbot."""
+    source: str | None = None
+    quality: float | None = None
+    direction: float | None = None
+    confidence: float | None = None
+    content: str | None = None
+    category: str | None = None
+    confidence_level: str | None = None
+    action_recommendation: str | None = None
+    entry_conditions: list[str] | None = None
 
 
 @dataclass
