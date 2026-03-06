@@ -19,7 +19,7 @@ from dotenv import find_dotenv, load_dotenv
 
 load_dotenv(find_dotenv(usecwd=True) or find_dotenv())
 
-KALSHI_BASE = "https://trading-api.kalshi.com/trade-api/v2"
+KALSHI_BASE = "https://api.elections.kalshi.com/trade-api/v2"
 
 _SESSION = requests.Session()
 _SESSION.headers.update({"User-Agent": "EdgeAgent/1.0"})
@@ -74,7 +74,12 @@ def _build_signed_headers(method: str, path: str) -> dict:
         timestamp_ms = str(int(time.time() * 1000))
         # Kalshi signing string: timestamp + method + path (no separators, no query string)
         msg = f"{timestamp_ms}{method.upper()}{path}"
-        signature = private_key.sign(msg.encode("utf-8"), padding.PKCS1v15(), hashes.SHA256())
+        # Kalshi requires RSA-PSS padding (NOT PKCS1v15)
+        signature = private_key.sign(
+            msg.encode("utf-8"),
+            padding.PSS(mgf=padding.MGF1(hashes.SHA256()), salt_length=padding.PSS.DIGEST_LENGTH),
+            hashes.SHA256(),
+        )
         sig_b64 = base64.b64encode(signature).decode("utf-8")
 
         return {
@@ -96,6 +101,10 @@ def is_authenticated() -> bool:
     return _load_private_key() is not None
 
 
+# High-volume series to query (covers crypto, macro, politics, sports)
+_DEFAULT_SERIES = ["KXBTC", "KXETH", "KXINFL", "KXFED", "KXGDP", "KXPRES", "KXHIGHNY", "KXNFL", "KXNBA"]
+
+
 def get_markets(
     limit: int = 20,
     status: str = "open",
@@ -104,31 +113,32 @@ def get_markets(
 ) -> list[dict]:
     """
     Fetch open markets from Kalshi, ordered by volume descending.
-    Uses RSA-SHA256 signed requests if KALSHI_ACCESS_KEY + KALSHI_PRIVATE_KEY_PATH are set.
+    Queries popular series by default to avoid zero-volume cross-category markets.
     """
-    params: dict = {"limit": limit, "status": status}
-    if series_ticker:
-        params["series_ticker"] = series_ticker
-
     path = "/trade-api/v2/markets"
     headers = _build_signed_headers("GET", path)
 
-    resp = _SESSION.get(f"{KALSHI_BASE}/markets", params=params, headers=headers, timeout=10)
-    resp.raise_for_status()
-    markets = resp.json().get("markets", [])
+    markets: list[dict] = []
+
+    series_list = [series_ticker] if series_ticker else _DEFAULT_SERIES
+    for series in series_list:
+        try:
+            params: dict = {"limit": min(limit, 20), "status": status, "series_ticker": series}
+            resp = _SESSION.get(f"{KALSHI_BASE}/markets", params=params, headers=headers, timeout=10)
+            if resp.ok:
+                markets.extend(resp.json().get("markets", []))
+        except Exception:
+            pass
 
     # Exclude multivariate cross-category markets (no standard binary pricing)
-    markets = [
-        m for m in markets
-        if not m.get("ticker", "").startswith("KXMVE")
-    ]
+    markets = [m for m in markets if not m.get("ticker", "").startswith("KXMVE")]
 
     # Sort by total volume descending; filter out zero-activity if requested
     markets.sort(key=lambda m: float(m.get("volume", 0) or 0), reverse=True)
     if min_volume > 0:
         markets = [m for m in markets if float(m.get("volume", 0) or 0) >= min_volume]
 
-    return markets
+    return markets[:limit]
 
 
 def get_portfolio_balance() -> dict | None:
