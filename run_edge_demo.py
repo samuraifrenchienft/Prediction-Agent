@@ -12,6 +12,7 @@ from edge_agent import (
 )
 from edge_agent.adapters import KalshiAdapter, PolymarketAdapter
 from edge_agent.ai_service import get_ai_response
+from edge_agent.memory import KnowledgeBase, SessionMemory
 
 # Lazy import of kalshi_api for targeted market lookups in Q&A
 _kalshi_api = importlib.import_module(".dat-ingestion.kalshi_api", "edge_agent")
@@ -60,7 +61,7 @@ def _fetch_relevant_markets(question: str) -> list[dict]:
             _series_cache[series] = (result, time.time())
             markets.extend(result)
         except Exception as e:
-            print(f"[MarketLookup] {series}: {e}")
+            print(f"  [MarketLookup] {series}: {e}")
 
     return markets[:8]
 
@@ -78,66 +79,111 @@ def _format_market_context(markets: list[dict]) -> str:
     return "\n".join(lines)
 
 
-def answer_question(question: str) -> bool:
+def answer_question(question: str, kb: KnowledgeBase, mem: SessionMemory) -> bool:
     """Answers a prediction market question. Returns True if user wants to exit."""
     if question.lower() in ("exit", "quit", "goodbye"):
-        print("\nGoodbye!")
+        print("\nGoodbye! Session saved.")
         return True
 
-    # Fetch live market data only if question is market-topic-specific
+    # 1. Fetch live market data only if the question is market-topic-specific
     live_markets = _fetch_relevant_markets(question)
     market_context = _format_market_context(live_markets)
-
     if live_markets:
+        tickers = [m.get("ticker", "") for m in live_markets]
         print(f"  [Edge] Pulled {len(live_markets)} live market(s) for context.")
 
+    # 2. Search knowledge base for relevant docs
+    kb_context = kb.get_context_for_question(question)
+    if kb_context:
+        print(f"  [Edge] Found relevant knowledge base context.")
+
+    # 3. Get today's session context (recent Q&A history + preferences)
+    session_context = mem.get_session_context(max_exchanges=4)
+
     system_prompt = (
-        "You are Edge, an expert prediction market analyst. "
-        "Answer concisely and connect every response to prediction markets. "
-        "When live market data is provided, reference specific odds and volumes in your answer. "
-        "For general prediction market concepts, give educational answers. "
-        "For specific market questions, give direct analysis with trading implications. "
-        "Assess confidence: Low / Medium / High. For Low or Medium, recommend HOLD. "
+        "You are Edge, an expert prediction market analyst and guide. "
+        "You have deep knowledge of Polymarket and Kalshi — their UIs, account setup, trading mechanics, and strategy. "
+        "Answer concisely but completely. "
+        "When live market data is provided, reference specific odds and volumes. "
+        "When knowledge base context is provided, use it to give accurate platform-specific guidance. "
+        "When session context is provided, use it to give continuity — reference earlier parts of the conversation when relevant. "
+        "Assess confidence: Low / Medium / High. Recommend HOLD for Low/Medium confidence trades. "
         "If the question is off-topic, politely redirect to prediction markets. "
         "Return JSON: {content, confidence_level, action_recommendation, entry_conditions}"
     )
 
-    prompt = question + market_context
+    # Build the full prompt: question + all context layers
+    prompt = question + kb_context + session_context + market_context
     ai_response = get_ai_response(prompt, task_type="creative", system_prompt=system_prompt)
 
+    answer_text = ""
     if ai_response and ai_response.get("content"):
-        print(f"\nEdge: {ai_response['content']}")
+        answer_text = ai_response["content"]
+        print(f"\nEdge: {answer_text}")
         if ai_response.get("confidence_level"):
             print(f"Confidence: {ai_response['confidence_level']}")
         if ai_response.get("action_recommendation"):
             print(f"Recommendation: {ai_response['action_recommendation']}")
         if ai_response.get("entry_conditions"):
             print("Entry conditions:")
-            for c in ai_response["entry_conditions"]:
-                print(f"  - {c}")
+            for cond in ai_response["entry_conditions"]:
+                print(f"  - {cond}")
     else:
         print("\nCouldn't generate a response. Check your AI API key.")
+
+    # 4. Save this exchange to session memory
+    if answer_text:
+        topics = [s[1][0] for s in _SERIES_MAP if any(kw in question.lower() for kw in s[0])]
+        tickers_discussed = [m.get("ticker", "") for m in live_markets] if live_markets else []
+        mem.add_exchange(question, answer_text, markets_discussed=tickers_discussed, topics=topics)
 
     return False
 
 
 def main() -> None:
+    # ── Initialize systems (no API calls made here) ──────────────────────────
     engine = EdgeEngine()
     service = EdgeService(engine=engine)
     reporter = EdgeReporter(service=service)
-    # Jupiter removed — no live API available
     scanner = EdgeScanner(adapters=[KalshiAdapter(), PolymarketAdapter()])
     portfolio = PortfolioState(
         bankroll_usd=10_000,
         daily_drawdown_pct=0.01,
         theme_exposure_pct={"sports": 0.08},
     )
+
+    # ── Load memory systems ──────────────────────────────────────────────────
+    kb = KnowledgeBase()
+    mem = SessionMemory()
+
     markets = []
     catalysts = []
 
-    print("\n=== Edge — Prediction Market Agent ===")
-    print("Live data: Kalshi + Polymarket | AI: OpenRouter free models\n")
+    # ── Startup greeting ─────────────────────────────────────────────────────
+    kb_stats = kb.stats()
+    mem_stats = mem.stats()
 
+    print("\n" + "═" * 52)
+    print("  Edge — Prediction Market Intelligence Agent")
+    print("═" * 52)
+    print("  Live data: Kalshi + Polymarket")
+    print("  AI: OpenRouter (free tier)")
+    print(f"  Knowledge base: {kb_stats['total_docs']} docs loaded")
+    print(f"  Session: {mem_stats['today_exchanges']} exchanges today")
+    print("─" * 52)
+    print("  Hey — I'm Edge. I track live prediction markets")
+    print("  across Kalshi and Polymarket, analyze odds, and")
+    print("  help you find edges before the market catches on.")
+    print("")
+    print("  Ask me anything: account setup, market odds,")
+    print("  strategy, or just what's moving right now.")
+    print("═" * 52 + "\n")
+
+    if mem_stats["today_exchanges"] > 0:
+        print(f"  Welcome back — continuing today's session "
+              f"({mem_stats['today_exchanges']} questions so far).\n")
+
+    # ── Main loop ─────────────────────────────────────────────────────────────
     while True:
         print("1. Run market scan")
         print("2. Ask Edge a question")
@@ -164,7 +210,9 @@ def main() -> None:
 
         elif choice == "2":
             question = input("Question: ").strip()
-            if answer_question(question):
+            if not question:
+                continue
+            if answer_question(question, kb, mem):
                 break
 
         elif choice == "3":
@@ -181,10 +229,13 @@ def main() -> None:
                 print("  No markets returned. Check API keys in .env")
 
         elif choice == "5":
-            print("Exiting.")
+            print("Exiting. Session saved.")
             break
         else:
             print("Invalid choice.")
+
+    kb.close()
+    mem.close()
 
 
 if __name__ == "__main__":
