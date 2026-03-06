@@ -1,37 +1,99 @@
 """
-Kalshi REST API client.
+Kalshi REST API client with RSA-SHA256 signing.
 
-Public markets endpoint: https://api.elections.kalshi.com/trade-api/v2/markets (no auth needed)
-Authenticated endpoints (portfolio, etc.) require RSA-SHA256 signing — Bearer token alone is not
-supported by Kalshi's trading API.
+Set in .env:
+  KALSHI_ACCESS_KEY=<your UUID access key>
+  KALSHI_PRIVATE_KEY_PATH=kalshi_private_key.pem  (path to PEM file)
 
 Docs: https://trading-api.readme.io/reference/getmarkets
 """
 
 from __future__ import annotations
 
+import base64
 import os
+import time
 
 import requests
 from dotenv import find_dotenv, load_dotenv
 
 load_dotenv(find_dotenv(usecwd=True) or find_dotenv())
 
-# Public endpoint (no auth required for market listing)
-KALSHI_PUBLIC_BASE = "https://api.elections.kalshi.com/trade-api/v2"
-# Authenticated endpoint (requires RSA-SHA256 signed requests, not just Bearer token)
 KALSHI_BASE = "https://trading-api.kalshi.com/trade-api/v2"
 
 _SESSION = requests.Session()
 _SESSION.headers.update({"User-Agent": "EdgeAgent/1.0"})
 
 
-def _get_auth_headers() -> dict:
-    """Returns Bearer auth header if KALSHI_ACCESS_KEY is set."""
+def _load_private_key():
+    """Load RSA private key from PEM file."""
+    try:
+        from cryptography.hazmat.primitives import serialization
+        from cryptography.hazmat.backends import default_backend
+
+        pem_path = os.environ.get("KALSHI_PRIVATE_KEY_PATH", "").strip()
+        if not pem_path:
+            return None
+
+        # Resolve relative to project root (walk up from cwd)
+        if not os.path.isabs(pem_path):
+            # Try cwd and parent dirs
+            search_dir = os.getcwd()
+            for _ in range(5):
+                candidate = os.path.join(search_dir, pem_path)
+                if os.path.exists(candidate):
+                    pem_path = candidate
+                    break
+                search_dir = os.path.dirname(search_dir)
+
+        if not os.path.exists(pem_path):
+            return None
+
+        with open(pem_path, "rb") as f:
+            return serialization.load_pem_private_key(f.read(), password=None, backend=default_backend())
+    except Exception as e:
+        print(f"[KalshiAPI] Could not load private key: {e}")
+        return None
+
+
+def _build_signed_headers(method: str, path: str) -> dict:
+    """Build RSA-SHA256 signed headers for Kalshi API requests."""
     access_key = os.environ.get("KALSHI_ACCESS_KEY", "").strip()
-    if access_key and access_key not in ("paste_your_access_key_here", "your_kalshi_access_key_here"):
-        return {"Authorization": f"Bearer {access_key}"}
-    return {}
+    placeholder_keys = ("paste_your_access_key_here", "your_kalshi_access_key_here", "")
+    if not access_key or access_key in placeholder_keys:
+        return {}
+
+    private_key = _load_private_key()
+    if private_key is None:
+        return {}
+
+    try:
+        from cryptography.hazmat.primitives import hashes
+        from cryptography.hazmat.primitives.asymmetric import padding
+
+        timestamp_ms = str(int(time.time() * 1000))
+        # Kalshi signing string: timestamp + method + path (no separators, no query string)
+        msg = f"{timestamp_ms}{method.upper()}{path}"
+        signature = private_key.sign(msg.encode("utf-8"), padding.PKCS1v15(), hashes.SHA256())
+        sig_b64 = base64.b64encode(signature).decode("utf-8")
+
+        return {
+            "KALSHI-ACCESS-KEY": access_key,
+            "KALSHI-ACCESS-TIMESTAMP": timestamp_ms,
+            "KALSHI-ACCESS-SIGNATURE": sig_b64,
+        }
+    except Exception as e:
+        print(f"[KalshiAPI] Signing error: {e}")
+        return {}
+
+
+def is_authenticated() -> bool:
+    """Returns True if both access key and private key are available."""
+    access_key = os.environ.get("KALSHI_ACCESS_KEY", "").strip()
+    placeholder_keys = ("paste_your_access_key_here", "your_kalshi_access_key_here", "")
+    if not access_key or access_key in placeholder_keys:
+        return False
+    return _load_private_key() is not None
 
 
 def get_markets(
@@ -42,22 +104,23 @@ def get_markets(
 ) -> list[dict]:
     """
     Fetch open markets from Kalshi, ordered by volume descending.
-    Automatically uses authentication if KALSHI_ACCESS_KEY + KALSHI_PRIVATE_KEY_PATH are set.
+    Uses RSA-SHA256 signed requests if KALSHI_ACCESS_KEY + KALSHI_PRIVATE_KEY_PATH are set.
     """
     params: dict = {"limit": limit, "status": status}
     if series_ticker:
         params["series_ticker"] = series_ticker
 
-    # Use public endpoint (no auth needed for market listing)
-    resp = _SESSION.get(f"{KALSHI_PUBLIC_BASE}/markets", params=params, timeout=10)
+    path = "/trade-api/v2/markets"
+    headers = _build_signed_headers("GET", path)
+
+    resp = _SESSION.get(f"{KALSHI_BASE}/markets", params=params, headers=headers, timeout=10)
     resp.raise_for_status()
     markets = resp.json().get("markets", [])
 
     # Exclude multivariate cross-category markets (no standard binary pricing)
     markets = [
         m for m in markets
-        if not m.get("ticker", "").startswith("KXMVECROSSCATEGORY")
-        and not m.get("ticker", "").startswith("KXMVESPORTS")
+        if not m.get("ticker", "").startswith("KXMVE")
     ]
 
     # Sort by total volume descending; filter out zero-activity if requested
@@ -69,13 +132,19 @@ def get_markets(
 
 
 def get_portfolio_balance() -> dict | None:
-    """Fetch account balance — requires RSA-SHA256 signed request (not supported in free mode)."""
-    print("[KalshiAPI] Portfolio requires RSA-SHA256 signing — not available without private key")
-    return None
-
-
-def is_authenticated() -> bool:
-    return bool(_get_auth_headers())
+    """Fetch account balance — requires RSA-SHA256 signed request."""
+    path = "/trade-api/v2/portfolio/balance"
+    headers = _build_signed_headers("GET", path)
+    if not headers:
+        print("[KalshiAPI] Set KALSHI_ACCESS_KEY + KALSHI_PRIVATE_KEY_PATH in .env")
+        return None
+    try:
+        resp = _SESSION.get(f"{KALSHI_BASE}/portfolio/balance", headers=headers, timeout=10)
+        resp.raise_for_status()
+        return resp.json()
+    except Exception as e:
+        print(f"[KalshiAPI] Portfolio fetch error: {e}")
+        return None
 
 
 # ── Parse helpers ─────────────────────────────────────────────────────────────

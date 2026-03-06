@@ -7,3 +7,4 @@ __pycache__/
 .env.local
 .env*.local
 .claude/
+kalshi_private_key.pem
