@@ -49,18 +49,22 @@ from telegram.ext import (
     filters,
 )
 
+import importlib
+
 from edge_agent import (
     EdgeEngine,
     EdgeScanner,
     EdgeService,
-    JupiterAdapter,
     KalshiAdapter,
     PolymarketAdapter,
     PortfolioState,
 )
-from edge_agent.ai_service import get_ai_chat_response
+from edge_agent.ai_service import get_ai_response
+from edge_agent.memory import KnowledgeBase, SessionMemory
 from edge_agent.game_tracker import TrackedGame
 from edge_agent.models import Recommendation
+
+_kalshi_api = importlib.import_module(".dat-ingestion.kalshi_api", "edge_agent")
 
 load_dotenv()
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
@@ -82,6 +86,8 @@ BANKROLL_USD       = float(os.environ.get("BANKROLL_USD", "10000"))
 _service: EdgeService | None = None
 _scanner: EdgeScanner | None = None
 _portfolio = PortfolioState(bankroll_usd=BANKROLL_USD)
+_kb = KnowledgeBase()
+_mem = SessionMemory()
 
 # Tracks already-alerted market keys to avoid duplicate alerts per scan cycle
 _alerted_keys: set[str] = set()
@@ -122,7 +128,6 @@ def _get_scanner() -> EdgeScanner:
         _scanner = EdgeScanner(adapters=[
             KalshiAdapter(),
             PolymarketAdapter(),
-            JupiterAdapter(),
         ])
     return _scanner
 
@@ -419,43 +424,71 @@ async def handle_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None
 
     await update.message.chat.send_action("typing")
 
-    # Build market context from recent scan results
+    # 1. Knowledge base context
+    kb_context = _kb.get_context_for_question(user_msg)
+
+    # 2. Session memory context
+    session_context = _mem.get_session_context(max_exchanges=4)
+
+    # 3. Live market context (on-demand, only for market questions)
+    _SERIES_MAP = [
+        (["fed", "fomc", "rate"], "KXFED"),
+        (["inflation", "cpi"], "KXINFL"),
+        (["bitcoin", "btc"], "KXBTC"),
+        (["nba", "basketball"], "KXNBA"),
+        (["nfl", "football"], "KXNFL"),
+        (["election", "president", "trump"], "KXPRES"),
+    ]
+    q = user_msg.lower()
+    market_context = ""
+    for keywords, series in _SERIES_MAP:
+        if any(kw in q for kw in keywords):
+            try:
+                markets = _kalshi_api.get_markets(limit=3, series_ticker=series, min_volume=1)
+                if markets:
+                    lines = [f"\nLive {series} markets:"]
+                    for m in markets:
+                        prob = _kalshi_api.parse_market_prob(m)
+                        vol = _kalshi_api.parse_volume(m)
+                        lines.append(f"- {m.get('title', m.get('ticker'))}: {prob:.0%} yes | ${vol:,.0f} vol")
+                    market_context = "\n".join(lines)
+            except Exception:
+                pass
+            break
+
+    # 4. Recent scan opportunities as context
     svc = _get_service()
-    top = svc.engine.top_opportunities(limit=5)
-    context_lines = []
+    top = svc.engine.top_opportunities(limit=3)
+    scan_context = ""
     if top:
-        context_lines.append("Recent top opportunities:")
+        lines = ["\nRecent scan opportunities:"]
         for r in top:
-            context_lines.append(
-                f"- [{r.metadata.get('signal','?')}] {r.metadata.get('question', r.market_id)[:60]} "
-                f"| market={r.market_prob:.0%} agent={r.agent_prob:.0%} ev={r.ev_net:+.1%}"
+            lines.append(
+                f"- {r.metadata.get('question', r.market_id)[:60]} "
+                f"| market={r.market_prob:.0%} edge={r.edge:+.0%}"
             )
-    games = svc.engine.game_tracker.active_games()
-    if games:
-        context_lines.append(f"\nTracked injury games ({len(games)}):")
-        for g in games:
-            context_lines.append(
-                f"- [{g.phase.value}] {g.question[:50]} | pre={g.reference_prob:.0%} now={g.last_market_prob:.0%}"
-            )
+        scan_context = "\n".join(lines)
 
-    context = "\n".join(context_lines)
-
-    # Maintain per-user conversation history (last 10 turns)
-    history = _chat_history.get(user_id, [])
-    reply = get_ai_chat_response(
-        user_message=user_msg,
-        context=context,
-        conversation_history=history,
+    system_prompt = (
+        "You are Edge, an expert prediction market analyst on Telegram. "
+        "Be concise — Telegram users want short, direct answers. "
+        "Reference live market data and knowledge base context when provided. "
+        "Use session context to remember what was discussed earlier. "
+        "If asked about account setup or platform UI, give step-by-step guidance. "
+        "Return plain text (no JSON). Keep replies under 300 words."
     )
 
-    # Update history
-    history.append({"role": "user", "content": user_msg})
-    history.append({"role": "assistant", "content": reply})
-    _chat_history[user_id] = history[-20:]  # keep last 10 turns (20 messages)
+    prompt = user_msg + kb_context + session_context + market_context + scan_context
+    ai_response = get_ai_response(prompt, task_type="creative", system_prompt=system_prompt)
+    reply = (ai_response or {}).get("content", "Sorry, I couldn't generate a response right now.")
+
+    # Save to session memory
+    if reply:
+        _mem.add_exchange(user_msg, reply)
 
     # Telegram max message length is 4096 chars
     if len(reply) > 4000:
-        reply = reply[:4000] + "\n\n_(truncated)_"
+        reply = reply[:4000] + "\n\n(truncated)"
 
     await update.message.reply_text(reply)
 
