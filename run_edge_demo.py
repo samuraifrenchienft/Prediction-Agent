@@ -4,11 +4,10 @@ from edge_agent import (
     EdgeEngine,
     EdgeReporter,
     EdgeScanner,
-    KalshiAdapter,
-    JupiterAdapter,
-    PolymarketAdapter,
+    EdgeService,
     PortfolioState,
 )
+from edge_agent.adapters import JupiterAdapter, KalshiAdapter, PolymarketAdapter
 from edge_agent.ai_service import get_ai_response
 
 def answer_question(question: str) -> bool:
