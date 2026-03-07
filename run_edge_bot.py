@@ -21,6 +21,7 @@ Setup (one-time):
 
 Commands in Telegram:
   /scan       — run a full market scan immediately
+  /injuries   — show cached injury report summary
   /tracking   — show the injury game tracking list
   /top        — show top 3 opportunities from last scan
   /status     — show last scan summary
@@ -33,9 +34,11 @@ from __future__ import annotations
 
 import asyncio
 import html
+import json
 import logging
 import os
 from datetime import datetime, timezone
+from pathlib import Path
 
 from dotenv import load_dotenv
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
@@ -64,7 +67,9 @@ from edge_agent.memory import KnowledgeBase, SessionMemory
 from edge_agent.game_tracker import TrackedGame
 from edge_agent.models import Recommendation
 
-_kalshi_api = importlib.import_module(".dat-ingestion.kalshi_api", "edge_agent")
+_kalshi_api   = importlib.import_module(".dat-ingestion.kalshi_api", "edge_agent")
+_injury_mod   = importlib.import_module(".dat-ingestion.injury_api", "edge_agent")
+_InjuryClient = _injury_mod.InjuryAPIClient
 
 load_dotenv()
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
@@ -76,8 +81,35 @@ log = logging.getLogger("edge_bot")
 
 BOT_TOKEN          = os.environ.get("TELEGRAM_BOT_TOKEN", "")
 CHAT_ID            = os.environ.get("TELEGRAM_CHAT_ID", "")
-SCAN_INTERVAL_MIN  = int(os.environ.get("SCAN_INTERVAL_MINUTES", "15"))
-BANKROLL_USD       = float(os.environ.get("BANKROLL_USD", "10000"))
+SCAN_INTERVAL_MIN    = int(os.environ.get("SCAN_INTERVAL_MINUTES", "180"))  # default 3 hours
+INJURY_REFRESH_MIN   = int(os.environ.get("INJURY_REFRESH_MINUTES", "240"))  # default 4 hours
+BANKROLL_USD         = float(os.environ.get("BANKROLL_USD", "10000"))
+
+# ---------------------------------------------------------------------------
+# Approved signals — persisted across restarts
+# ---------------------------------------------------------------------------
+
+_APPROVALS_FILE = Path("edge_agent/memory/data/approvals.json")
+
+
+def _load_approved_signals() -> set[str]:
+    """Load persisted approved signal types from disk."""
+    try:
+        if _APPROVALS_FILE.exists():
+            return set(json.loads(_APPROVALS_FILE.read_text()))
+    except Exception:
+        pass
+    return set()
+
+
+def _save_approved_signals(signals: set[str]) -> None:
+    """Persist approved signal types to disk."""
+    try:
+        _APPROVALS_FILE.parent.mkdir(parents=True, exist_ok=True)
+        _APPROVALS_FILE.write_text(json.dumps(sorted(signals)))
+    except Exception as e:
+        log.warning("Could not save approved signals: %s", e)
+
 
 # ---------------------------------------------------------------------------
 # Global state (shared across handlers)
@@ -91,6 +123,10 @@ _mem = SessionMemory()
 
 # Tracks already-alerted market keys to avoid duplicate alerts per scan cycle
 _alerted_keys: set[str] = set()
+
+# Approved signal types — only markets matching these signals will trigger alerts.
+# Empty set means "alert on all" (bootstrapping mode until user approves something).
+_approved_signals: set[str] = _load_approved_signals()
 
 # Per-user conversation history for multi-turn AI chat {user_id: [messages]}
 _chat_history: dict[int, list[dict]] = {}
@@ -141,7 +177,6 @@ _SIGNAL_EMOJI = {
     "PRE_GAME_INJURY_LAG":      "🏥",
     "NEWS_LAG":                 "📰",
     "FAVORITE_LONGSHOT_BIAS":   "📈",
-    "CROSS_MARKET_CORRELATION": "🔗",
     "NONE":                     "📊",
 }
 
@@ -245,6 +280,13 @@ async def _run_scan(bot, notify: bool = True) -> str:
             key = f"{rec.venue.value}:{rec.market_id}"
             if key in _alerted_keys:
                 continue
+
+            # Filter by approved signals — if user has approved any signals,
+            # only alert on those. Empty set = show all (bootstrapping mode).
+            signal = rec.metadata.get("signal", "NONE")
+            if _approved_signals and signal not in _approved_signals:
+                continue
+
             _alerted_keys.add(key)
             new_alerts += 1
 
@@ -305,14 +347,25 @@ async def _run_scan(bot, notify: bool = True) -> str:
 # ---------------------------------------------------------------------------
 
 async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    approved_count = len(_approved_signals)
+    filter_note = (
+        f"🔒 Alerting on {approved_count} approved signal type(s)."
+        if approved_count
+        else "🔓 Alerting on all qualified signals (approve an alert to filter)."
+    )
     await update.message.reply_text(
         "👋 <b>EDGE Agent online.</b>\n\n"
         "<b>Commands:</b>\n"
         "/scan — run market scan now\n"
+        "/injuries — cached injury report\n"
         "/tracking — injury game tracking list\n"
         "/top — top 3 opportunities\n"
         "/status — last scan summary\n"
+        "/approvals — manage alert signal filter\n"
         "/help — this message\n\n"
+        f"{filter_note}\n"
+        f"⏱ Market scan every {SCAN_INTERVAL_MIN // 60}h | "
+        f"Injury refresh every {INJURY_REFRESH_MIN // 60}h.\n\n"
         "💬 Send any message to chat with EDGE about markets.",
         parse_mode=ParseMode.HTML,
     )
@@ -369,6 +422,39 @@ async def cmd_status(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     )
 
 
+async def cmd_approvals(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    """Show (and optionally clear) the approved signal filter list."""
+    arg = (update.message.text or "").strip().lower()
+
+    if "clear" in arg:
+        _approved_signals.clear()
+        _save_approved_signals(_approved_signals)
+        await update.message.reply_text(
+            "🔓 Approval filter cleared — bot will alert on <b>all</b> qualified signals again.",
+            parse_mode=ParseMode.HTML,
+        )
+        return
+
+    if not _approved_signals:
+        await update.message.reply_text(
+            "📋 <b>No approved signals yet.</b>\n\n"
+            "The bot is in <i>alert-all</i> mode.\n"
+            "When you click <b>✅ Approve</b> on an alert, its signal type is added here "
+            "and future alerts will only fire for those types.\n\n"
+            "Send <code>/approvals clear</code> to reset back to alert-all.",
+            parse_mode=ParseMode.HTML,
+        )
+        return
+
+    lines = [f"<b>Approved signal types</b> ({len(_approved_signals)}):\n"]
+    for sig in sorted(_approved_signals):
+        emoji = _SIGNAL_EMOJI.get(sig, "📊")
+        lines.append(f"{emoji} <code>{_e(sig)}</code>")
+    lines.append("\nOnly markets matching these signals will trigger alerts.")
+    lines.append("Send <code>/approvals clear</code> to reset to alert-all mode.")
+    await update.message.reply_text("\n".join(lines), parse_mode=ParseMode.HTML)
+
+
 # ---------------------------------------------------------------------------
 # Inline keyboard callbacks (Approve / Skip / Details)
 # ---------------------------------------------------------------------------
@@ -382,10 +468,21 @@ async def handle_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> Non
         slot = data[2:]
         rec = _rec_store.get(slot)
         label = rec.market_id if rec else slot
+
+        # Save the approved signal type so future scans filter to these only
+        sig_added = ""
+        if rec:
+            sig = rec.metadata.get("signal", "NONE")
+            if sig and sig != "NONE" and sig not in _approved_signals:
+                _approved_signals.add(sig)
+                _save_approved_signals(_approved_signals)
+                sig_added = f"\n📌 Signal type <code>{_e(sig)}</code> added to approved list."
+
         await query.edit_message_reply_markup(reply_markup=None)
         await query.message.reply_text(
             f"✅ <b>Approved:</b> <code>{_e(label)}</code>\n"
-            f"<i>Proposal recorded. No live trade placed — this is a proposal-only system.</i>",
+            f"<i>Proposal recorded. No live trade placed — this is a proposal-only system.</i>"
+            f"{sig_added}",
             parse_mode=ParseMode.HTML,
         )
 
@@ -494,6 +591,67 @@ async def handle_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None
 
 
 # ---------------------------------------------------------------------------
+# /injuries command
+# ---------------------------------------------------------------------------
+
+async def cmd_injuries(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    """Show cached injury report summary from the SQLite store."""
+    try:
+        from edge_agent.memory.injury_cache import InjuryCache
+        cache = InjuryCache()
+        stats = cache.stats()
+        if not stats:
+            await update.message.reply_text(
+                "⚠️ No injury data cached yet.\n"
+                f"The refresh job runs every {INJURY_REFRESH_MIN // 60}h automatically. "
+                "You can trigger a manual /scan to pre-warm the cache."
+            )
+            return
+
+        lines = ["<b>Injury Cache</b>\n"]
+        for sport, info in sorted(stats.items()):
+            lines.append(
+                f"🏥 <b>{_e(sport)}</b>: {info['count']} injured players\n"
+                f"   Fetched: {_e(info['last_fetch'])} | Expires: {_e(info['expires'])}"
+            )
+        lines.append(
+            f"\n<i>Auto-refresh every {INJURY_REFRESH_MIN // 60}h. "
+            "Records expire after 24h.</i>"
+        )
+        await update.message.reply_text("\n".join(lines), parse_mode=ParseMode.HTML)
+
+    except Exception as exc:
+        await update.message.reply_text(
+            f"⚠️ Injury cache error: {_e(str(exc))}", parse_mode=ParseMode.HTML
+        )
+
+
+# ---------------------------------------------------------------------------
+# Background injury refresh job
+# ---------------------------------------------------------------------------
+
+async def injury_refresh_job(ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    """
+    Fetches fresh injury data for NBA and NFL from ESPN + NBA official PDF,
+    stores results in SQLite. The ONLY place that makes live HTTP calls to
+    injury APIs — market scans read from the DB instead.
+    """
+    log.info("Injury refresh triggered.")
+    client = _InjuryClient()
+    results = {}
+    for sport in ("nba", "nfl"):
+        try:
+            count = client.fetch_and_store(sport)
+            results[sport.upper()] = count
+        except Exception as exc:
+            log.warning("Injury refresh %s failed: %s", sport.upper(), exc)
+            results[sport.upper()] = f"error: {exc}"
+
+    summary = " | ".join(f"{s}: {v}" for s, v in results.items())
+    log.info("Injury refresh complete — %s", summary)
+
+
+# ---------------------------------------------------------------------------
 # Background scan job
 # ---------------------------------------------------------------------------
 
@@ -522,7 +680,11 @@ def main() -> None:
             "See the setup instructions at the top of this file."
         )
 
-    log.info("Starting EDGE Telegram bot (scan every %d min)...", SCAN_INTERVAL_MIN)
+    log.info(
+        "Starting EDGE Telegram bot (scan every %d min, injury refresh every %d min)...",
+        SCAN_INTERVAL_MIN,
+        INJURY_REFRESH_MIN,
+    )
 
     app = (
         Application.builder()
@@ -531,12 +693,14 @@ def main() -> None:
     )
 
     # Command handlers
-    app.add_handler(CommandHandler("start",    cmd_start))
-    app.add_handler(CommandHandler("help",     cmd_help))
-    app.add_handler(CommandHandler("scan",     cmd_scan))
-    app.add_handler(CommandHandler("tracking", cmd_tracking))
-    app.add_handler(CommandHandler("top",      cmd_top))
-    app.add_handler(CommandHandler("status",   cmd_status))
+    app.add_handler(CommandHandler("start",     cmd_start))
+    app.add_handler(CommandHandler("help",      cmd_help))
+    app.add_handler(CommandHandler("scan",      cmd_scan))
+    app.add_handler(CommandHandler("injuries",  cmd_injuries))
+    app.add_handler(CommandHandler("tracking",  cmd_tracking))
+    app.add_handler(CommandHandler("top",       cmd_top))
+    app.add_handler(CommandHandler("status",    cmd_status))
+    app.add_handler(CommandHandler("approvals", cmd_approvals))
 
     # Inline keyboard
     app.add_handler(CallbackQueryHandler(handle_callback))
@@ -544,11 +708,19 @@ def main() -> None:
     # Free-form AI chat (must come last)
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
-    # Background scan loop
+    # Injury refresh job — runs every INJURY_REFRESH_MIN, first run at 60s after startup
+    # This is the ONLY code path that calls ESPN / NBA CDN injury APIs
+    app.job_queue.run_repeating(
+        injury_refresh_job,
+        interval=INJURY_REFRESH_MIN * 60,
+        first=60,  # warm the injury cache 60s after startup
+    )
+
+    # Background market scan loop — reads from injury cache, no live injury API calls
     app.job_queue.run_repeating(
         scan_job,
         interval=SCAN_INTERVAL_MIN * 60,
-        first=30,  # first scan 30 seconds after startup
+        first=90,  # first scan after injury cache is warm
     )
 
     log.info("Bot running. Press Ctrl+C to stop.")

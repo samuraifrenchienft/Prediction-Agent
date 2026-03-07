@@ -1,7 +1,7 @@
 from datetime import datetime, timezone
 
 from edge_agent import (
-    AIAnalysis,
+    Catalyst,
     EdgeEngine,
     MarketSnapshot,
     PortfolioState,
@@ -10,22 +10,35 @@ from edge_agent import (
 )
 
 
+def _cat(direction: float = 0.05, quality: float = 0.9, confidence: float = 0.9) -> list[Catalyst]:
+    return [Catalyst(source="official", quality=quality, direction=direction, confidence=confidence)]
+
+
+def _snap(
+    market_id: str = "m1",
+    venue: Venue = Venue.KALSHI,
+    prob: float = 0.40,
+    spread: float = 100,
+    depth: float = 10000,
+    ttr: float = 48,
+    ambiguity: float = 0.0,
+) -> MarketSnapshot:
+    return MarketSnapshot(
+        market_id=market_id,
+        venue=venue,
+        market_prob=prob,
+        spread_bps=spread,
+        depth_usd=depth,
+        volume_24h_usd=50000,
+        time_to_resolution_hours=ttr,
+        updated_at=datetime.now(timezone.utc),
+        ambiguity_score=ambiguity,
+    )
+
+
 def test_qualified_market_emits_buy_yes() -> None:
     engine = EdgeEngine()
-    snapshot = MarketSnapshot(
-        market_id="m1",
-        venue=Venue.JUPITER_PREDICTION,
-        market_prob=0.40,
-        spread_bps=100,
-        depth_usd=10000,
-        volume_24h_usd=50000,
-        time_to_resolution_hours=48,
-        updated_at=datetime.now(timezone.utc),
-    )
-    analyses = [AIAnalysis(source="official", quality=0.9, direction=0.05, confidence=0.9)]
-    portfolio = PortfolioState(bankroll_usd=10000)
-
-    rec = engine.evaluate_market(snapshot, analyses, portfolio, theme="sports")
+    rec = engine.evaluate_market(_snap(), _cat(), PortfolioState(bankroll_usd=10000), theme="sports")
 
     assert rec.qualification_state == QualificationState.QUALIFIED
     assert rec.action == "BUY_YES"
@@ -34,20 +47,12 @@ def test_qualified_market_emits_buy_yes() -> None:
 
 def test_low_depth_moves_to_watchlist() -> None:
     engine = EdgeEngine()
-    snapshot = MarketSnapshot(
-        market_id="m2",
-        venue=Venue.POLYMARKET,
-        market_prob=0.40,
-        spread_bps=180,
-        depth_usd=200,
-        volume_24h_usd=2000,
-        time_to_resolution_hours=24,
-        updated_at=datetime.now(timezone.utc),
+    rec = engine.evaluate_market(
+        _snap(market_id="m2", venue=Venue.POLYMARKET, depth=200, spread=180, ttr=24),
+        _cat(direction=0.08),
+        PortfolioState(bankroll_usd=10000),
+        theme="politics",
     )
-    analyses = [AIAnalysis(source="official", quality=0.8, direction=0.08, confidence=0.8)]
-    portfolio = PortfolioState(bankroll_usd=10000)
-
-    rec = engine.evaluate_market(snapshot, analyses, portfolio, theme="politics")
 
     assert rec.qualification_state == QualificationState.WATCHLIST
     assert rec.action == "HOLD"
@@ -57,54 +62,28 @@ def test_low_depth_moves_to_watchlist() -> None:
 
 def test_ambiguity_rejects_market() -> None:
     engine = EdgeEngine()
-    snapshot = MarketSnapshot(
-        market_id="m3",
-        venue=Venue.KALSHI,
-        market_prob=0.52,
-        spread_bps=100,
-        depth_usd=10000,
-        volume_24h_usd=50000,
-        time_to_resolution_hours=48,
-        updated_at=datetime.now(timezone.utc),
-        ambiguity_score=0.9,
+    rec = engine.evaluate_market(
+        _snap(market_id="m3", ambiguity=0.9),
+        _cat(direction=0.03),
+        PortfolioState(bankroll_usd=10000),
+        theme="macro",
     )
-    analyses = [AIAnalysis(source="official", quality=0.9, direction=0.03, confidence=0.9)]
-    portfolio = PortfolioState(bankroll_usd=10000)
-
-    rec = engine.evaluate_market(snapshot, analyses, portfolio, theme="macro")
 
     assert rec.qualification_state == QualificationState.REJECTED
     assert "AMBIGUITY_RISK" in rec.reject_reason_codes
     assert not engine.watchlist.list_entries()
 
 
-def test_jupiter_fee_is_higher_than_kalshi_fee() -> None:
+def test_polymarket_fee_is_higher_than_kalshi_fee() -> None:
+    """Polymarket charges 0.45% vs Kalshi's 0.30%."""
     engine = EdgeEngine()
-    base_kwargs = dict(
-        market_prob=0.40,
-        spread_bps=80,
-        depth_usd=12000,
-        volume_24h_usd=50000,
-        time_to_resolution_hours=48,
-        updated_at=datetime.now(timezone.utc),
-    )
-    analyses = [AIAnalysis(source="official", quality=0.9, direction=0.05, confidence=0.9)]
     portfolio = PortfolioState(bankroll_usd=10000)
+    base = dict(prob=0.40, spread=80, depth=12000, ttr=48)
 
-    jupiter = engine.evaluate_market(
-        MarketSnapshot(market_id="j", venue=Venue.JUPITER_PREDICTION, **base_kwargs),
-        analyses,
-        portfolio,
-        theme="sports",
-    )
-    kalshi = engine.evaluate_market(
-        MarketSnapshot(market_id="k", venue=Venue.KALSHI, **base_kwargs),
-        analyses,
-        portfolio,
-        theme="sports",
-    )
+    poly = engine.evaluate_market(_snap(market_id="p", venue=Venue.POLYMARKET, **base), _cat(), portfolio, theme="sports")
+    kalshi = engine.evaluate_market(_snap(market_id="k", venue=Venue.KALSHI, **base), _cat(), portfolio, theme="sports")
 
-    assert jupiter.fees > kalshi.fees
+    assert poly.fees > kalshi.fees
 
 
 def test_batch_and_repository_top_opportunities() -> None:
@@ -112,34 +91,8 @@ def test_batch_and_repository_top_opportunities() -> None:
     portfolio = PortfolioState(bankroll_usd=10000)
 
     batch = [
-        (
-            MarketSnapshot(
-                market_id="a",
-                venue=Venue.JUPITER_PREDICTION,
-                market_prob=0.40,
-                spread_bps=100,
-                depth_usd=10000,
-                volume_24h_usd=50000,
-                time_to_resolution_hours=48,
-                updated_at=datetime.now(timezone.utc),
-            ),
-            [AIAnalysis(source="official", quality=0.9, direction=0.06, confidence=0.9)],
-            "sports",
-        ),
-        (
-            MarketSnapshot(
-                market_id="b",
-                venue=Venue.KALSHI,
-                market_prob=0.50,
-                spread_bps=90,
-                depth_usd=12000,
-                volume_24h_usd=90000,
-                time_to_resolution_hours=48,
-                updated_at=datetime.now(timezone.utc),
-            ),
-            [AIAnalysis(source="official", quality=0.9, direction=0.04, confidence=0.9)],
-            "macro",
-        ),
+        (_snap(market_id="a", venue=Venue.KALSHI), _cat(direction=0.06), "sports"),
+        (_snap(market_id="b", venue=Venue.POLYMARKET), _cat(direction=0.04), "macro"),
     ]
 
     recommendations = engine.evaluate_batch(batch, portfolio=portfolio)

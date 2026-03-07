@@ -56,6 +56,7 @@ class MarketSnapshot:
     updated_at: datetime
     ambiguity_score: float = 0.0
     volatility_entropy_score: float = 0.0
+    question: str | None = None   # human-readable market title; set by adapters
 
 
 @dataclass

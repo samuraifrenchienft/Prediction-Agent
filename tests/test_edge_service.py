@@ -1,6 +1,6 @@
 from datetime import datetime, timezone
 
-from edge_agent import AIAnalysis, EdgeReporter, EdgeService, MarketSnapshot, PortfolioState, QualificationState, Venue
+from edge_agent import Catalyst, EdgeReporter, EdgeService, MarketSnapshot, PortfolioState, QualificationState, Venue
 
 
 def _input(market_id: str, venue: Venue, prob: float, depth: float, spread: float, direction: float):
@@ -15,7 +15,7 @@ def _input(market_id: str, venue: Venue, prob: float, depth: float, spread: floa
             time_to_resolution_hours=48,
             updated_at=datetime.now(timezone.utc),
         ),
-        [AIAnalysis(source="official", quality=0.9, direction=direction, confidence=0.9)],
+        [Catalyst(source="official", quality=0.9, direction=direction, confidence=0.9)],
         "sports",
     )
 
@@ -25,7 +25,7 @@ def test_service_run_scan_returns_summary_and_watchlist() -> None:
     portfolio = PortfolioState(bankroll_usd=10000)
 
     inputs = [
-        _input("good", Venue.JUPITER_PREDICTION, 0.40, 12000, 80, 0.06),
+        _input("good", Venue.KALSHI, 0.40, 12000, 80, 0.06),
         _input("thin", Venue.POLYMARKET, 0.40, 200, 150, 0.08),
     ]
 
@@ -35,7 +35,7 @@ def test_service_run_scan_returns_summary_and_watchlist() -> None:
     assert summary.total_markets == 2
     assert summary.qualified >= 1
     assert summary.watchlist >= 1
-    assert summary.venue_counts.get(Venue.JUPITER_PREDICTION.value, 0) >= 1
+    assert summary.venue_counts.get(Venue.KALSHI.value, 0) >= 1
 
     watch = service.list_watchlist()
     assert len(watch) >= 1
@@ -57,7 +57,7 @@ def test_reporter_builds_dashboard_payload() -> None:
     service = EdgeService()
     reporter = EdgeReporter(service=service)
     portfolio = PortfolioState(bankroll_usd=10000)
-    service.run_scan(inputs=[_input("good", Venue.JUPITER_PREDICTION, 0.40, 12000, 80, 0.06)], portfolio=portfolio)
+    service.run_scan(inputs=[_input("good", Venue.KALSHI, 0.40, 12000, 80, 0.06)], portfolio=portfolio)
 
     dashboard = reporter.build_dashboard(top_n=1)
 

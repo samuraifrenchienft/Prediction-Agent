@@ -5,7 +5,6 @@ from datetime import datetime, timezone
 from enum import Enum
 
 from .models import (
-    AIAnalysis,
     Catalyst,
     MarketSnapshot,
     PortfolioState,
@@ -18,11 +17,10 @@ from .models import (
 
 class SignalType(str, Enum):
     INJURY_MOMENTUM_REVERSAL = "INJURY_MOMENTUM_REVERSAL"
-    PRE_GAME_INJURY_LAG = "PRE_GAME_INJURY_LAG"
-    NEWS_LAG = "NEWS_LAG"
-    FAVORITE_LONGSHOT_BIAS = "FAVORITE_LONGSHOT_BIAS"
-    CROSS_MARKET_CORRELATION = "CROSS_MARKET_CORRELATION"
-    NONE = "NONE"
+    PRE_GAME_INJURY_LAG      = "PRE_GAME_INJURY_LAG"
+    NEWS_LAG                 = "NEWS_LAG"
+    FAVORITE_LONGSHOT_BIAS   = "FAVORITE_LONGSHOT_BIAS"
+    NONE                     = "NONE"
 
 
 @dataclass
@@ -32,6 +30,7 @@ class ProbabilityOutput:
     uncertainty_band: tuple[float, float]
     thesis: list[str]
     disconfirming_evidence: list[str]
+    signal: SignalType = SignalType.NONE  # set by probability_node
 
 
 @dataclass
@@ -46,70 +45,140 @@ class EvOutput:
 
 
 def _base_fee_for_venue(venue: Venue) -> float:
-    if venue == Venue.JUPITER_PREDICTION:
-        return 0.005
     if venue == Venue.POLYMARKET:
         return 0.0045
-    return 0.003
+    return 0.003  # Kalshi and others
 
 
-from .ai_service import get_ai_response
+# ---------------------------------------------------------------------------
+# Signal keywords for PRE_GAME_INJURY_LAG detection
+# ---------------------------------------------------------------------------
 
-def probability_node(snapshot: MarketSnapshot, catalysts: list[AIAnalysis]) -> ProbabilityOutput:
-    """Analyzes market data and catalysts to predict the probability of a market resolving to 'yes'.
+_INJURY_KEYWORDS = {
+    "injur", "hurt", "ruled out", "scratch", "doubtful", "questionable",
+    "dnp", "out:", "will not play", "illness", "suspension", "ankle",
+    "knee", "hamstring", "concussion", "did not practice",
+}
 
-    This function now uses an AI model to get a more sophisticated probability assessment.
+
+def classify_signal(
+    snapshot: MarketSnapshot,
+    catalysts: list[Catalyst],
+    p_true: float,
+) -> SignalType:
     """
+    Rule-based signal classifier — deterministic, zero AI calls.
 
-    system_prompt = (
-        "You are a world-class prediction market analyst. Your task is to analyze market data and catalysts "
-        "and return your analysis as a structured JSON object. The JSON object should conform to the following schema: "
-        '{"p_true": float, "bull_thesis": list[str], "key_catalysts": list[str], "disconfirming_evidence": list[str], "market_positioning": str}'
+    Priority order:
+    1. PRE_GAME_INJURY_LAG  — confirmed injury catalyst from InjuryAPIClient
+                              (source starts with "INJURY:") with status-weighted TTR
+    2. NEWS_LAG             — high-quality news catalyst pushing prob ≥5.5pp off market
+    3. FAVORITE_LONGSHOT_BIAS — extreme market probability in a liquid market
+    4. NONE
+
+    Strategy notes:
+    • PRE_GAME: TTR window varies by severity — "Out"/"Suspension" → 36h,
+      "Questionable"/"Day-To-Day" → 20h.  This avoids stale injury flags
+      that won't resolve before the market closes.
+    • NEWS_LAG: threshold is 5.5pp edge, same as before, but now capped at
+      catalysts with quality > 0.60 to reduce noise.
+    • FAVORITE_LONGSHOT_BIAS: now requires depth_usd > 2000 to avoid false
+      positives in illiquid micro-markets where extreme probs are normal.
+    """
+    ttr = snapshot.time_to_resolution_hours
+
+    # 1. PRE_GAME_INJURY_LAG
+    # InjuryAPIClient injects catalysts with source="INJURY:..." — more reliable
+    # than scanning keywords in the market question.
+    injury_catalysts = [c for c in catalysts if c.source.startswith("INJURY:")]
+    if injury_catalysts:
+        for c in injury_catalysts:
+            if abs(c.direction) <= 0.45 or c.confidence <= 0.50:
+                continue
+            # Use shorter TTR window for less severe statuses to avoid stale signals
+            # Out/Suspension (dir ≤ -0.80): allow up to 36h
+            # Doubtful (dir ≤ -0.65): allow up to 28h
+            # Questionable/Day-To-Day: allow up to 20h
+            if c.direction <= -0.80:
+                ttr_limit = 36
+            elif c.direction <= -0.65:
+                ttr_limit = 28
+            else:
+                ttr_limit = 20
+            if ttr < ttr_limit:
+                return SignalType.PRE_GAME_INJURY_LAG
+
+    # Fallback keyword check for markets where injury client missed coverage
+    question_lower = (snapshot.question or snapshot.market_id or "").lower()
+    has_injury_keyword = any(kw in question_lower for kw in _INJURY_KEYWORDS)
+    strong_news_dir = any(abs(c.direction) > 0.55 and c.confidence > 0.55 for c in catalysts)
+    if has_injury_keyword and strong_news_dir and ttr < 48:
+        return SignalType.PRE_GAME_INJURY_LAG
+
+    # 2. NEWS_LAG — catalyst implies meaningful edge vs current market price
+    # Raised quality bar to 0.60 (was 0.55) to reduce low-signal noise
+    edge = abs(p_true - snapshot.market_prob)
+    news_catalyst = any(
+        not c.source.startswith("INJURY:")
+        and c.quality > 0.60
+        and abs(c.direction) > 0.35
+        for c in catalysts
     )
+    if news_catalyst and edge >= 0.055:
+        return SignalType.NEWS_LAG
 
-    # Limit the number of catalysts to prevent oversized prompts
-    catalysts_to_consider = catalysts[:5]
+    # 3. FAVORITE_LONGSHOT_BIAS — only in liquid markets (depth_usd > 2000)
+    # Illiquid micro-markets routinely sit at extreme probs — not a statistical edge
+    if snapshot.depth_usd > 2000 and (
+        snapshot.market_prob > 0.82 or snapshot.market_prob < 0.07
+    ):
+        return SignalType.FAVORITE_LONGSHOT_BIAS
 
-    prompt = (
-        f"Analyze market data and catalysts.\n"
-        f"Market: ID={snapshot.market_id}, Venue={snapshot.venue}, Prob={snapshot.market_prob}, "
-        f"HoursLeft={snapshot.time_to_resolution_hours}\n\n"
-        f"Catalysts:\n"
-    )
-    for c in catalysts_to_consider:
-        prompt += f"- Src: {c.source}, Q: {c.quality}, Dir: {c.direction}, Conf: {c.confidence}\n"
+    return SignalType.NONE
 
-    ai_analysis = get_ai_response(prompt, task_type="complex", system_prompt=system_prompt)
 
-    if ai_analysis:
-        p_true = float(ai_analysis.get("p_true", snapshot.market_prob))
-        thesis = ai_analysis.get("bull_thesis") or ai_analysis.get("key_catalysts") or []
-        disconfirming = ai_analysis.get("disconfirming_evidence", [])
-        if isinstance(thesis, str):
-            thesis = [thesis]
-        if isinstance(disconfirming, str):
-            disconfirming = [disconfirming]
-    else:
-        # Fallback to original logic if AI fails
+def probability_node(snapshot: MarketSnapshot, catalysts: list[Catalyst]) -> ProbabilityOutput:
+    """
+    Catalyst-weighted probability estimation.
+    Pure math — zero AI calls. Fast, deterministic, free-tier safe.
+
+    Uses AI-scored catalyst data (from CatalystDetectionEngine) to adjust
+    market probability. The catalysts already carry AI signal quality scores;
+    combining them mathematically is more reliable than a second AI re-assessment.
+    """
+    if catalysts:
         weighted_signal = sum(c.direction * c.confidence * c.quality for c in catalysts)
         catalyst_strength = min(0.12, max(-0.12, weighted_signal))
-        p_true = min(0.99, max(0.01, snapshot.market_prob + catalyst_strength))
-        thesis = [
-            "Probability shifted from venue implied odds after weighted catalyst scoring (FALLBACK).",
-            f"Catalyst-adjusted estimate moved by {p_true - snapshot.market_prob:+.3f}.",
-        ]
-        disconfirming = [
-            "AI analysis failed. Using simplified logic.",
-            "Low-liquidity periods can distort short-term market probability.",
-        ]
-
-    source_confidence = 0.5
-    if catalysts:
         source_confidence = sum(c.confidence * c.quality for c in catalysts) / len(catalysts)
-    confidence = max(0.45, min(0.95, source_confidence))
+    else:
+        catalyst_strength = 0.0
+        source_confidence = 0.5
 
+    p_true = min(0.99, max(0.01, snapshot.market_prob + catalyst_strength))
+    confidence = max(0.45, min(0.95, source_confidence))
     uncertainty = max(0.02, 0.18 - (confidence * 0.12))
     band = (max(0.01, p_true - uncertainty), min(0.99, p_true + uncertainty))
+
+    signal = classify_signal(snapshot, catalysts, p_true)
+
+    adj = p_true - snapshot.market_prob
+    thesis: list[str] = [
+        f"Catalyst-adjusted probability: {p_true:.1%} "
+        f"(market: {snapshot.market_prob:.1%}, Δ{adj:+.1%}).",
+        f"Signal: {signal.value}.",
+    ]
+    if catalysts:
+        top_cat = max(catalysts, key=lambda c: c.quality * abs(c.direction))
+        thesis.append(
+            f"Strongest catalyst: [{top_cat.source}] "
+            f"dir={top_cat.direction:+.2f} conf={top_cat.confidence:.2f} "
+            f"qual={top_cat.quality:.2f}"
+        )
+
+    disconfirming: list[str] = [
+        "Market consensus may reflect information not yet captured in news feeds.",
+        "Low-liquidity periods can distort short-term market probability.",
+    ]
 
     return ProbabilityOutput(
         p_true=p_true,
@@ -117,6 +186,7 @@ def probability_node(snapshot: MarketSnapshot, catalysts: list[AIAnalysis]) -> P
         uncertainty_band=band,
         thesis=thesis,
         disconfirming_evidence=disconfirming,
+        signal=signal,
     )
 
 
@@ -240,8 +310,10 @@ def recommendation_node(
         reject_reason_codes=reject_reasons + policy_reasons,
         requires_approval=True,
         metadata={
-            "time_to_resolution_hours": snapshot.time_to_resolution_hours,
-            "ambiguity_score": snapshot.ambiguity_score,
-            "volatility_entropy_score": snapshot.volatility_entropy_score,
+            "signal":   prob.signal.value,                              # was missing — fixed
+            "question": snapshot.question or snapshot.market_id,        # was missing — fixed
+            "time_to_resolution_hours":   snapshot.time_to_resolution_hours,
+            "ambiguity_score":            snapshot.ambiguity_score,
+            "volatility_entropy_score":   snapshot.volatility_entropy_score,
         },
     )

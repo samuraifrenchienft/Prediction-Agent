@@ -1,6 +1,6 @@
 from .adapters import AdapterMarket, KalshiAdapter, MarketAdapter, PolymarketAdapter
 from .engine import EdgeEngine
-from .models import MarketSnapshot, PortfolioState, QualificationState, Recommendation, RiskPolicy, Venue
+from .models import AIAnalysis, Catalyst, MarketSnapshot, PortfolioState, QualificationState, Recommendation, RiskPolicy, Venue
 from .reporting import EdgeDashboard, EdgeReporter
 from .repository import RecommendationRecord, RecommendationRepository
 from .scanner import EdgeScanner
@@ -18,6 +18,7 @@ __all__ = [
     "MarketAdapter",
     "KalshiAdapter",
     "PolymarketAdapter",
+    "AIAnalysis",
     "Catalyst",
     "MarketSnapshot",
     "PortfolioState",

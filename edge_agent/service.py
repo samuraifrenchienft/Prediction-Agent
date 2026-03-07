@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from .engine import EdgeEngine
-from .models import MarketSnapshot, PortfolioState, QualificationState, Recommendation
+from .models import Catalyst, MarketSnapshot, PortfolioState, QualificationState, Recommendation
 
 
 @dataclass
@@ -25,7 +25,7 @@ class EdgeService:
 
     def run_scan(
         self,
-        inputs: list[tuple[MarketSnapshot, list[AIAnalysis], str]],
+        inputs: list[tuple[MarketSnapshot, list[Catalyst], str]],
         portfolio: PortfolioState,
     ) -> tuple[list[Recommendation], ScanSummary]:
         recommendations = self.engine.evaluate_batch(inputs=inputs, portfolio=portfolio)
@@ -48,6 +48,10 @@ class EdgeService:
             reject_reason_counts=self.engine.repository.reject_reason_counts(),
             venue_counts=self.engine.repository.venue_counts(),
         )
+
+    def game_tracker_summary(self) -> str:
+        """Delegated to engine — used by run_edge_bot.py for /status display."""
+        return self.engine.game_tracker_summary()
 
     def list_watchlist(self) -> list[dict[str, str | list[str]]]:
         return [

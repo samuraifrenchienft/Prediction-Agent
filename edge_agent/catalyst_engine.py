@@ -14,7 +14,7 @@ class CatalystDetectionEngine:
         self.news_client = NewsAPIClient()
 
     def detect_catalysts(self, query: str) -> list[Catalyst]:
-        articles = self.news_client.get_top_headlines(query)
+        articles = self.news_client.get_top_headlines(query)[:4]  # cap at 4 to limit AI calls
         catalysts = []
         for article in articles:
             catalyst = self._create_catalyst_from_article(article)
