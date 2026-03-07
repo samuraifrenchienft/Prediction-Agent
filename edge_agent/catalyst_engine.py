@@ -47,11 +47,14 @@ class CatalystDetectionEngine:
             f"{i+1}. {a['title']}" for i, a in enumerate(articles)
         )
 
+        # IMPORTANT: get_ai_response() forces json_object format which only allows
+        # JSON objects (not arrays). We wrap the scores in {"scores":[...]} so the
+        # constraint is satisfied and we can still batch all articles in one call.
         system_prompt = (
             "You are a financial news analyst scoring headlines for prediction markets. "
             f"Score each of the {len(articles)} headlines below.\n"
-            "Return ONLY a valid JSON array with one object per headline, in order:\n"
-            '[{"quality":0.7,"direction":0.3,"confidence":0.6}, ...]\n'
+            'Return a JSON object: {"scores": [{"quality":0.7,"direction":0.3,"confidence":0.6}, ...]}\n'
+            "One scores entry per headline in the same order. "
             "quality=0.0-1.0 information value. "
             "direction=-1.0(bearish) to 1.0(bullish). "
             "confidence=0.0-1.0. Plain numbers only, no text in values."
@@ -62,18 +65,17 @@ class CatalystDetectionEngine:
         try:
             result = get_ai_response(prompt, task_type="simple", system_prompt=system_prompt)
 
-            # result may be a list directly or wrapped under a key
-            if isinstance(result, list):
-                scores = result
-            elif isinstance(result, dict):
-                # Sometimes the model wraps it: {"scores": [...]} or {"data": [...]}
-                scores = next(
-                    (v for v in result.values() if isinstance(v, list)),
-                    None,
-                )
-                if scores is None:
-                    # Single-article response mistakenly returned as dict
-                    scores = [result]
+            # Primary path: {"scores": [...]}
+            if isinstance(result, dict):
+                scores = result.get("scores")
+                if not isinstance(scores, list):
+                    # Fallback: any list value in the response
+                    scores = next(
+                        (v for v in result.values() if isinstance(v, list)),
+                        [result],  # last resort: treat whole dict as single score
+                    )
+            elif isinstance(result, list):
+                scores = result  # model returned array directly despite json_object mode
             else:
                 scores = []
 

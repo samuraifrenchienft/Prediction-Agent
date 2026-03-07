@@ -62,7 +62,7 @@ from edge_agent import (
     PolymarketAdapter,
     PortfolioState,
 )
-from edge_agent.ai_service import get_ai_response
+from edge_agent.ai_service import get_chat_response
 from edge_agent.memory import KnowledgeBase, SessionMemory
 from edge_agent.game_tracker import TrackedGame
 from edge_agent.models import Recommendation
@@ -576,8 +576,7 @@ async def handle_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None
     )
 
     prompt = user_msg + kb_context + session_context + market_context + scan_context
-    ai_response = get_ai_response(prompt, task_type="creative", system_prompt=system_prompt)
-    reply = (ai_response or {}).get("content", "Sorry, I couldn't generate a response right now.")
+    reply = get_chat_response(prompt, task_type="creative", system_prompt=system_prompt) or "Sorry, I couldn't generate a response right now."
 
     # Save to session memory
     if reply:
