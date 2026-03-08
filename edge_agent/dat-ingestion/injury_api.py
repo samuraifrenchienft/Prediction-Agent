@@ -20,6 +20,8 @@ Architecture
   Zero HTTP calls happen during scans.
 • The in-memory _cache dict provides a 30-minute hot-path for repeated calls
   within the same refresh cycle (avoids hitting SQLite on every market).
+• Change detection: fetch_and_store() compares new records against previous
+  cache and stores proactive alerts when a player's status worsens.
 """
 from __future__ import annotations
 
@@ -69,6 +71,7 @@ _INJURED_STATUSES = {"Out", "Doubtful", "Questionable", "Day-To-Day", "Suspensio
 _PDF_STATUSES     = ["Out", "Doubtful", "Questionable", "Day-To-Day", "Suspension"]
 
 # Catalyst direction/confidence/quality per status severity
+# Index 0 = most severe; used for ordering comparisons
 _SEVERITY: dict[str, dict[str, float]] = {
     "Out":         {"direction": -0.90, "confidence": 0.92, "quality": 0.90},
     "Suspension":  {"direction": -0.80, "confidence": 0.88, "quality": 0.88},
@@ -76,6 +79,7 @@ _SEVERITY: dict[str, dict[str, float]] = {
     "Questionable":{"direction": -0.40, "confidence": 0.62, "quality": 0.72},
     "Day-To-Day":  {"direction": -0.25, "confidence": 0.50, "quality": 0.60},
 }
+_SEVERITY_ORDER = list(_SEVERITY.keys())  # Out=0 (most severe) … Day-To-Day=4
 
 # Only flag positions whose absence moves team win probability
 _KEY_NBA = {"PG", "SG", "SF", "PF", "C"}
@@ -84,6 +88,131 @@ _KEY_NFL = {"QB", "RB", "WR", "TE"}
 # Hot-path in-memory cache TTL (30 min) — feeds build_injury_catalysts() between
 # scheduled refreshes without SQLite round-trips
 _HOT_TTL = 1800
+
+# ---------------------------------------------------------------------------
+# Star player registry — direction & quality multiplier for marquee players
+# ---------------------------------------------------------------------------
+# Keys are lowercase name fragments. Applied as: direction × multiplier (capped at -1.0)
+# and quality × (1 + (multiplier-1) × 0.5).
+# More specific names are listed first to prevent shorter aliases from shadowing.
+
+_STAR_MULTIPLIERS: dict[str, float] = {
+    # ── NBA ──────────────────────────────────────────────────────────────────
+    "lebron james":            1.20,
+    "giannis antetokounmpo":   1.18,
+    "nikola jokic":            1.18,
+    "stephen curry":           1.15,
+    "steph curry":             1.15,
+    "kevin durant":            1.15,
+    "joel embiid":             1.15,
+    "luka doncic":             1.15,
+    "shai gilgeous-alexander": 1.15,
+    "victor wembanyama":       1.15,
+    "jayson tatum":            1.12,
+    "damian lillard":          1.12,
+    "anthony davis":           1.12,
+    "ja morant":               1.12,
+    "tyrese haliburton":       1.10,
+    "donovan mitchell":        1.10,
+    "devin booker":            1.10,
+    "jimmy butler":            1.10,
+    "paolo banchero":          1.08,
+    "bam adebayo":             1.08,
+    # ── NFL ──────────────────────────────────────────────────────────────────
+    "patrick mahomes":         1.25,
+    "josh allen":              1.22,
+    "lamar jackson":           1.22,
+    "joe burrow":              1.18,
+    "jalen hurts":             1.18,
+    "christian mccaffrey":     1.15,
+    "trevor lawrence":         1.12,
+    "justin herbert":          1.12,
+    "c.j. stroud":             1.12,
+    "cj stroud":               1.12,
+    "tua tagovailoa":          1.12,
+    "ceedee lamb":             1.10,
+    "justin jefferson":        1.10,
+    "tyreek hill":             1.10,
+    "travis kelce":            1.10,
+    "davante adams":           1.08,
+    "cooper kupp":             1.08,
+    "stefon diggs":            1.08,
+    "derrick henry":           1.08,
+}
+
+# ---------------------------------------------------------------------------
+# Team alias maps — ESPN full display name → question keywords
+# ---------------------------------------------------------------------------
+# Each alias list contains the strings that might appear in a market question
+# for that team. Match is done as substring of the lowercased question.
+
+_NBA_TEAM_ALIASES: dict[str, list[str]] = {
+    "atlanta hawks":           ["hawks", "atl", "atlanta hawks", "atlanta"],
+    "boston celtics":          ["celtics", "bos", "boston celtics", "boston"],
+    "brooklyn nets":           ["nets", "bkn", "brooklyn nets", "brooklyn"],
+    "charlotte hornets":       ["hornets", "cha", "charlotte hornets", "charlotte"],
+    "chicago bulls":           ["bulls", "chi", "chicago bulls", "chicago"],
+    "cleveland cavaliers":     ["cavaliers", "cavs", "cle", "cleveland"],
+    "dallas mavericks":        ["mavericks", "mavs", "dal", "dallas"],
+    "denver nuggets":          ["nuggets", "den", "denver"],
+    "detroit pistons":         ["pistons", "det", "detroit"],
+    "golden state warriors":   ["warriors", "gsw", "golden state", "golden state warriors"],
+    "houston rockets":         ["rockets", "hou", "houston"],
+    "indiana pacers":          ["pacers", "ind", "indiana"],
+    "los angeles clippers":    ["clippers", "lac", "la clippers", "los angeles clippers"],
+    "los angeles lakers":      ["lakers", "lal", "la lakers", "los angeles lakers"],
+    "memphis grizzlies":       ["grizzlies", "mem", "memphis"],
+    "miami heat":              ["heat", "mia", "miami heat", "miami"],
+    "milwaukee bucks":         ["bucks", "mil", "milwaukee"],
+    "minnesota timberwolves":  ["timberwolves", "wolves", "min", "minnesota"],
+    "new orleans pelicans":    ["pelicans", "nop", "new orleans pelicans", "new orleans"],
+    "new york knicks":         ["knicks", "nyk", "new york knicks", "new york"],
+    "oklahoma city thunder":   ["thunder", "okc", "oklahoma city thunder", "oklahoma"],
+    "orlando magic":           ["magic", "orl", "orlando"],
+    "philadelphia 76ers":      ["76ers", "sixers", "phi", "philadelphia 76ers", "philadelphia"],
+    "phoenix suns":            ["suns", "phx", "phoenix"],
+    "portland trail blazers":  ["blazers", "trail blazers", "por", "portland"],
+    "sacramento kings":        ["kings", "sac", "sacramento"],
+    "san antonio spurs":       ["spurs", "sas", "san antonio"],
+    "toronto raptors":         ["raptors", "tor", "toronto"],
+    "utah jazz":               ["jazz", "uta", "utah"],
+    "washington wizards":      ["wizards", "was", "washington wizards", "washington"],
+}
+
+_NFL_TEAM_ALIASES: dict[str, list[str]] = {
+    "arizona cardinals":       ["cardinals", "ari", "arizona cardinals", "arizona"],
+    "atlanta falcons":         ["falcons", "atl", "atlanta falcons", "atlanta"],
+    "baltimore ravens":        ["ravens", "bal", "baltimore"],
+    "buffalo bills":           ["bills", "buf", "buffalo"],
+    "carolina panthers":       ["panthers", "car", "carolina"],
+    "chicago bears":           ["bears", "chi", "chicago bears", "chicago"],
+    "cincinnati bengals":      ["bengals", "cin", "cincinnati"],
+    "cleveland browns":        ["browns", "cle", "cleveland"],
+    "dallas cowboys":          ["cowboys", "dal", "dallas cowboys", "dallas"],
+    "denver broncos":          ["broncos", "den", "denver"],
+    "detroit lions":           ["lions", "det", "detroit"],
+    "green bay packers":       ["packers", "gnb", "green bay", "gb packers"],
+    "houston texans":          ["texans", "hou", "houston texans", "houston"],
+    "indianapolis colts":      ["colts", "ind", "indianapolis"],
+    "jacksonville jaguars":    ["jaguars", "jags", "jax", "jacksonville"],
+    "kansas city chiefs":      ["chiefs", "kan", "kc chiefs", "kansas city"],
+    "las vegas raiders":       ["raiders", "lv", "las vegas raiders", "las vegas"],
+    "los angeles chargers":    ["chargers", "lac", "la chargers", "los angeles chargers"],
+    "los angeles rams":        ["rams", "lar", "la rams", "los angeles rams"],
+    "miami dolphins":          ["dolphins", "mia", "miami dolphins", "miami"],
+    "minnesota vikings":       ["vikings", "min", "minnesota vikings", "minnesota"],
+    "new england patriots":    ["patriots", "pats", "ne patriots", "new england"],
+    "new orleans saints":      ["saints", "nol", "new orleans saints", "new orleans"],
+    "new york giants":         ["giants", "nyg", "ny giants", "new york giants"],
+    "new york jets":           ["jets", "nyj", "ny jets", "new york jets"],
+    "philadelphia eagles":     ["eagles", "phi", "philadelphia eagles", "philadelphia"],
+    "pittsburgh steelers":     ["steelers", "pit", "pittsburgh"],
+    "san francisco 49ers":     ["49ers", "sf", "san francisco", "niners"],
+    "seattle seahawks":        ["seahawks", "sea", "seattle"],
+    "tampa bay buccaneers":    ["buccaneers", "bucs", "tb", "tampa bay", "tampa"],
+    "tennessee titans":        ["titans", "ten", "tennessee"],
+    "washington commanders":   ["commanders", "was", "washington commanders", "washington"],
+}
 
 # NBA team keywords for sport detection
 _NBA_KW = {
@@ -286,6 +415,10 @@ class InjuryAPIClient:
         Fetch fresh injury data from all sources for *sport* and persist to
         SQLite. Called by the 4-hour refresh job — NOT by scan-time code.
 
+        Performs change detection: if any player's status worsens compared to
+        the previous snapshot, the change is stored as a pending alert that
+        injury_refresh_job() will forward to Telegram.
+
         Returns the number of records stored.
         """
         sport = sport.lower()
@@ -301,23 +434,59 @@ class InjuryAPIClient:
         if sport == "nba":
             official = self._fetch_nba_official()
             if official:
-                severity_order = list(_SEVERITY.keys())
                 for r in records:
                     player_lower = r["player_name"].lower()
                     off_status = official.get(player_lower)
                     if off_status:
                         try:
-                            if severity_order.index(off_status) < severity_order.index(r["status"]):
+                            if _SEVERITY_ORDER.index(off_status) < _SEVERITY_ORDER.index(r["status"]):
                                 r["status"] = off_status
                                 r["source_api"] = "nba_official"
                         except ValueError:
                             pass
 
         db = self._get_db()
+
+        # ── Change detection ──────────────────────────────────────────────────
+        # Read previous statuses BEFORE overwriting to detect worsening.
+        change_alerts: list[dict] = []
+        if db is not None and records:
+            prev_records = db.get(sport)
+            if prev_records:
+                prev_statuses: dict[str, str] = {
+                    r["player_name"]: r["status"] for r in prev_records
+                }
+                new_by_name: dict[str, dict] = {
+                    r["player_name"]: r for r in records
+                }
+                for player, new_rec in new_by_name.items():
+                    old_status = prev_statuses.get(player)
+                    new_status = new_rec["status"]
+                    if old_status and old_status != new_status:
+                        try:
+                            old_idx = _SEVERITY_ORDER.index(old_status)
+                            new_idx = _SEVERITY_ORDER.index(new_status)
+                            if new_idx < old_idx:  # lower index = more severe
+                                change_alerts.append({
+                                    "sport":       sport,
+                                    "player_name": player,
+                                    "team":        new_rec.get("team", ""),
+                                    "position":    new_rec.get("position", ""),
+                                    "old_status":  old_status,
+                                    "new_status":  new_status,
+                                })
+                                log.info(
+                                    "[InjuryAPI] Status worsened: %s %s → %s",
+                                    player, old_status, new_status,
+                                )
+                        except ValueError:
+                            pass
+
         if db is not None:
             db.store(sport, records)
+            if change_alerts:
+                db.store_change_alerts(change_alerts)
         else:
-            # Fallback: just warm the hot cache so scans still work
             log.warning("[InjuryAPI] DB unavailable — using hot cache only")
 
         self._hot_set(sport, records)
@@ -333,6 +502,12 @@ class InjuryAPIClient:
         """
         Given a prediction market question, return Catalyst-compatible dicts
         for any injured players whose team is mentioned in the question.
+
+        Improvements over v1:
+        - Team matching uses a comprehensive alias map (abbreviations, city names,
+          nicknames) in addition to word-based fallback.
+        - Star players (LeBron, Mahomes, etc.) receive a direction multiplier that
+          increases the magnitude of the catalyst proportional to their market impact.
 
         Reads from the hot-path cache first, then SQLite. No live HTTP calls.
         Returns [] if no relevant injuries are found.
@@ -357,17 +532,24 @@ class InjuryAPIClient:
             return []
 
         key_positions = _KEY_NBA if sport == "nba" else _KEY_NFL
+        alias_map = _NBA_TEAM_ALIASES if sport == "nba" else _NFL_TEAM_ALIASES
         q = market_question.lower()
         catalyst_dicts: list[dict[str, Any]] = []
 
         for inj in records:
-            team = inj.get("team", "").lower()
+            team = inj.get("team", "")
             if not team:
                 continue
 
-            # Match team to question — use significant words (≥4 chars)
-            team_words = [w for w in team.split() if len(w) >= 4]
-            if not any(tw in q for tw in team_words):
+            # ── Team matching ────────────────────────────────────────────────
+            # 1. Try the alias map (covers abbreviations, nicknames, city names)
+            team_lower = team.lower()
+            aliases = alias_map.get(team_lower)
+            # 2. Word-based fallback for teams not in the map
+            if aliases is None:
+                aliases = [w for w in team_lower.split() if len(w) >= 4]
+
+            if not any(alias in q for alias in aliases):
                 continue
 
             # Skip bench players — only key positions move markets
@@ -376,9 +558,26 @@ class InjuryAPIClient:
                 continue
 
             final_status = inj.get("status", "Questionable")
-            sev = _SEVERITY.get(final_status, _SEVERITY["Questionable"])
+            # Copy so we can modify without touching the shared dict
+            sev = dict(_SEVERITY.get(final_status, _SEVERITY["Questionable"]))
 
+            # ── Star player multiplier ────────────────────────────────────────
             player      = inj.get("player_name", "Unknown")
+            player_lower = player.lower()
+            multiplier = 1.0
+            for name_key, mult in _STAR_MULTIPLIERS.items():
+                if name_key in player_lower:
+                    multiplier = mult
+                    break
+
+            if multiplier > 1.0:
+                sev["direction"] = max(-1.0, sev["direction"] * multiplier)
+                sev["quality"]   = min(1.0, sev["quality"] * (1.0 + (multiplier - 1.0) * 0.5))
+                log.debug(
+                    "[InjuryAPI] ⭐ Star multiplier %.2f applied to %s",
+                    multiplier, player,
+                )
+
             team_disp   = inj.get("team", "")
             inj_type    = inj.get("injury_type", "")
             inj_detail  = inj.get("injury_detail", "")
@@ -391,6 +590,8 @@ class InjuryAPIClient:
             label = f"INJURY:{player} ({team_disp}) {final_status}"
             if detail_str:
                 label += f" [{detail_str}]"
+            if multiplier > 1.0:
+                label += " ⭐"
             if source_api == "nba_official":
                 label += " [confirmed official]"
 

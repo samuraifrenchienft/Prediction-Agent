@@ -20,12 +20,15 @@ Setup (one-time):
   5. python run_edge_bot.py
 
 Commands in Telegram:
-  /scan       — run a full market scan immediately
-  /injuries   — show cached injury report summary
-  /tracking   — show the injury game tracking list
-  /top        — show top 3 opportunities from last scan
-  /status     — show last scan summary
-  /help       — command list
+  /scan              — run a full market scan immediately
+  /injuries          — injury cache summary (count + freshness)
+  /injuries nba      — full NBA player list sorted by severity
+  /injuries nfl      — full NFL player list sorted by severity
+  /injuries nba lakers — filter NBA to Lakers only
+  /tracking          — show the injury game tracking list
+  /top               — show top 3 opportunities from last scan
+  /status            — show last scan summary
+  /help              — command list
 
   Or just send any message to chat with EDGE about markets.
 """
@@ -357,7 +360,9 @@ async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         "👋 <b>EDGE Agent online.</b>\n\n"
         "<b>Commands:</b>\n"
         "/scan — run market scan now\n"
-        "/injuries — cached injury report\n"
+        "/injuries — injury cache summary\n"
+        "/injuries nba — full NBA injury list\n"
+        "/injuries nfl chiefs — filter by team\n"
         "/tracking — injury game tracking list\n"
         "/top — top 3 opportunities\n"
         "/status — last scan summary\n"
@@ -590,34 +595,144 @@ async def handle_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None
 
 
 # ---------------------------------------------------------------------------
-# /injuries command
+# /injuries command — enhanced with player list and team filtering
 # ---------------------------------------------------------------------------
 
+_SEVERITY_EMOJI = {
+    "Out":         "🔴",
+    "Suspension":  "🚫",
+    "Doubtful":    "🟠",
+    "Questionable":"🟡",
+    "Day-To-Day":  "⚪",
+}
+
+# Max players shown per sport before truncation (keeps messages readable)
+_INJURIES_MAX_PER_SPORT = 40
+
+
 async def cmd_injuries(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
-    """Show cached injury report summary from the SQLite store."""
+    """
+    Show cached injury report.
+
+    Usage:
+      /injuries            — summary (count + fetch time per sport)
+      /injuries nba        — full NBA player list sorted by severity
+      /injuries nfl        — full NFL player list sorted by severity
+      /injuries nba lakers — NBA players for the Lakers only
+      /injuries nfl chiefs — NFL players for the Chiefs only
+    """
+    args = ctx.args or []
+    sport_filter = args[0].lower() if args else None
+    team_filter  = " ".join(args[1:]).lower() if len(args) > 1 else None
+
     try:
         from edge_agent.memory.injury_cache import InjuryCache
         cache = InjuryCache()
-        stats = cache.stats()
-        if not stats:
-            await update.message.reply_text(
-                "⚠️ No injury data cached yet.\n"
-                f"The refresh job runs every {INJURY_REFRESH_MIN // 60}h automatically. "
-                "You can trigger a manual /scan to pre-warm the cache."
+
+        # ── No sport arg: show summary ────────────────────────────────────────
+        if not sport_filter or sport_filter not in ("nba", "nfl"):
+            stats = cache.stats()
+            if not stats:
+                await update.message.reply_text(
+                    "⚠️ No injury data cached yet.\n"
+                    f"The refresh job runs every {INJURY_REFRESH_MIN // 60}h automatically.\n"
+                    "Try <code>/injuries nba</code> or <code>/injuries nfl</code> "
+                    "after the first refresh completes.",
+                    parse_mode=ParseMode.HTML,
+                )
+                return
+
+            lines = ["<b>🏥 Injury Cache Summary</b>\n"]
+            for sport, info in sorted(stats.items()):
+                lines.append(
+                    f"<b>{_e(sport)}</b>: {info['count']} injured players\n"
+                    f"   Fetched: {_e(info['last_fetch'])} | Expires: {_e(info['expires'])}"
+                )
+            lines.append(
+                f"\n<i>Auto-refresh every {INJURY_REFRESH_MIN // 60}h. "
+                "Records expire after 24h.</i>\n"
+                "Tip: <code>/injuries nba</code> or <code>/injuries nfl lakers</code> "
+                "for full player lists."
             )
+            await update.message.reply_text("\n".join(lines), parse_mode=ParseMode.HTML)
             return
 
-        lines = ["<b>Injury Cache</b>\n"]
-        for sport, info in sorted(stats.items()):
+        # ── Sport arg: show player list ──────────────────────────────────────
+        sport = sport_filter  # "nba" or "nfl"
+        records = cache.get_all(sport, team_filter=team_filter)
+
+        if not records:
+            label = sport.upper()
+            if team_filter:
+                msg = (
+                    f"<b>🏥 {_e(label)} Injuries</b>\n"
+                    f"No injured players found for team filter: <i>{_e(team_filter)}</i>\n"
+                    f"Try the full team name, city, or abbreviation."
+                )
+            else:
+                msg = (
+                    f"<b>🏥 {_e(label)} Injuries</b>\n"
+                    f"No injury data cached yet. Refreshes every {INJURY_REFRESH_MIN // 60}h."
+                )
+            await update.message.reply_text(msg, parse_mode=ParseMode.HTML)
+            return
+
+        # Build the player-list message
+        sport_label = sport.upper()
+        header = f"<b>🏥 {sport_label} Injuries</b>"
+        if team_filter:
+            header += f" — <i>{_e(team_filter.title())}</i>"
+        header += f" ({len(records)} players)"
+
+        lines = [header, ""]
+        current_team = None
+        shown = 0
+
+        for r in records:
+            if shown >= _INJURIES_MAX_PER_SPORT:
+                lines.append(
+                    f"\n<i>... and {len(records) - shown} more. "
+                    f"Use /injuries {sport} [team] for filtered view.</i>"
+                )
+                break
+
+            team = r.get("team", "")
+            if team != current_team:
+                if current_team is not None:
+                    lines.append("")       # blank line between teams
+                current_team = team
+                lines.append(f"<b>{_e(team)}</b>")
+
+            status    = r.get("status", "")
+            sem       = _SEVERITY_EMOJI.get(status, "⚪")
+            player    = r.get("player_name", "")
+            pos       = r.get("position", "")
+            inj_type  = r.get("injury_type", "")
+            src       = r.get("source_api", "espn")
+
+            pos_str    = f" ({_e(pos)})" if pos else ""
+            detail_str = f" — <i>{_e(inj_type)}</i>" if inj_type else ""
+            src_badge  = " ✅" if src == "nba_official" else ""
+
             lines.append(
-                f"🏥 <b>{_e(sport)}</b>: {info['count']} injured players\n"
-                f"   Fetched: {_e(info['last_fetch'])} | Expires: {_e(info['expires'])}"
+                f"  {sem} <b>{_e(player)}</b>{pos_str}: {_e(status)}{detail_str}{src_badge}"
             )
+            shown += 1
+
         lines.append(
             f"\n<i>Auto-refresh every {INJURY_REFRESH_MIN // 60}h. "
-            "Records expire after 24h.</i>"
+            "✅ = NBA official report.</i>"
         )
-        await update.message.reply_text("\n".join(lines), parse_mode=ParseMode.HTML)
+
+        msg = "\n".join(lines)
+        # Telegram hard limit is 4096 chars
+        if len(msg) > 3900:
+            msg = msg[:3900] + (
+                f"\n\n<i>(truncated — use /injuries {sport} [team] "
+                "for a shorter filtered list)</i>"
+            )
+
+        await update.message.reply_text(msg, parse_mode=ParseMode.HTML)
 
     except Exception as exc:
         await update.message.reply_text(
@@ -634,6 +749,9 @@ async def injury_refresh_job(ctx: ContextTypes.DEFAULT_TYPE) -> None:
     Fetches fresh injury data for NBA and NFL from ESPN + NBA official PDF,
     stores results in SQLite. The ONLY place that makes live HTTP calls to
     injury APIs — market scans read from the DB instead.
+
+    After each refresh, checks for pending status-change alerts (e.g. a player
+    upgraded from Questionable → Out) and fires proactive Telegram messages.
     """
     log.info("Injury refresh triggered.")
     client = _InjuryClient()
@@ -648,6 +766,47 @@ async def injury_refresh_job(ctx: ContextTypes.DEFAULT_TYPE) -> None:
 
     summary = " | ".join(f"{s}: {v}" for s, v in results.items())
     log.info("Injury refresh complete — %s", summary)
+
+    # ── Proactive status-change alerts ────────────────────────────────────────
+    try:
+        from edge_agent.memory.injury_cache import InjuryCache
+        cache = InjuryCache()
+        pending = cache.get_pending_change_alerts()
+
+        for alert in pending:
+            player   = alert.get("player_name", "")
+            team     = alert.get("team", "")
+            pos      = alert.get("position", "")
+            old_s    = alert.get("old_status", "")
+            new_s    = alert.get("new_status", "")
+            sport    = alert.get("sport", "").upper()
+
+            old_em = _SEVERITY_EMOJI.get(old_s, "⚪")
+            new_em = _SEVERITY_EMOJI.get(new_s, "🔴")
+            pos_str = f" ({_e(pos)})" if pos else ""
+            sport_emoji = "🏀" if sport == "NBA" else "🏈"
+
+            msg = (
+                f"🚨 <b>INJURY STATUS WORSENED</b>\n\n"
+                f"{sport_emoji} <b>{_e(player)}</b>{pos_str}\n"
+                f"<i>{_e(team)}</i> [{sport}]\n\n"
+                f"{old_em} {_e(old_s)} → {new_em} <b>{_e(new_s)}</b>\n\n"
+                f"<i>This may affect win-probability markets. "
+                f"Run /scan for updated signals.</i>"
+            )
+
+            await ctx.bot.send_message(
+                chat_id=CHAT_ID,
+                text=msg,
+                parse_mode=ParseMode.HTML,
+            )
+            log.info(
+                "Proactive injury alert sent: %s %s → %s",
+                player, old_s, new_s,
+            )
+
+    except Exception as exc:
+        log.warning("Could not dispatch proactive injury alerts: %s", exc)
 
 
 # ---------------------------------------------------------------------------
