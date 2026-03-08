@@ -538,6 +538,112 @@ async def handle_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> Non
 
 
 # ---------------------------------------------------------------------------
+# Injury context builder for free-form chat
+# ---------------------------------------------------------------------------
+
+def _build_injury_context(query: str) -> str:
+    """
+    Check whether the user's message mentions a sport, team, or player.
+    If it does, pull the relevant rows from the verified injury cache and
+    return a formatted context block for injection into the AI prompt.
+
+    This grounds the AI's answer in real-time data (ESPN + Sleeper + news)
+    instead of stale training knowledge.
+
+    Returns "" if no sports content is detected or the cache is empty.
+    """
+    try:
+        from edge_agent.memory.injury_cache import InjuryCache
+        _injury_detect = importlib.import_module(".dat-ingestion.injury_api", "edge_agent")
+        detect_sport   = _injury_detect.detect_sport
+        _star_keys     = set(_injury_detect._STAR_MULTIPLIERS.keys())
+
+        # ── Detect sport ──────────────────────────────────────────────────────
+        # Quick bail-out: if none of the sport-indicator words appear, skip.
+        _SPORT_TRIGGERS = {
+            "nba": {"nba", "basketball", "lakers", "celtics", "warriors", "bucks",
+                    "heat", "nets", "knicks", "nuggets", "suns", "sixers", "raptors",
+                    "mavericks", "mavs", "spurs", "thunder", "grizzlies", "pelicans"},
+            "nfl": {"nfl", "football", "chiefs", "eagles", "cowboys", "ravens",
+                    "bills", "bengals", "dolphins", "steelers", "49ers", "rams",
+                    "seahawks", "patriots", "packers", "bears", "giants", "saints",
+                    "buccaneers", "chargers", "raiders", "broncos", "texans"},
+            "nhl": {"nhl", "hockey", "oilers", "bruins", "rangers", "leafs",
+                    "canadiens", "penguins", "capitals", "lightning", "golden knights",
+                    "kraken", "avalanche", "flames", "canucks", "senators", "sabres"},
+        }
+        q = query.lower()
+        matched_sport = None
+        for sport, triggers in _SPORT_TRIGGERS.items():
+            if any(t in q for t in triggers):
+                matched_sport = sport
+                break
+
+        # Also check for player name mentions (covers "is LeBron playing?")
+        player_mentioned = next((k for k in _star_keys if k in q), None)
+        if player_mentioned and not matched_sport:
+            matched_sport = detect_sport(q)   # let keyword scorer decide
+
+        if not matched_sport:
+            return ""
+
+        # ── Pull from cache ───────────────────────────────────────────────────
+        cache = InjuryCache()
+        all_records = cache.get_all(matched_sport)
+        if not all_records:
+            return f"\n[Injury cache for {matched_sport.upper()} is empty — refresh pending]"
+
+        # If a specific player was mentioned, show just that player + team.
+        # Otherwise try to match a team from the query, then fall back to top-10.
+        if player_mentioned:
+            relevant = [r for r in all_records if player_mentioned in r.get("player_name", "").lower()]
+        else:
+            # Try substring team match
+            relevant = [r for r in all_records if any(w in q for w in r.get("team", "").lower().split())]
+
+        # Fallback: show the most-severe players (top 10) for the detected sport
+        if not relevant:
+            relevant = all_records[:10]
+
+        # ── Format ────────────────────────────────────────────────────────────
+        _SEV_TAG = {
+            "Out": "OUT", "Injured Reserve": "OUT(IR)", "Suspension": "SUSP",
+            "Doubtful": "DOUBTFUL", "Questionable": "QUEST", "Day-To-Day": "DTD",
+        }
+        src_note = {"nba_official": "(official)", "+sleeper✓": "(confirmed)", "⚠️": "(⚠️ conflicting)"}
+
+        lines = [f"\n[Live {matched_sport.upper()} injury data from verified cache]"]
+        for r in relevant[:15]:   # hard cap to keep prompt size reasonable
+            status   = r.get("status", "")
+            tag      = _SEV_TAG.get(status, status)
+            player   = r.get("player_name", "")
+            team     = r.get("team", "")
+            pos      = r.get("position", "")
+            inj_type = r.get("injury_type", "")
+            src      = r.get("source_api", "espn")
+
+            src_tag = ""
+            for k, v in src_note.items():
+                if k in src:
+                    src_tag = f" {v}"
+                    break
+
+            detail = f" [{inj_type}]" if inj_type else ""
+            pos_s  = f" ({pos})" if pos else ""
+            lines.append(f"  {tag}: {player}{pos_s} — {team}{detail}{src_tag}")
+
+        lines.append("[Source: ESPN" +
+                     (" + NBA official PDF" if matched_sport == "nba" else "") +
+                     (" + Sleeper cross-ref" if matched_sport in ("nba", "nfl") else "") +
+                     ". Refreshed 9am/1:30pm/4:30pm PT]")
+        return "\n".join(lines)
+
+    except Exception as exc:
+        log.debug("Could not build injury context for chat: %s", exc)
+        return ""
+
+
+# ---------------------------------------------------------------------------
 # Free-form AI chat
 # ---------------------------------------------------------------------------
 
@@ -595,16 +701,22 @@ async def handle_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None
             )
         scan_context = "\n".join(lines)
 
+    # 5. Live injury context — injected when the message mentions a sport/team/player
+    #    Uses the same verified cache (ESPN + Sleeper + news) that feeds market scans.
+    injury_context = _build_injury_context(q)
+
     system_prompt = (
         "You are Edge, an expert prediction market analyst on Telegram. "
         "Be concise — Telegram users want short, direct answers. "
         "Reference live market data and knowledge base context when provided. "
         "Use session context to remember what was discussed earlier. "
+        "When injury data is provided, always cite it as your source — do NOT answer "
+        "from training data if live cache data is available. "
         "If asked about account setup or platform UI, give step-by-step guidance. "
         "Return plain text (no JSON). Keep replies under 300 words."
     )
 
-    prompt = user_msg + kb_context + session_context + market_context + scan_context
+    prompt = user_msg + kb_context + session_context + market_context + scan_context + injury_context
     reply = get_chat_response(prompt, task_type="creative", system_prompt=system_prompt) or "Sorry, I couldn't generate a response right now."
 
     # Save to session memory
