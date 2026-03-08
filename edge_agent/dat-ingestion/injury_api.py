@@ -1,10 +1,13 @@
 """
-Injury Report Client — Two Free Sources + SQLite persistence
-=============================================================
+Injury Report Client — ESPN + NBA Official PDF + SQLite persistence
+====================================================================
 
-Source 1  ESPN Unofficial API  (NBA + NFL, JSON, ~1hr freshness, no auth)
+Sports covered: NBA, NFL, NHL
+
+Source 1  ESPN Unofficial API  (NBA + NFL + NHL, JSON, ~1hr freshness, no auth)
   https://site.api.espn.com/apis/site/v2/sports/basketball/nba/injuries
   https://site.api.espn.com/apis/site/v2/sports/football/nfl/injuries
+  https://site.api.espn.com/apis/site/v2/sports/hockey/nhl/injuries
 
 Source 2  NBA Official CDN PDF  (NBA only, league-mandated, 15-min intervals)
   https://ak-static.cms.nba.com/referee/injury/Injury-Report_{date}_{HH}_{MM}{AM/PM}.pdf
@@ -60,6 +63,7 @@ _HEADERS = {
 
 _ESPN_NBA = "https://site.api.espn.com/apis/site/v2/sports/basketball/nba/injuries"
 _ESPN_NFL = "https://site.api.espn.com/apis/site/v2/sports/football/nfl/injuries"
+_ESPN_NHL = "https://site.api.espn.com/apis/site/v2/sports/hockey/nhl/injuries"
 
 _NBA_CDN = (
     "https://ak-static.cms.nba.com/referee/injury/"
@@ -67,34 +71,37 @@ _NBA_CDN = (
 )
 
 # Statuses that represent a player who may not play
-_INJURED_STATUSES = {"Out", "Doubtful", "Questionable", "Day-To-Day", "Suspension"}
-_PDF_STATUSES     = ["Out", "Doubtful", "Questionable", "Day-To-Day", "Suspension"]
-
-# Catalyst direction/confidence/quality per status severity
-# Index 0 = most severe; used for ordering comparisons
-_SEVERITY: dict[str, dict[str, float]] = {
-    "Out":         {"direction": -0.90, "confidence": 0.92, "quality": 0.90},
-    "Suspension":  {"direction": -0.80, "confidence": 0.88, "quality": 0.88},
-    "Doubtful":    {"direction": -0.65, "confidence": 0.78, "quality": 0.80},
-    "Questionable":{"direction": -0.40, "confidence": 0.62, "quality": 0.72},
-    "Day-To-Day":  {"direction": -0.25, "confidence": 0.50, "quality": 0.60},
+_INJURED_STATUSES = {
+    "Out", "Doubtful", "Questionable", "Day-To-Day", "Suspension",
+    "Injured Reserve",   # NHL-specific — definite miss, 7+ day minimum
 }
-_SEVERITY_ORDER = list(_SEVERITY.keys())  # Out=0 (most severe) … Day-To-Day=4
+_PDF_STATUSES = ["Out", "Doubtful", "Questionable", "Day-To-Day", "Suspension"]
 
-# Only flag positions whose absence moves team win probability
+# Catalyst direction/confidence/quality per status severity.
+# Index 0 of _SEVERITY_ORDER = most severe (used for change detection ordering).
+_SEVERITY: dict[str, dict[str, float]] = {
+    "Out":             {"direction": -0.90, "confidence": 0.92, "quality": 0.90},
+    "Injured Reserve": {"direction": -0.90, "confidence": 0.95, "quality": 0.92},  # NHL IR = certain miss
+    "Suspension":      {"direction": -0.80, "confidence": 0.88, "quality": 0.88},
+    "Doubtful":        {"direction": -0.65, "confidence": 0.78, "quality": 0.80},
+    "Questionable":    {"direction": -0.40, "confidence": 0.62, "quality": 0.72},
+    "Day-To-Day":      {"direction": -0.25, "confidence": 0.50, "quality": 0.60},
+}
+_SEVERITY_ORDER = list(_SEVERITY.keys())  # Out=0 (most severe) … Day-To-Day=5
+
+# Key positions whose absence moves team win probability
 _KEY_NBA = {"PG", "SG", "SF", "PF", "C"}
 _KEY_NFL = {"QB", "RB", "WR", "TE"}
+_KEY_NHL = {"C", "LW", "RW", "D", "G"}   # all positions matter in hockey; G = goalie (critical)
 
-# Hot-path in-memory cache TTL (30 min) — feeds build_injury_catalysts() between
-# scheduled refreshes without SQLite round-trips
+# Hot-path in-memory cache TTL (30 min)
 _HOT_TTL = 1800
 
 # ---------------------------------------------------------------------------
 # Star player registry — direction & quality multiplier for marquee players
 # ---------------------------------------------------------------------------
-# Keys are lowercase name fragments. Applied as: direction × multiplier (capped at -1.0)
-# and quality × (1 + (multiplier-1) × 0.5).
-# More specific names are listed first to prevent shorter aliases from shadowing.
+# Keys are lowercase name fragments; first match wins.
+# Goalies receive high multipliers since one goalie = the entire position.
 
 _STAR_MULTIPLIERS: dict[str, float] = {
     # ── NBA ──────────────────────────────────────────────────────────────────
@@ -138,13 +145,44 @@ _STAR_MULTIPLIERS: dict[str, float] = {
     "cooper kupp":             1.08,
     "stefon diggs":            1.08,
     "derrick henry":           1.08,
+    # ── NHL — Skaters ────────────────────────────────────────────────────────
+    "connor mcdavid":          1.28,
+    "nathan mackinnon":        1.25,
+    "auston matthews":         1.22,
+    "leon draisaitl":          1.20,
+    "david pastrnak":          1.18,
+    "nikita kucherov":         1.18,
+    "cale makar":              1.18,
+    "matthew tkachuk":         1.15,
+    "aleksander barkov":       1.15,
+    "adam fox":                1.15,
+    "tage thompson":           1.12,
+    "jack hughes":             1.12,
+    "tim stutzle":             1.12,
+    "brady tkachuk":           1.12,
+    "trevor zegras":           1.10,
+    "roman josi":              1.12,
+    "kirill kaprizov":         1.12,
+    "mitchell marner":         1.10,
+    "william nylander":        1.10,
+    # ── NHL — Goalies (starting caliber) — very high multiplier ──────────────
+    "connor hellebuyck":       1.25,
+    "igor shesterkin":         1.25,
+    "andrei vasilevskiy":      1.22,
+    "thatcher demko":          1.18,
+    "jacob markstrom":         1.18,
+    "juuse saros":             1.18,
+    "ilya sorokin":            1.18,
+    "sergei bobrovsky":        1.15,
+    "jake oettinger":          1.15,
+    "linus ullmark":           1.15,
+    "adin hill":               1.15,
+    "marc-andre fleury":       1.12,
 }
 
 # ---------------------------------------------------------------------------
 # Team alias maps — ESPN full display name → question keywords
 # ---------------------------------------------------------------------------
-# Each alias list contains the strings that might appear in a market question
-# for that team. Match is done as substring of the lowercased question.
 
 _NBA_TEAM_ALIASES: dict[str, list[str]] = {
     "atlanta hawks":           ["hawks", "atl", "atlanta hawks", "atlanta"],
@@ -214,27 +252,85 @@ _NFL_TEAM_ALIASES: dict[str, list[str]] = {
     "washington commanders":   ["commanders", "was", "washington commanders", "washington"],
 }
 
-# NBA team keywords for sport detection
+_NHL_TEAM_ALIASES: dict[str, list[str]] = {
+    "anaheim ducks":           ["ducks", "ana", "anaheim"],
+    "boston bruins":           ["bruins", "bos", "boston"],
+    "buffalo sabres":          ["sabres", "buf", "buffalo"],
+    "calgary flames":          ["flames", "cgy", "calgary"],
+    "carolina hurricanes":     ["hurricanes", "canes", "car", "carolina"],
+    "chicago blackhawks":      ["blackhawks", "hawks", "chi", "chicago"],
+    "colorado avalanche":      ["avalanche", "avs", "col", "colorado"],
+    "columbus blue jackets":   ["blue jackets", "cbj", "columbus"],
+    "dallas stars":            ["stars", "dal", "dallas"],
+    "detroit red wings":       ["red wings", "det", "detroit"],
+    "edmonton oilers":         ["oilers", "edm", "edmonton"],
+    "florida panthers":        ["florida panthers", "fla", "florida"],
+    "los angeles kings":       ["kings", "lak", "la kings", "los angeles kings"],
+    "minnesota wild":          ["wild", "min", "minnesota wild", "minnesota"],
+    "montreal canadiens":      ["canadiens", "habs", "mtl", "montreal"],
+    "nashville predators":     ["predators", "preds", "nsh", "nashville"],
+    "new jersey devils":       ["devils", "njd", "new jersey"],
+    "new york islanders":      ["islanders", "nyi", "new york islanders"],
+    "new york rangers":        ["rangers", "nyr", "new york rangers"],
+    "ottawa senators":         ["senators", "sens", "ott", "ottawa"],
+    "philadelphia flyers":     ["flyers", "phi", "philadelphia flyers"],
+    "pittsburgh penguins":     ["penguins", "pens", "pit", "pittsburgh"],
+    "san jose sharks":         ["sharks", "sjs", "san jose"],
+    "seattle kraken":          ["kraken", "sea", "seattle"],
+    "st. louis blues":         ["blues", "stl", "st louis", "st. louis"],
+    "tampa bay lightning":     ["lightning", "bolts", "tbl", "tampa bay", "tampa"],
+    "toronto maple leafs":     ["maple leafs", "leafs", "tor", "toronto"],
+    "utah hockey club":        ["utah hockey", "utah hc", "utah"],
+    "vancouver canucks":       ["canucks", "van", "vancouver"],
+    "vegas golden knights":    ["golden knights", "knights", "vgk", "vegas"],
+    "washington capitals":     ["capitals", "caps", "wsh", "washington capitals"],
+    "winnipeg jets":           ["jets", "wpg", "winnipeg"],
+}
+
+# ---------------------------------------------------------------------------
+# Sport keyword detection
+# ---------------------------------------------------------------------------
+
 _NBA_KW = {
-    "lakers","celtics","warriors","bucks","heat","nets","knicks","bulls","suns",
-    "nuggets","clippers","sixers","76ers","raptors","mavericks","mavs","spurs",
-    "pacers","pistons","hawks","hornets","magic","thunder","blazers","jazz",
-    "grizzlies","pelicans","wolves","timberwolves","kings","rockets","cavaliers",
-    "cavs","wizards","nba","basketball",
+    "lakers", "celtics", "warriors", "bucks", "heat", "nets", "knicks", "bulls", "suns",
+    "nuggets", "clippers", "sixers", "76ers", "raptors", "mavericks", "mavs", "spurs",
+    "pacers", "pistons", "hawks", "hornets", "magic", "thunder", "blazers", "jazz",
+    "grizzlies", "pelicans", "wolves", "timberwolves", "kings", "rockets", "cavaliers",
+    "cavs", "wizards", "nba", "basketball",
 }
 _NFL_KW = {
-    "chiefs","eagles","cowboys","patriots","bengals","ravens","dolphins","bills",
-    "jets","steelers","browns","titans","colts","texans","jaguars","broncos",
-    "raiders","chargers","seahawks","49ers","rams","cardinals","falcons","saints",
-    "panthers","buccaneers","packers","bears","lions","vikings","giants",
-    "commanders","football","nfl",
+    "chiefs", "eagles", "cowboys", "patriots", "bengals", "ravens", "dolphins", "bills",
+    "steelers", "browns", "titans", "colts", "texans", "jaguars", "broncos",
+    "raiders", "chargers", "seahawks", "49ers", "rams", "falcons", "saints",
+    "buccaneers", "packers", "bears", "lions", "vikings", "giants",
+    "commanders", "football", "nfl",
+    # "cardinals", "jets", "panthers" omitted — too ambiguous with NHL
+}
+_NHL_KW = {
+    "nhl", "hockey", "stanley cup", "stanley",
+    "oilers", "flames", "canucks", "maple leafs", "leafs", "senators", "canadiens", "habs",
+    "bruins", "sabres", "rangers", "islanders", "devils", "flyers", "penguins", "capitals",
+    "hurricanes", "canes", "blue jackets", "red wings", "blackhawks", "predators", "preds", "blues",
+    "avalanche", "avs", "wild", "ducks", "sharks", "golden knights", "kraken",
+    "lightning", "bolts",
+    "goalie", "goalkeeper", "powerplay", "power play",
 }
 
 
 def detect_sport(text: str) -> str:
-    """Return 'nba' or 'nfl' based on keywords in a market question."""
+    """Return 'nba', 'nfl', or 'nhl' based on keywords in a market question."""
     t = text.lower()
-    return "nfl" if sum(1 for k in _NFL_KW if k in t) > sum(1 for k in _NBA_KW if k in t) else "nba"
+    nba_score = sum(1 for k in _NBA_KW if k in t)
+    nfl_score = sum(1 for k in _NFL_KW if k in t)
+    nhl_score = sum(1 for k in _NHL_KW if k in t)
+    best = max(nba_score, nfl_score, nhl_score)
+    if best == 0:
+        return "nba"  # safe default
+    if nhl_score == best:
+        return "nhl"
+    if nfl_score == best:
+        return "nfl"
+    return "nba"
 
 
 # ---------------------------------------------------------------------------
@@ -243,15 +339,16 @@ def detect_sport(text: str) -> str:
 
 class InjuryAPIClient:
     """
-    Two-source injury client with SQLite persistence.
+    Multi-sport injury client with SQLite persistence.
 
     Normal flow:
         # Run by the refresh job every 4 hours:
         client.fetch_and_store("nba")
         client.fetch_and_store("nfl")
+        client.fetch_and_store("nhl")
 
         # Run by scanner.collect() per sports market:
-        cats = client.build_injury_catalysts("Will the Lakers win tonight?")
+        cats = client.build_injury_catalysts("Will the Oilers win tonight?")
     """
 
     # Hot-path in-memory cache: sport → (timestamp, records)
@@ -271,7 +368,6 @@ class InjuryAPIClient:
     # ── Hot-path read ────────────────────────────────────────────────────────
 
     def _hot_get(self, sport: str) -> list[dict] | None:
-        """Return cached records if still fresh, else None."""
         ts, data = self._hot_cache.get(sport, (0.0, []))
         if time.time() - ts < _HOT_TTL:
             return data
@@ -283,11 +379,15 @@ class InjuryAPIClient:
     # ── Source 1: ESPN ───────────────────────────────────────────────────────
 
     def _fetch_espn(self, sport: str) -> list[dict]:
-        """
-        ESPN unofficial injury API. No key. NBA and NFL.
-        Returns active (non-healthy) players only.
-        """
-        url = _ESPN_NBA if sport.lower() == "nba" else _ESPN_NFL
+        """ESPN unofficial injury API. NBA, NFL, and NHL all supported."""
+        sport_lower = sport.lower()
+        if sport_lower == "nba":
+            url = _ESPN_NBA
+        elif sport_lower == "nhl":
+            url = _ESPN_NHL
+        else:
+            url = _ESPN_NFL
+
         resp = requests.get(url, headers=_HEADERS, timeout=15)
         resp.raise_for_status()
         raw = resp.json()
@@ -313,7 +413,7 @@ class InjuryAPIClient:
                     "return_date":   details.get("returnDate", ""),
                     "comment":       inj.get("shortComment", ""),
                     "source_api":    "espn",
-                    "sport":         sport.upper(),
+                    "sport":         sport_lower.upper(),
                 })
         log.info("[InjuryAPI] ESPN %s: %d active injuries", sport.upper(), len(records))
         return records
@@ -321,11 +421,6 @@ class InjuryAPIClient:
     # ── Source 2: NBA Official CDN PDF ───────────────────────────────────────
 
     def _fetch_nba_official(self) -> dict[str, str]:
-        """
-        NBA official CDN PDF. No key. 15-min updates. NBA only.
-        Returns {player_name_lower → status}.
-        Silently returns {} if pdfplumber is missing or CDN unavailable.
-        """
         try:
             import pdfplumber  # noqa
         except ImportError:
@@ -335,9 +430,8 @@ class InjuryAPIClient:
         return {r["player_name_lower"]: r["status"] for r in records}
 
     def _fetch_nba_pdf(self) -> list[dict]:
-        """Walk back through 15-min slots to find the latest published report."""
         now = datetime.now()
-        for mins_back in range(0, 300, 15):   # look back up to 5 hours
+        for mins_back in range(0, 300, 15):
             dt = now - timedelta(minutes=(now.minute % 15) + mins_back)
             dt = dt.replace(second=0, microsecond=0)
             url = _NBA_CDN.format(
@@ -358,14 +452,6 @@ class InjuryAPIClient:
 
     @staticmethod
     def _parse_nba_pdf(pdf_bytes: bytes) -> list[dict]:
-        """
-        Extract injury records from the NBA official report PDF.
-        The PDF has no table borders so pdfplumber.extract_table() fails.
-        We use line-by-line text extraction and scan for status keywords.
-
-        Player names are stored as 'Lastname,Firstname' in the PDF.
-        We normalize to 'Firstname Lastname' for ESPN matching.
-        """
         import pdfplumber
 
         records: list[dict] = []
@@ -402,7 +488,6 @@ class InjuryAPIClient:
                                 "reason":            reason,
                             })
                             break
-
         except Exception as exc:
             log.warning("[InjuryAPI] NBA PDF parse error: %s", exc)
 
@@ -413,11 +498,10 @@ class InjuryAPIClient:
     def fetch_and_store(self, sport: str) -> int:
         """
         Fetch fresh injury data from all sources for *sport* and persist to
-        SQLite. Called by the 4-hour refresh job — NOT by scan-time code.
+        SQLite. Supports 'nba', 'nfl', and 'nhl'.
 
-        Performs change detection: if any player's status worsens compared to
-        the previous snapshot, the change is stored as a pending alert that
-        injury_refresh_job() will forward to Telegram.
+        Change detection: if any player's status worsens vs previous snapshot,
+        the change is stored as a pending alert for Telegram dispatch.
 
         Returns the number of records stored.
         """
@@ -430,7 +514,7 @@ class InjuryAPIClient:
             log.warning("[InjuryAPI] ESPN %s fetch failed: %s", sport.upper(), exc)
             records = []
 
-        # NBA: overlay official status from the CDN PDF
+        # NBA only: overlay official status from the CDN PDF
         if sport == "nba":
             official = self._fetch_nba_official()
             if official:
@@ -448,7 +532,6 @@ class InjuryAPIClient:
         db = self._get_db()
 
         # ── Change detection ──────────────────────────────────────────────────
-        # Read previous statuses BEFORE overwriting to detect worsening.
         change_alerts: list[dict] = []
         if db is not None and records:
             prev_records = db.get(sport)
@@ -503,14 +586,14 @@ class InjuryAPIClient:
         Given a prediction market question, return Catalyst-compatible dicts
         for any injured players whose team is mentioned in the question.
 
-        Improvements over v1:
-        - Team matching uses a comprehensive alias map (abbreviations, city names,
-          nicknames) in addition to word-based fallback.
-        - Star players (LeBron, Mahomes, etc.) receive a direction multiplier that
-          increases the magnitude of the catalyst proportional to their market impact.
+        Supports NBA, NFL, and NHL markets.
 
-        Reads from the hot-path cache first, then SQLite. No live HTTP calls.
-        Returns [] if no relevant injuries are found.
+        Team matching uses comprehensive alias maps (abbreviations, nicknames,
+        city names). Star players receive a direction multiplier proportional
+        to their market impact. NHL goalies have elevated multipliers since
+        one goalie is the entire position.
+
+        Reads from hot-path cache first, then SQLite. No live HTTP calls.
         """
         if not sport:
             sport = detect_sport(market_question)
@@ -531,8 +614,17 @@ class InjuryAPIClient:
         if not records:
             return []
 
-        key_positions = _KEY_NBA if sport == "nba" else _KEY_NFL
-        alias_map = _NBA_TEAM_ALIASES if sport == "nba" else _NFL_TEAM_ALIASES
+        # Sport-specific lookup tables
+        if sport == "nba":
+            key_positions = _KEY_NBA
+            alias_map = _NBA_TEAM_ALIASES
+        elif sport == "nhl":
+            key_positions = _KEY_NHL
+            alias_map = _NHL_TEAM_ALIASES
+        else:
+            key_positions = _KEY_NFL
+            alias_map = _NFL_TEAM_ALIASES
+
         q = market_question.lower()
         catalyst_dicts: list[dict[str, Any]] = []
 
@@ -542,26 +634,23 @@ class InjuryAPIClient:
                 continue
 
             # ── Team matching ────────────────────────────────────────────────
-            # 1. Try the alias map (covers abbreviations, nicknames, city names)
             team_lower = team.lower()
             aliases = alias_map.get(team_lower)
-            # 2. Word-based fallback for teams not in the map
             if aliases is None:
                 aliases = [w for w in team_lower.split() if len(w) >= 4]
 
             if not any(alias in q for alias in aliases):
                 continue
 
-            # Skip bench players — only key positions move markets
+            # Skip non-key positions
             pos = inj.get("position", "")
             if pos and pos not in key_positions:
                 continue
 
             final_status = inj.get("status", "Questionable")
-            # Copy so we can modify without touching the shared dict
             sev = dict(_SEVERITY.get(final_status, _SEVERITY["Questionable"]))
 
-            # ── Star player multiplier ────────────────────────────────────────
+            # ── Star player / goalie multiplier ──────────────────────────────
             player      = inj.get("player_name", "Unknown")
             player_lower = player.lower()
             multiplier = 1.0
@@ -570,13 +659,13 @@ class InjuryAPIClient:
                     multiplier = mult
                     break
 
+            # NHL goalies always have elevated impact even if not a named star
+            if sport == "nhl" and pos == "G" and multiplier < 1.12:
+                multiplier = 1.12  # any starting goalie is high-impact
+
             if multiplier > 1.0:
                 sev["direction"] = max(-1.0, sev["direction"] * multiplier)
                 sev["quality"]   = min(1.0, sev["quality"] * (1.0 + (multiplier - 1.0) * 0.5))
-                log.debug(
-                    "[InjuryAPI] ⭐ Star multiplier %.2f applied to %s",
-                    multiplier, player,
-                )
 
             team_disp   = inj.get("team", "")
             inj_type    = inj.get("injury_type", "")
@@ -587,9 +676,14 @@ class InjuryAPIClient:
                 f"{inj_type}" + (f" - {inj_detail}" if inj_detail else "")
                 if inj_type else ""
             )
+
+            # Build label with sport-specific badges
+            pos_badge = "🥅" if (sport == "nhl" and pos == "G") else ""
             label = f"INJURY:{player} ({team_disp}) {final_status}"
             if detail_str:
                 label += f" [{detail_str}]"
+            if pos_badge:
+                label += f" {pos_badge}"
             if multiplier > 1.0:
                 label += " ⭐"
             if source_api == "nba_official":

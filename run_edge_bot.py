@@ -24,7 +24,9 @@ Commands in Telegram:
   /injuries          — injury cache summary (count + freshness)
   /injuries nba      — full NBA player list sorted by severity
   /injuries nfl      — full NFL player list sorted by severity
+  /injuries nhl      — full NHL player list sorted by severity
   /injuries nba lakers — filter NBA to Lakers only
+  /injuries nhl oilers — filter NHL to Oilers only
   /tracking          — show the injury game tracking list
   /top               — show top 3 opportunities from last scan
   /status            — show last scan summary
@@ -363,7 +365,9 @@ async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         "/scan — run market scan now\n"
         "/injuries — injury cache summary\n"
         "/injuries nba — full NBA injury list\n"
-        "/injuries nfl chiefs — filter by team\n"
+        "/injuries nfl — full NFL injury list\n"
+        "/injuries nhl — full NHL injury list\n"
+        "/injuries nhl oilers — filter by team\n"
         "/tracking — injury game tracking list\n"
         "/top — top 3 opportunities\n"
         "/status — last scan summary\n"
@@ -619,8 +623,10 @@ async def cmd_injuries(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
       /injuries            — summary (count + fetch time per sport)
       /injuries nba        — full NBA player list sorted by severity
       /injuries nfl        — full NFL player list sorted by severity
+      /injuries nhl        — full NHL player list sorted by severity
       /injuries nba lakers — NBA players for the Lakers only
       /injuries nfl chiefs — NFL players for the Chiefs only
+      /injuries nhl oilers — NHL players for the Oilers only
     """
     args = ctx.args or []
     sport_filter = args[0].lower() if args else None
@@ -631,14 +637,14 @@ async def cmd_injuries(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         cache = InjuryCache()
 
         # ── No sport arg: show summary ────────────────────────────────────────
-        if not sport_filter or sport_filter not in ("nba", "nfl"):
+        if not sport_filter or sport_filter not in ("nba", "nfl", "nhl"):
             stats = cache.stats()
             if not stats:
                 await update.message.reply_text(
                     "⚠️ No injury data cached yet.\n"
                     f"The refresh job runs every {INJURY_REFRESH_MIN // 60}h automatically.\n"
-                    "Try <code>/injuries nba</code> or <code>/injuries nfl</code> "
-                    "after the first refresh completes.",
+                    "Try <code>/injuries nba</code>, <code>/injuries nfl</code>, or "
+                    "<code>/injuries nhl</code> after the first refresh completes.",
                     parse_mode=ParseMode.HTML,
                 )
                 return
@@ -652,8 +658,8 @@ async def cmd_injuries(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
             lines.append(
                 f"\n<i>Auto-refresh every {INJURY_REFRESH_MIN // 60}h. "
                 "Records expire after 24h.</i>\n"
-                "Tip: <code>/injuries nba</code> or <code>/injuries nfl lakers</code> "
-                "for full player lists."
+                "Tip: <code>/injuries nba</code>, <code>/injuries nfl</code>, or "
+                "<code>/injuries nhl</code> for full player lists."
             )
             await update.message.reply_text("\n".join(lines), parse_mode=ParseMode.HTML)
             return
@@ -757,7 +763,7 @@ async def injury_refresh_job(ctx: ContextTypes.DEFAULT_TYPE) -> None:
     log.info("Injury refresh triggered.")
     client = _InjuryClient()
     results = {}
-    for sport in ("nba", "nfl"):
+    for sport in ("nba", "nfl", "nhl"):
         try:
             count = client.fetch_and_store(sport)
             results[sport.upper()] = count
@@ -785,7 +791,7 @@ async def injury_refresh_job(ctx: ContextTypes.DEFAULT_TYPE) -> None:
             old_em = _SEVERITY_EMOJI.get(old_s, "⚪")
             new_em = _SEVERITY_EMOJI.get(new_s, "🔴")
             pos_str = f" ({_e(pos)})" if pos else ""
-            sport_emoji = "🏀" if sport == "NBA" else "🏈"
+            sport_emoji = "🏀" if sport == "NBA" else ("🏒" if sport == "NHL" else "🏈")
 
             msg = (
                 f"🚨 <b>INJURY STATUS WORSENED</b>\n\n"
