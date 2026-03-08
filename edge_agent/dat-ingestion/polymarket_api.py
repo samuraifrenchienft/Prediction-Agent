@@ -43,14 +43,21 @@ def get_market_orderbook(token_id: str) -> dict:
 
 
 def parse_market_prob(market: dict) -> float:
-    """YES probability — prefer lastTradePrice, fall back to outcomePrices[0]."""
+    """
+    YES probability (0-1) from current CLOB token price.
+
+    outcomePrices[0] is the current YES token price — always reflects the live
+    CLOB state. lastTradePrice is the last *executed trade* which can be hours
+    or days old in illiquid markets and causes stale probability readings.
+    """
     try:
-        last = market.get("lastTradePrice")
-        if last is not None:
-            return round(float(last), 4)
         prices = market.get("outcomePrices", [])
         if prices:
             return round(float(prices[0]), 4)
+        # Fallback only if outcomePrices missing entirely
+        last = market.get("lastTradePrice")
+        if last is not None:
+            return round(float(last), 4)
     except (ValueError, TypeError):
         pass
     return 0.5

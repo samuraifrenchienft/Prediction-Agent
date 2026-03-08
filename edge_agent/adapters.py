@@ -57,6 +57,11 @@ class KalshiAdapter:
                 volume = _kalshi_api.parse_volume(m)
                 liquidity = _kalshi_api.parse_liquidity(m)
 
+                # Kalshi is market-maker driven — the `liquidity` field is
+                # often 0 even for active markets. Use 20% of 24h dollar
+                # volume as a conservative depth proxy when liquidity=0.
+                effective_depth = liquidity if liquidity > 0 else volume * 0.20
+
                 result.append(
                     AdapterMarket(
                         snapshot=MarketSnapshot(
@@ -64,10 +69,11 @@ class KalshiAdapter:
                             venue=self.venue,
                             market_prob=prob,
                             spread_bps=spread,
-                            depth_usd=liquidity,
+                            depth_usd=effective_depth,
                             volume_24h_usd=volume,
                             time_to_resolution_hours=self._hours_to_close(m),
                             updated_at=datetime.now(timezone.utc),
+                            question=m.get("title") or m.get("subtitle") or m.get("ticker"),
                         ),
                         catalysts=[],
                         theme=self._infer_theme(m),
@@ -141,6 +147,7 @@ class PolymarketAdapter:
                             volume_24h_usd=_poly_api.parse_volume_24h(m),
                             time_to_resolution_hours=self._hours_to_end(m),
                             updated_at=datetime.now(timezone.utc),
+                            question=m.get("question") or m.get("groupItemTitle"),
                         ),
                         catalysts=[],
                         theme=self._infer_theme(m),
