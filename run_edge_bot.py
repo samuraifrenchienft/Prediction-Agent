@@ -84,6 +84,7 @@ log = logging.getLogger("edge_bot")
 
 BOT_TOKEN          = os.environ.get("TELEGRAM_BOT_TOKEN", "")
 CHAT_ID            = os.environ.get("TELEGRAM_CHAT_ID", "")
+OWNER_ID           = os.environ.get("TELEGRAM_OWNER_ID", "")   # your personal user ID (from @userinfobot)
 SCAN_INTERVAL_MIN    = int(os.environ.get("SCAN_INTERVAL_MINUTES", "180"))  # default 3 hours
 INJURY_REFRESH_MIN   = int(os.environ.get("INJURY_REFRESH_MINUTES", "240"))  # default 4 hours
 BANKROLL_USD         = float(os.environ.get("BANKROLL_USD", "10000"))
@@ -851,17 +852,40 @@ def main() -> None:
     )
 
     # ---------------------------------------------------------------------------
-    # Chat-ID whitelist filter — bot only responds in the authorized CHAT_ID.
-    # Any other group or DM the bot is added to will be silently ignored.
-    # This gives natural conversation flow (no @mention needed) in the one
-    # authorized chat while preventing the bot from leaking into other chats.
+    # Access control — two-layer whitelist:
+    #   Layer 1: filters.Chat — bot only processes updates from TELEGRAM_CHAT_ID.
+    #            Silently ignores every other group or DM the bot is added to.
+    #   Layer 2: filters.User — within that chat, only TELEGRAM_OWNER_ID can
+    #            trigger commands or AI chat. Other group members are ignored.
+    #
+    # Result: natural conversation feel (no @mention needed), bot responds only
+    # to you, and is completely deaf to every other user in the group.
+    #
+    # Get your user ID: message @userinfobot on Telegram, then set in .env:
+    #   TELEGRAM_OWNER_ID=<your numeric id>
     # ---------------------------------------------------------------------------
     try:
-        _auth_filter = filters.Chat(int(CHAT_ID))
+        _chat_filter = filters.Chat(int(CHAT_ID))
         log.info("Chat filter active: only responding to chat_id=%s", CHAT_ID)
     except (ValueError, TypeError):
-        _auth_filter = filters.ALL
+        _chat_filter = filters.ALL
         log.warning("CHAT_ID=%r is not a valid integer — no chat filter applied", CHAT_ID)
+
+    try:
+        _user_filter = filters.User(int(OWNER_ID)) if OWNER_ID else filters.ALL
+        if OWNER_ID:
+            log.info("User filter active: only responding to user_id=%s", OWNER_ID)
+        else:
+            log.warning(
+                "TELEGRAM_OWNER_ID not set — bot will respond to ALL users in the chat. "
+                "Set TELEGRAM_OWNER_ID in .env to restrict to just your account."
+            )
+    except (ValueError, TypeError):
+        _user_filter = filters.ALL
+        log.warning("OWNER_ID=%r is not a valid integer — no user filter applied", OWNER_ID)
+
+    # Combined filter: must be from the authorized chat AND the authorized user
+    _auth_filter = _chat_filter & _user_filter
 
     # Command handlers — only fire in the authorized chat
     app.add_handler(CommandHandler("start",     cmd_start,     filters=_auth_filter))
