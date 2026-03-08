@@ -850,21 +850,37 @@ def main() -> None:
         .build()
     )
 
-    # Command handlers
-    app.add_handler(CommandHandler("start",     cmd_start))
-    app.add_handler(CommandHandler("help",      cmd_help))
-    app.add_handler(CommandHandler("scan",      cmd_scan))
-    app.add_handler(CommandHandler("injuries",  cmd_injuries))
-    app.add_handler(CommandHandler("tracking",  cmd_tracking))
-    app.add_handler(CommandHandler("top",       cmd_top))
-    app.add_handler(CommandHandler("status",    cmd_status))
-    app.add_handler(CommandHandler("approvals", cmd_approvals))
+    # ---------------------------------------------------------------------------
+    # Chat-ID whitelist filter — bot only responds in the authorized CHAT_ID.
+    # Any other group or DM the bot is added to will be silently ignored.
+    # This gives natural conversation flow (no @mention needed) in the one
+    # authorized chat while preventing the bot from leaking into other chats.
+    # ---------------------------------------------------------------------------
+    try:
+        _auth_filter = filters.Chat(int(CHAT_ID))
+        log.info("Chat filter active: only responding to chat_id=%s", CHAT_ID)
+    except (ValueError, TypeError):
+        _auth_filter = filters.ALL
+        log.warning("CHAT_ID=%r is not a valid integer — no chat filter applied", CHAT_ID)
 
-    # Inline keyboard
+    # Command handlers — only fire in the authorized chat
+    app.add_handler(CommandHandler("start",     cmd_start,     filters=_auth_filter))
+    app.add_handler(CommandHandler("help",      cmd_help,      filters=_auth_filter))
+    app.add_handler(CommandHandler("scan",      cmd_scan,      filters=_auth_filter))
+    app.add_handler(CommandHandler("injuries",  cmd_injuries,  filters=_auth_filter))
+    app.add_handler(CommandHandler("tracking",  cmd_tracking,  filters=_auth_filter))
+    app.add_handler(CommandHandler("top",       cmd_top,       filters=_auth_filter))
+    app.add_handler(CommandHandler("status",    cmd_status,    filters=_auth_filter))
+    app.add_handler(CommandHandler("approvals", cmd_approvals, filters=_auth_filter))
+
+    # Inline keyboard (callback queries are always scoped to the chat they came from)
     app.add_handler(CallbackQueryHandler(handle_callback))
 
-    # Free-form AI chat (must come last)
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+    # Free-form AI chat — only in the authorized chat, must come last
+    app.add_handler(MessageHandler(
+        filters.TEXT & ~filters.COMMAND & _auth_filter,
+        handle_message,
+    ))
 
     # Injury refresh job — runs every INJURY_REFRESH_MIN, first run at 60s after startup
     # This is the ONLY code path that calls ESPN / NBA CDN injury APIs
