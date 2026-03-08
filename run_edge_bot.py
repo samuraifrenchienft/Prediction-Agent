@@ -19,6 +19,17 @@ Setup (one-time):
   4. pip install python-telegram-bot
   5. python run_edge_bot.py
 
+Injury refresh schedule (Pacific time):
+  09:00 PT — morning check (overnight changes, NHL morning skate, NFL Wed report)
+  13:30 PT — mid-day (NBA official PDF window, NFL Thu/Fri report)
+  16:30 PT — pre-game final (last-minute scratches, lineup confirmations)
+  + startup warmup 60s after boot
+
+Injury sources:
+  NBA: ESPN + official NBA PDF + Sleeper API cross-ref + star player news check
+  NFL: ESPN + Sleeper API cross-ref + star player news check
+  NHL: ESPN + star player news check
+
 Commands in Telegram:
   /scan              — run a full market scan immediately
   /injuries          — injury cache summary (count + freshness)
@@ -43,7 +54,15 @@ import json
 import logging
 import os
 from datetime import datetime, timezone
+from datetime import time as dt_time
 from pathlib import Path
+
+try:
+    from zoneinfo import ZoneInfo
+    _PACIFIC = ZoneInfo("America/Los_Angeles")
+except ImportError:
+    import datetime as _dt
+    _PACIFIC = _dt.timezone(_dt.timedelta(hours=-8))  # PST fallback (no DST)
 
 from dotenv import load_dotenv
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
@@ -375,7 +394,7 @@ async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         "/help — this message\n\n"
         f"{filter_note}\n"
         f"⏱ Market scan every {SCAN_INTERVAL_MIN // 60}h | "
-        f"Injury refresh every {INJURY_REFRESH_MIN // 60}h.\n\n"
+        "Injury refresh: 9am, 1:30pm, 4:30pm PT.\n\n"
         "💬 Send any message to chat with EDGE about markets.",
         parse_mode=ParseMode.HTML,
     )
@@ -604,11 +623,12 @@ async def handle_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None
 # ---------------------------------------------------------------------------
 
 _SEVERITY_EMOJI = {
-    "Out":         "🔴",
-    "Suspension":  "🚫",
-    "Doubtful":    "🟠",
-    "Questionable":"🟡",
-    "Day-To-Day":  "⚪",
+    "Out":             "🔴",
+    "Injured Reserve": "🔴",   # NHL IR — confirmed miss, treated same as Out
+    "Suspension":      "🚫",
+    "Doubtful":        "🟠",
+    "Questionable":    "🟡",
+    "Day-To-Day":      "⚪",
 }
 
 # Max players shown per sport before truncation (keeps messages readable)
@@ -642,7 +662,7 @@ async def cmd_injuries(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
             if not stats:
                 await update.message.reply_text(
                     "⚠️ No injury data cached yet.\n"
-                    f"The refresh job runs every {INJURY_REFRESH_MIN // 60}h automatically.\n"
+                    "Refreshes run at 9am, 1:30pm, and 4:30pm PT automatically.\n"
                     "Try <code>/injuries nba</code>, <code>/injuries nfl</code>, or "
                     "<code>/injuries nhl</code> after the first refresh completes.",
                     parse_mode=ParseMode.HTML,
@@ -656,8 +676,7 @@ async def cmd_injuries(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
                     f"   Fetched: {_e(info['last_fetch'])} | Expires: {_e(info['expires'])}"
                 )
             lines.append(
-                f"\n<i>Auto-refresh every {INJURY_REFRESH_MIN // 60}h. "
-                "Records expire after 24h.</i>\n"
+                "\n<i>Auto-refresh: 9am, 1:30pm, 4:30pm PT. Records expire after 24h.</i>\n"
                 "Tip: <code>/injuries nba</code>, <code>/injuries nfl</code>, or "
                 "<code>/injuries nhl</code> for full player lists."
             )
@@ -679,7 +698,7 @@ async def cmd_injuries(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
             else:
                 msg = (
                     f"<b>🏥 {_e(label)} Injuries</b>\n"
-                    f"No injury data cached yet. Refreshes every {INJURY_REFRESH_MIN // 60}h."
+                    "No injury data cached yet. Next refresh at 9am, 1:30pm, or 4:30pm PT."
                 )
             await update.message.reply_text(msg, parse_mode=ParseMode.HTML)
             return
@@ -719,7 +738,15 @@ async def cmd_injuries(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
 
             pos_str    = f" ({_e(pos)})" if pos else ""
             detail_str = f" — <i>{_e(inj_type)}</i>" if inj_type else ""
-            src_badge  = " ✅" if src == "nba_official" else ""
+            # Source badge: ✅ = multi-source confirmed | ⚠️ = conflicting sources | 📰 = news confirmed
+            if "nba_official" in src or "+sleeper✓" in src:
+                src_badge = " ✅"
+            elif "⚠️" in src:
+                src_badge = " ⚠️"
+            elif "news✓" in src:
+                src_badge = " 📰"
+            else:
+                src_badge = ""
 
             lines.append(
                 f"  {sem} <b>{_e(player)}</b>{pos_str}: {_e(status)}{detail_str}{src_badge}"
@@ -727,8 +754,7 @@ async def cmd_injuries(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
             shown += 1
 
         lines.append(
-            f"\n<i>Auto-refresh every {INJURY_REFRESH_MIN // 60}h. "
-            "✅ = NBA official report.</i>"
+            "\n<i>✅ multi-source confirmed | ⚠️ conflicting sources (treat as uncertain) | 📰 news confirmed</i>"
         )
 
         msg = "\n".join(lines)
@@ -912,13 +938,26 @@ def main() -> None:
         handle_message,
     ))
 
-    # Injury refresh job — runs every INJURY_REFRESH_MIN, first run at 60s after startup
-    # This is the ONLY code path that calls ESPN / NBA CDN injury APIs
-    app.job_queue.run_repeating(
-        injury_refresh_job,
-        interval=INJURY_REFRESH_MIN * 60,
-        first=60,  # warm the injury cache 60s after startup
-    )
+    # ---------------------------------------------------------------------------
+    # Injury refresh — 3 targeted daily pulls aligned to game-prep windows
+    # (Pacific time, handles PST/PDT automatically via ZoneInfo)
+    #
+    #   09:00 PT — morning check: overnight news, NHL morning skate, NFL Wed report
+    #   13:30 PT — mid-day: NBA official PDF opens (5 PM ET), NFL Thu/Fri report
+    #   16:30 PT — pre-game final: last-minute scratches + lineup confirmations
+    #
+    # This replaces the old dumb 4-hour timer — injury lists rarely change
+    # mid-day but are most likely to update in these three windows.
+    # ---------------------------------------------------------------------------
+    for _pull_time in (
+        dt_time(9,  0,  tzinfo=_PACIFIC),   # morning
+        dt_time(13, 30, tzinfo=_PACIFIC),   # mid-day / NBA PDF window
+        dt_time(16, 30, tzinfo=_PACIFIC),   # pre-game final
+    ):
+        app.job_queue.run_daily(injury_refresh_job, time=_pull_time)
+
+    # Startup warmup — populate cache 60s after boot regardless of time of day
+    app.job_queue.run_once(injury_refresh_job, when=60)
 
     # Background market scan loop — reads from injury cache, no live injury API calls
     app.job_queue.run_repeating(

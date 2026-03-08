@@ -29,7 +29,9 @@ Architecture
 from __future__ import annotations
 
 import importlib
+import json
 import logging
+import os
 import re
 import time
 import io
@@ -37,6 +39,10 @@ from datetime import datetime, timedelta
 from typing import Any
 
 import requests
+
+# File cache dir shared with news_api.py
+_CACHE_DIR = ".cache"
+os.makedirs(_CACHE_DIR, exist_ok=True)
 
 log = logging.getLogger(__name__)
 
@@ -47,6 +53,12 @@ log = logging.getLogger(__name__)
 def _get_injury_cache():
     mod = importlib.import_module("edge_agent.memory.injury_cache")
     return mod.InjuryCache()
+
+
+def _get_news_client():
+    """Lazy import of NewsAPIClient — same module dir, avoids circular import."""
+    mod = importlib.import_module(".dat-ingestion.news_api", "edge_agent")
+    return mod.NewsAPIClient()
 
 
 # ---------------------------------------------------------------------------
@@ -96,6 +108,46 @@ _KEY_NHL = {"C", "LW", "RW", "D", "G"}   # all positions matter in hockey; G = g
 
 # Hot-path in-memory cache TTL (30 min)
 _HOT_TTL = 1800
+
+# ---------------------------------------------------------------------------
+# Sleeper API — free, no auth, real-time NFL/NBA injury statuses
+# Used as secondary cross-reference source for NFL and NBA.
+# Docs: https://docs.sleeper.com/#get-all-players
+# ---------------------------------------------------------------------------
+
+_SLEEPER_NFL = "https://api.sleeper.app/v1/players/nfl"
+_SLEEPER_NBA = "https://api.sleeper.app/v1/players/nba"
+_SLEEPER_TTL = 21600  # 6h file cache — response is large (~8MB), avoid hammering
+
+# Sleeper uses different status labels — map them to our standard set
+_SLEEPER_STATUS_MAP: dict[str, str] = {
+    "Out":          "Out",
+    "Doubtful":     "Doubtful",
+    "Questionable": "Questionable",
+    "IR":           "Injured Reserve",   # NFL placed on IR
+    "DNR":          "Out",               # Did Not Return (game-time scratch)
+    "NF":           "Suspension",        # Non-football related (suspension)
+    "COV":          "Out",               # COVID protocols (legacy)
+    "PUP":          "Out",               # Physically unable to perform
+    "NFI":          "Out",               # Non-football injury (camp)
+}
+
+# ---------------------------------------------------------------------------
+# News headline keywords for star player spot-check
+# Only ~10-20 star players get checked per refresh — quota-safe on 100/day tier
+# ---------------------------------------------------------------------------
+
+_NEWS_RETURN_KW = frozenset({
+    "return", "cleared", "back at practice", "off injury report",
+    "upgraded", "probable", "removed from", "no longer listed",
+    "available", "participat", "full practice", "expected to play",
+    "ready to play", "cleared to play",
+})
+_NEWS_CONFIRM_KW = frozenset({
+    "out", "ruled out", "injured reserve", "placed on ir",
+    "questionable", "doubtful", "miss", "injured", "day-to-day", "dtd",
+    "will not play", "won't play", "sits out", "sidelined", "listed as out",
+})
 
 # ---------------------------------------------------------------------------
 # Star player registry — direction & quality multiplier for marquee players
@@ -493,6 +545,136 @@ class InjuryAPIClient:
 
         return records
 
+    # ── Secondary source: Sleeper API (NFL/NBA) ──────────────────────────────
+
+    def _fetch_sleeper(self, sport: str) -> dict[str, str]:
+        """
+        Return {full_name_lower: normalized_status} from the Sleeper player API.
+        File-cached for 6 hours (response is ~8MB — we don't want to re-fetch
+        on every scan cycle).  Returns {} for NHL (Sleeper doesn't cover it)
+        or if the request fails.
+        """
+        sport_lower = sport.lower()
+        if sport_lower not in ("nba", "nfl"):
+            return {}
+
+        cache_file = os.path.join(_CACHE_DIR, f"sleeper_{sport_lower}.json")
+        if os.path.exists(cache_file):
+            try:
+                with open(cache_file) as f:
+                    cached = json.load(f)
+                if time.time() - cached.get("ts", 0) < _SLEEPER_TTL:
+                    return cached.get("data", {})
+            except Exception:
+                pass
+
+        url = _SLEEPER_NFL if sport_lower == "nfl" else _SLEEPER_NBA
+        try:
+            resp = requests.get(url, headers=_HEADERS, timeout=25)
+            resp.raise_for_status()
+            raw = resp.json()
+        except Exception as exc:
+            log.warning("[InjuryAPI] Sleeper %s fetch failed: %s", sport.upper(), exc)
+            return {}
+
+        result: dict[str, str] = {}
+        for player_data in raw.values():
+            if not isinstance(player_data, dict):
+                continue
+            full_name = player_data.get("full_name") or ""
+            inj_status = player_data.get("injury_status") or ""
+            if full_name and inj_status:
+                normalized = _SLEEPER_STATUS_MAP.get(inj_status)
+                if normalized:
+                    result[full_name.lower()] = normalized
+
+        try:
+            with open(cache_file, "w") as f:
+                json.dump({"ts": time.time(), "data": result}, f)
+        except Exception:
+            pass
+
+        log.info("[InjuryAPI] Sleeper %s: %d players with active injury status", sport.upper(), len(result))
+        return result
+
+    # ── Star player news spot-check ───────────────────────────────────────────
+
+    def _verify_stars_with_news(self, records: list[dict], sport: str) -> None:
+        """
+        Headline spot-check for star players only (those in _STAR_MULTIPLIERS).
+
+        Queries GNews/NewsAPI for "{player} injury" and scans the headlines
+        for return-signal vs confirm-signal keywords.  Mutates source_api
+        in-place to flag conflicts or confirmation.
+
+        Quota-safe: at most ~10-20 star players are ever injured at once,
+        and each result is cached 2 hours, so this stays well under 100/day.
+        Silently skips if news API is not configured.
+        """
+        try:
+            news = _get_news_client()
+        except Exception:
+            return  # no news API key configured — skip silently
+
+        for rec in records:
+            player = rec.get("player_name", "")
+            player_lower = player.lower()
+
+            # Only check named star players — skip role players
+            if not any(k in player_lower for k in _STAR_MULTIPLIERS):
+                continue
+
+            status = rec.get("status", "")
+
+            # Per-player file cache — 2h TTL
+            safe_key = re.sub(r"[^a-z0-9]", "_", player_lower)
+            cache_file = os.path.join(_CACHE_DIR, f"news_inj_{safe_key}.json")
+
+            headlines: list[str] = []
+            if os.path.exists(cache_file):
+                try:
+                    with open(cache_file) as f:
+                        cached = json.load(f)
+                    if time.time() - cached.get("ts", 0) < 7200:
+                        headlines = cached.get("headlines", [])
+                except Exception:
+                    pass
+
+            if not headlines:
+                try:
+                    articles = news.get_top_headlines(
+                        f"{player} injury", page_size=5, ttl_seconds=7200
+                    )
+                    headlines = [
+                        (a.get("title", "") + " " + a.get("description", "")).lower()
+                        for a in articles
+                    ]
+                    with open(cache_file, "w") as f:
+                        json.dump({"ts": time.time(), "headlines": headlines}, f)
+                except Exception as exc:
+                    log.debug("[InjuryAPI] News check skipped for %s: %s", player, exc)
+                    continue
+
+            if not headlines:
+                continue
+
+            combined = " ".join(headlines)
+            return_score  = sum(1 for kw in _NEWS_RETURN_KW  if kw in combined)
+            confirm_score = sum(1 for kw in _NEWS_CONFIRM_KW if kw in combined)
+
+            cur_src = rec.get("source_api", "espn")
+            if return_score > confirm_score and status in ("Out", "Injured Reserve", "Doubtful"):
+                # Headlines lean toward player returning — flag as conflicting
+                rec["source_api"] = cur_src + "+news⚠️"
+                log.info(
+                    "[InjuryAPI] News conflict: %s ESPN=%s but headlines suggest return",
+                    player, status,
+                )
+            elif confirm_score > 0:
+                # At least one headline confirms the injury
+                rec["source_api"] = cur_src + "+news✓"
+                log.debug("[InjuryAPI] News confirmed: %s %s", player, status)
+
     # ── Scheduled refresh entry point ────────────────────────────────────────
 
     def fetch_and_store(self, sport: str) -> int:
@@ -528,6 +710,43 @@ class InjuryAPIClient:
                                 r["source_api"] = "nba_official"
                         except ValueError:
                             pass
+
+        # NFL/NBA: cross-reference with Sleeper's independent injury data
+        if sport in ("nfl", "nba"):
+            sleeper = self._fetch_sleeper(sport)
+            if sleeper:
+                confirmed = upgraded = conflicted = 0
+                for r in records:
+                    name_lower = r["player_name"].lower()
+                    sl_status = sleeper.get(name_lower)
+                    if not sl_status:
+                        continue
+                    cur_src = r.get("source_api", "espn")
+                    try:
+                        espn_idx = _SEVERITY_ORDER.index(r["status"])
+                        sl_idx   = _SEVERITY_ORDER.index(sl_status)
+                        if sl_idx < espn_idx:
+                            # Sleeper shows a worse status → upgrade
+                            r["status"]     = sl_status
+                            r["source_api"] = cur_src + "+sleeper↑"
+                            upgraded += 1
+                        elif sl_idx == espn_idx:
+                            # Both sources agree → confirmed
+                            r["source_api"] = cur_src + "+sleeper✓"
+                            confirmed += 1
+                        else:
+                            # Sleeper shows lighter status → flag conflict
+                            r["source_api"] = cur_src + "+sleeper⚠️"
+                            conflicted += 1
+                    except ValueError:
+                        pass
+                log.info(
+                    "[InjuryAPI] Sleeper %s cross-ref: %d confirmed | %d upgraded | %d conflicted",
+                    sport.upper(), confirmed, upgraded, conflicted,
+                )
+
+        # All sports: headline spot-check for named star players only
+        self._verify_stars_with_news(records, sport)
 
         db = self._get_db()
 
@@ -649,6 +868,15 @@ class InjuryAPIClient:
 
             final_status = inj.get("status", "Questionable")
             sev = dict(_SEVERITY.get(final_status, _SEVERITY["Questionable"]))
+
+            # ── Cross-reference confidence adjustment ─────────────────────────
+            src = inj.get("source_api", "espn")
+            if "⚠️" in src:
+                # Sources disagree — player may be closer to returning than listed
+                sev["confidence"] = max(0.30, sev["confidence"] - 0.20)
+            elif "+sleeper✓" in src or "news✓" in src or "nba_official" in src:
+                # Multiple independent sources confirm → boost confidence
+                sev["confidence"] = min(0.98, sev["confidence"] + 0.05)
 
             # ── Star player / goalie multiplier ──────────────────────────────
             player      = inj.get("player_name", "Unknown")
