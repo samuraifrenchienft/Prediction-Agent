@@ -99,6 +99,44 @@ _InjuryClient = _injury_mod.InjuryAPIClient
 _ONDEMAND_REFRESH_COOLDOWN: dict[str, float] = {}
 
 load_dotenv()
+
+# ---------------------------------------------------------------------------
+# Tavily real-time web search
+# ---------------------------------------------------------------------------
+
+def _tavily_search(query: str, max_results: int = 5) -> str:
+    """
+    Fire a Tavily search and return a compact summary block for prompt injection.
+    Returns "" if TAVILY_API_KEY is not set or the call fails.
+    """
+    api_key = os.getenv("TAVILY_API_KEY", "").strip()
+    if not api_key:
+        return ""
+    try:
+        from tavily import TavilyClient
+        client = TavilyClient(api_key=api_key)
+        response = client.search(
+            query=query,
+            search_depth="basic",
+            max_results=max_results,
+            include_answer=True,
+        )
+        lines = ["\n[Live web search results]"]
+        # Top-level AI answer when available
+        answer = response.get("answer") or ""
+        if answer:
+            lines.append(f"Summary: {answer.strip()}")
+        # Individual results
+        for r in response.get("results", [])[:max_results]:
+            title   = r.get("title", "").strip()
+            content = r.get("content", "").strip()[:200]
+            url     = r.get("url", "")
+            lines.append(f"• {title}: {content}  [{url}]")
+        lines.append("[End web search]")
+        return "\n".join(lines)
+    except Exception as exc:
+        log.debug("Tavily search failed: %s", exc)
+        return ""
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 log = logging.getLogger("edge_bot")
 
@@ -771,6 +809,17 @@ async def handle_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None
 
     injury_context = _build_injury_context(q)
 
+    # 6. Tavily real-time web search — fires when a sport is detected.
+    #    Gives the AI actual current data (scores, rosters, news, injuries)
+    #    rather than relying on training-data recall.
+    search_context = ""
+    if _chat_sport:
+        loop = asyncio.get_event_loop()
+        search_context = await loop.run_in_executor(
+            None, _tavily_search,
+            f"{user_msg} {_chat_sport.upper()} injury report today",
+        )
+
     system_prompt = (
         "You are Edge, an expert prediction market analyst on Telegram. "
         "Be concise — Telegram users want short, direct answers. "
@@ -779,18 +828,16 @@ async def handle_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None
         "If asked about account setup or platform UI, give step-by-step guidance. "
         "Return plain text (no JSON). Keep replies under 300 words.\n\n"
         "CRITICAL — INJURY DATA RULES (hard rules, no exceptions):\n"
-        "• You have NO internet access. You CANNOT search the web, fetch URLs, "
-        "call APIs, or retrieve anything live.\n"
-        "• NEVER claim to 'perform a search', 'check live data', 'look up', or "
-        "'fetch' anything. You physically cannot do this.\n"
-        "• ONLY report injury information that is explicitly listed in the "
-        "[Live injury data] block provided below. Do not add, guess, or recall "
-        "any player status from your training knowledge.\n"
-        "• If a player or team is NOT in the [Live injury data] block, say exactly: "
-        "'I don't have current data for [name] — use /injuries nba (or nfl/nhl) "
-        "to pull a fresh report.'\n"
-        "• If no [Live injury data] block is present, say: "
-        "'My injury cache is empty right now — use /injuries nba to refresh.'\n\n"
+        "• Ground ALL injury and roster facts in [Live injury data] and "
+        "[Live web search results] blocks below — these are your only "
+        "authoritative sources.\n"
+        "• NEVER recall or invent player statuses from training memory.\n"
+        "• If a player is not covered by either block, say: "
+        "'I don't have current data for [name] — use /injuries nba (or nfl/nhl).'\n"
+        "• If no data blocks are present at all, say: "
+        "'My data is unavailable right now — use /injuries nba to refresh.'\n"
+        "• You may acknowledge that a web search was performed if [Live web search results] "
+        "is present — but NEVER claim to search when that block is absent.\n\n"
         "CRITICAL — YOU ARE A PREDICTION MARKET ANALYST, NOT A SPORTSBOOK:\n"
         "• NEVER use sportsbook spread language: no '+3.5', '-7.5', 'moneyline', "
         "'ATS', 'cover', 'over/under', 'juice', '-110', or point spreads.\n"
@@ -802,7 +849,7 @@ async def handle_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None
         "not sides or totals."
     )
 
-    prompt = user_msg + kb_context + session_context + market_context + scan_context + injury_context
+    prompt = user_msg + kb_context + session_context + market_context + scan_context + injury_context + search_context
     reply = get_chat_response(prompt, task_type="creative", system_prompt=system_prompt) or "Sorry, I couldn't generate a response right now."
 
     # Save to session memory
