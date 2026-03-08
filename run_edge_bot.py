@@ -95,6 +95,9 @@ _kalshi_api   = importlib.import_module(".dat-ingestion.kalshi_api", "edge_agent
 _injury_mod   = importlib.import_module(".dat-ingestion.injury_api", "edge_agent")
 _InjuryClient = _injury_mod.InjuryAPIClient
 
+# Per-sport on-demand refresh rate limiter (unix timestamp of last trigger)
+_ONDEMAND_REFRESH_COOLDOWN: dict[str, float] = {}
+
 load_dotenv()
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 log = logging.getLogger("edge_bot")
@@ -541,6 +544,33 @@ async def handle_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> Non
 # Injury context builder for free-form chat
 # ---------------------------------------------------------------------------
 
+async def _maybe_refresh_injury_cache(sport: str) -> None:
+    """
+    On-demand freshness gate. If the cache for *sport* is empty or older than
+    2 hours, fires a synchronous fetch_and_store() in a background thread so
+    the very next _build_injury_context() call returns real data instead of
+    nothing.  Rate-limited to once per 30 min per sport.
+    """
+    import time as _t
+    now = _t.time()
+    if now - _ONDEMAND_REFRESH_COOLDOWN.get(sport, 0) < 1800:
+        return  # refreshed recently
+    try:
+        from edge_agent.memory.injury_cache import InjuryCache
+        records = InjuryCache().get_all(sport)
+        if records:
+            newest = max(r.get("fetched_at", 0) for r in records)
+            if (now - newest) / 3600 < 2.0:
+                return  # fresh enough
+        _ONDEMAND_REFRESH_COOLDOWN[sport] = now
+        log.info("On-demand cache refresh triggered for %s", sport.upper())
+        loop = asyncio.get_event_loop()
+        await loop.run_in_executor(None, _InjuryClient().fetch_and_store, sport)
+        log.info("On-demand cache refresh complete for %s", sport.upper())
+    except Exception as exc:
+        log.debug("On-demand cache refresh failed for %s: %s", sport, exc)
+
+
 def _build_injury_context(query: str) -> str:
     """
     Check whether the user's message mentions a sport, team, or player.
@@ -632,10 +662,20 @@ def _build_injury_context(query: str) -> str:
             pos_s  = f" ({pos})" if pos else ""
             lines.append(f"  {tag}: {player}{pos_s} — {team}{detail}{src_tag}")
 
-        lines.append("[Source: ESPN" +
-                     (" + NBA official PDF" if matched_sport == "nba" else "") +
-                     (" + Sleeper cross-ref" if matched_sport in ("nba", "nfl") else "") +
-                     ". Refreshed 9am/1:30pm/4:30pm PT]")
+        import time as _t
+        newest_ts = max((r.get("fetched_at", 0) for r in relevant), default=0)
+        if newest_ts:
+            age_min = int((_t.time() - newest_ts) / 60)
+            age_str = f"{age_min}m ago" if age_min < 60 else f"{age_min // 60}h {age_min % 60}m ago"
+        else:
+            age_str = "unknown"
+        sources = "ESPN"
+        if matched_sport == "nba":
+            sources += " + NBA official PDF"
+        if matched_sport in ("nba", "nfl"):
+            sources += " + Sleeper cross-ref"
+        lines.append(f"[Source: {sources}. Last updated {age_str}. "
+                     f"Use /injuries {matched_sport} to force-refresh.]")
         return "\n".join(lines)
 
     except Exception as exc:
@@ -701,8 +741,34 @@ async def handle_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None
             )
         scan_context = "\n".join(lines)
 
-    # 5. Live injury context — injected when the message mentions a sport/team/player
-    #    Uses the same verified cache (ESPN + Sleeper + news) that feeds market scans.
+    # 5. Live injury context — injected when the message mentions a sport/team/player.
+    #    Before building context, auto-refresh the cache if it is stale (>2h) or empty
+    #    so the AI always sees real data rather than falling back to training knowledge.
+    _SPORT_DETECT = {
+        "nba": {"nba", "basketball", "lakers", "celtics", "warriors", "bucks", "heat",
+                "nets", "knicks", "nuggets", "suns", "sixers", "raptors", "mavericks",
+                "mavs", "spurs", "thunder", "grizzlies", "pelicans", "kings", "bulls",
+                "rockets", "jazz", "clippers", "pistons", "hornets", "magic", "hawks",
+                "pacers", "cavaliers", "wizards", "timberwolves", "trail blazers"},
+        "nfl": {"nfl", "football", "chiefs", "eagles", "cowboys", "ravens", "bills",
+                "bengals", "dolphins", "steelers", "49ers", "rams", "seahawks",
+                "patriots", "packers", "bears", "giants", "saints", "buccaneers",
+                "chargers", "raiders", "broncos", "texans", "colts", "titans",
+                "jaguars", "browns", "falcons", "panthers", "cardinals", "vikings"},
+        "nhl": {"nhl", "hockey", "oilers", "bruins", "rangers", "leafs", "canadiens",
+                "penguins", "capitals", "lightning", "golden knights", "kraken",
+                "avalanche", "flames", "canucks", "senators", "sabres", "coyotes",
+                "sharks", "ducks", "kings", "blues", "predators", "wild", "jets",
+                "red wings", "islanders", "devils", "flyers", "hurricanes"},
+    }
+    _chat_sport = None
+    for _sp, _triggers in _SPORT_DETECT.items():
+        if any(_t in q for _t in _triggers):
+            _chat_sport = _sp
+            break
+    if _chat_sport:
+        await _maybe_refresh_injury_cache(_chat_sport)
+
     injury_context = _build_injury_context(q)
 
     system_prompt = (
@@ -710,10 +776,21 @@ async def handle_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None
         "Be concise — Telegram users want short, direct answers. "
         "Reference live market data and knowledge base context when provided. "
         "Use session context to remember what was discussed earlier. "
-        "When injury data is provided, always cite it as your source — do NOT answer "
-        "from training data if live cache data is available. "
         "If asked about account setup or platform UI, give step-by-step guidance. "
         "Return plain text (no JSON). Keep replies under 300 words.\n\n"
+        "CRITICAL — INJURY DATA RULES (hard rules, no exceptions):\n"
+        "• You have NO internet access. You CANNOT search the web, fetch URLs, "
+        "call APIs, or retrieve anything live.\n"
+        "• NEVER claim to 'perform a search', 'check live data', 'look up', or "
+        "'fetch' anything. You physically cannot do this.\n"
+        "• ONLY report injury information that is explicitly listed in the "
+        "[Live injury data] block provided below. Do not add, guess, or recall "
+        "any player status from your training knowledge.\n"
+        "• If a player or team is NOT in the [Live injury data] block, say exactly: "
+        "'I don't have current data for [name] — use /injuries nba (or nfl/nhl) "
+        "to pull a fresh report.'\n"
+        "• If no [Live injury data] block is present, say: "
+        "'My injury cache is empty right now — use /injuries nba to refresh.'\n\n"
         "CRITICAL — YOU ARE A PREDICTION MARKET ANALYST, NOT A SPORTSBOOK:\n"
         "• NEVER use sportsbook spread language: no '+3.5', '-7.5', 'moneyline', "
         "'ATS', 'cover', 'over/under', 'juice', '-110', or point spreads.\n"
