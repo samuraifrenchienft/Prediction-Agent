@@ -19,12 +19,25 @@ Setup (one-time):
   4. pip install python-telegram-bot
   5. python run_edge_bot.py
 
+Injury refresh schedule (Pacific time):
+  09:00 PT — morning check (overnight changes, NHL morning skate, NFL Wed report)
+  13:30 PT — mid-day (NBA official PDF window, NFL Thu/Fri report)
+  16:30 PT — pre-game final (last-minute scratches, lineup confirmations)
+  + startup warmup 60s after boot
+
+Injury sources:
+  NBA: ESPN + official NBA PDF + Sleeper API cross-ref + star player news check
+  NFL: ESPN + Sleeper API cross-ref + star player news check
+  NHL: ESPN + star player news check
+
 Commands in Telegram:
   /scan              — run a full market scan immediately
   /injuries          — injury cache summary (count + freshness)
   /injuries nba      — full NBA player list sorted by severity
   /injuries nfl      — full NFL player list sorted by severity
+  /injuries nhl      — full NHL player list sorted by severity
   /injuries nba lakers — filter NBA to Lakers only
+  /injuries nhl oilers — filter NHL to Oilers only
   /tracking          — show the injury game tracking list
   /top               — show top 3 opportunities from last scan
   /status            — show last scan summary
@@ -41,7 +54,15 @@ import json
 import logging
 import os
 from datetime import datetime, timezone
+from datetime import time as dt_time
 from pathlib import Path
+
+try:
+    from zoneinfo import ZoneInfo
+    _PACIFIC = ZoneInfo("America/Los_Angeles")
+except ImportError:
+    import datetime as _dt
+    _PACIFIC = _dt.timezone(_dt.timedelta(hours=-8))  # PST fallback (no DST)
 
 from dotenv import load_dotenv
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
@@ -84,6 +105,7 @@ log = logging.getLogger("edge_bot")
 
 BOT_TOKEN          = os.environ.get("TELEGRAM_BOT_TOKEN", "")
 CHAT_ID            = os.environ.get("TELEGRAM_CHAT_ID", "")
+OWNER_ID           = os.environ.get("TELEGRAM_OWNER_ID", "")   # your personal user ID (from @userinfobot)
 SCAN_INTERVAL_MIN    = int(os.environ.get("SCAN_INTERVAL_MINUTES", "180"))  # default 3 hours
 INJURY_REFRESH_MIN   = int(os.environ.get("INJURY_REFRESH_MINUTES", "240"))  # default 4 hours
 BANKROLL_USD         = float(os.environ.get("BANKROLL_USD", "10000"))
@@ -362,7 +384,9 @@ async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         "/scan — run market scan now\n"
         "/injuries — injury cache summary\n"
         "/injuries nba — full NBA injury list\n"
-        "/injuries nfl chiefs — filter by team\n"
+        "/injuries nfl — full NFL injury list\n"
+        "/injuries nhl — full NHL injury list\n"
+        "/injuries nhl oilers — filter by team\n"
         "/tracking — injury game tracking list\n"
         "/top — top 3 opportunities\n"
         "/status — last scan summary\n"
@@ -370,7 +394,7 @@ async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         "/help — this message\n\n"
         f"{filter_note}\n"
         f"⏱ Market scan every {SCAN_INTERVAL_MIN // 60}h | "
-        f"Injury refresh every {INJURY_REFRESH_MIN // 60}h.\n\n"
+        "Injury refresh: 9am, 1:30pm, 4:30pm PT.\n\n"
         "💬 Send any message to chat with EDGE about markets.",
         parse_mode=ParseMode.HTML,
     )
@@ -514,6 +538,112 @@ async def handle_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> Non
 
 
 # ---------------------------------------------------------------------------
+# Injury context builder for free-form chat
+# ---------------------------------------------------------------------------
+
+def _build_injury_context(query: str) -> str:
+    """
+    Check whether the user's message mentions a sport, team, or player.
+    If it does, pull the relevant rows from the verified injury cache and
+    return a formatted context block for injection into the AI prompt.
+
+    This grounds the AI's answer in real-time data (ESPN + Sleeper + news)
+    instead of stale training knowledge.
+
+    Returns "" if no sports content is detected or the cache is empty.
+    """
+    try:
+        from edge_agent.memory.injury_cache import InjuryCache
+        _injury_detect = importlib.import_module(".dat-ingestion.injury_api", "edge_agent")
+        detect_sport   = _injury_detect.detect_sport
+        _star_keys     = set(_injury_detect._STAR_MULTIPLIERS.keys())
+
+        # ── Detect sport ──────────────────────────────────────────────────────
+        # Quick bail-out: if none of the sport-indicator words appear, skip.
+        _SPORT_TRIGGERS = {
+            "nba": {"nba", "basketball", "lakers", "celtics", "warriors", "bucks",
+                    "heat", "nets", "knicks", "nuggets", "suns", "sixers", "raptors",
+                    "mavericks", "mavs", "spurs", "thunder", "grizzlies", "pelicans"},
+            "nfl": {"nfl", "football", "chiefs", "eagles", "cowboys", "ravens",
+                    "bills", "bengals", "dolphins", "steelers", "49ers", "rams",
+                    "seahawks", "patriots", "packers", "bears", "giants", "saints",
+                    "buccaneers", "chargers", "raiders", "broncos", "texans"},
+            "nhl": {"nhl", "hockey", "oilers", "bruins", "rangers", "leafs",
+                    "canadiens", "penguins", "capitals", "lightning", "golden knights",
+                    "kraken", "avalanche", "flames", "canucks", "senators", "sabres"},
+        }
+        q = query.lower()
+        matched_sport = None
+        for sport, triggers in _SPORT_TRIGGERS.items():
+            if any(t in q for t in triggers):
+                matched_sport = sport
+                break
+
+        # Also check for player name mentions (covers "is LeBron playing?")
+        player_mentioned = next((k for k in _star_keys if k in q), None)
+        if player_mentioned and not matched_sport:
+            matched_sport = detect_sport(q)   # let keyword scorer decide
+
+        if not matched_sport:
+            return ""
+
+        # ── Pull from cache ───────────────────────────────────────────────────
+        cache = InjuryCache()
+        all_records = cache.get_all(matched_sport)
+        if not all_records:
+            return f"\n[Injury cache for {matched_sport.upper()} is empty — refresh pending]"
+
+        # If a specific player was mentioned, show just that player + team.
+        # Otherwise try to match a team from the query, then fall back to top-10.
+        if player_mentioned:
+            relevant = [r for r in all_records if player_mentioned in r.get("player_name", "").lower()]
+        else:
+            # Try substring team match
+            relevant = [r for r in all_records if any(w in q for w in r.get("team", "").lower().split())]
+
+        # Fallback: show the most-severe players (top 10) for the detected sport
+        if not relevant:
+            relevant = all_records[:10]
+
+        # ── Format ────────────────────────────────────────────────────────────
+        _SEV_TAG = {
+            "Out": "OUT", "Injured Reserve": "OUT(IR)", "Suspension": "SUSP",
+            "Doubtful": "DOUBTFUL", "Questionable": "QUEST", "Day-To-Day": "DTD",
+        }
+        src_note = {"nba_official": "(official)", "+sleeper✓": "(confirmed)", "⚠️": "(⚠️ conflicting)"}
+
+        lines = [f"\n[Live {matched_sport.upper()} injury data from verified cache]"]
+        for r in relevant[:15]:   # hard cap to keep prompt size reasonable
+            status   = r.get("status", "")
+            tag      = _SEV_TAG.get(status, status)
+            player   = r.get("player_name", "")
+            team     = r.get("team", "")
+            pos      = r.get("position", "")
+            inj_type = r.get("injury_type", "")
+            src      = r.get("source_api", "espn")
+
+            src_tag = ""
+            for k, v in src_note.items():
+                if k in src:
+                    src_tag = f" {v}"
+                    break
+
+            detail = f" [{inj_type}]" if inj_type else ""
+            pos_s  = f" ({pos})" if pos else ""
+            lines.append(f"  {tag}: {player}{pos_s} — {team}{detail}{src_tag}")
+
+        lines.append("[Source: ESPN" +
+                     (" + NBA official PDF" if matched_sport == "nba" else "") +
+                     (" + Sleeper cross-ref" if matched_sport in ("nba", "nfl") else "") +
+                     ". Refreshed 9am/1:30pm/4:30pm PT]")
+        return "\n".join(lines)
+
+    except Exception as exc:
+        log.debug("Could not build injury context for chat: %s", exc)
+        return ""
+
+
+# ---------------------------------------------------------------------------
 # Free-form AI chat
 # ---------------------------------------------------------------------------
 
@@ -571,16 +701,31 @@ async def handle_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None
             )
         scan_context = "\n".join(lines)
 
+    # 5. Live injury context — injected when the message mentions a sport/team/player
+    #    Uses the same verified cache (ESPN + Sleeper + news) that feeds market scans.
+    injury_context = _build_injury_context(q)
+
     system_prompt = (
         "You are Edge, an expert prediction market analyst on Telegram. "
         "Be concise — Telegram users want short, direct answers. "
         "Reference live market data and knowledge base context when provided. "
         "Use session context to remember what was discussed earlier. "
+        "When injury data is provided, always cite it as your source — do NOT answer "
+        "from training data if live cache data is available. "
         "If asked about account setup or platform UI, give step-by-step guidance. "
-        "Return plain text (no JSON). Keep replies under 300 words."
+        "Return plain text (no JSON). Keep replies under 300 words.\n\n"
+        "CRITICAL — YOU ARE A PREDICTION MARKET ANALYST, NOT A SPORTSBOOK:\n"
+        "• NEVER use sportsbook spread language: no '+3.5', '-7.5', 'moneyline', "
+        "'ATS', 'cover', 'over/under', 'juice', '-110', or point spreads.\n"
+        "• ALWAYS frame edges as probability: "
+        "'Market: 61% | Model: 56% | Edge: -5pp — sell the favourite.'\n"
+        "• For injury impact say: 'Mahomes out shifts KC win prob ~-7pp from 65% to 58%' "
+        "not 'Chiefs are now -3 underdogs'.\n"
+        "• Prices are probabilities (0-100%), positions are YES/NO contracts, "
+        "not sides or totals."
     )
 
-    prompt = user_msg + kb_context + session_context + market_context + scan_context
+    prompt = user_msg + kb_context + session_context + market_context + scan_context + injury_context
     reply = get_chat_response(prompt, task_type="creative", system_prompt=system_prompt) or "Sorry, I couldn't generate a response right now."
 
     # Save to session memory
@@ -599,11 +744,12 @@ async def handle_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None
 # ---------------------------------------------------------------------------
 
 _SEVERITY_EMOJI = {
-    "Out":         "🔴",
-    "Suspension":  "🚫",
-    "Doubtful":    "🟠",
-    "Questionable":"🟡",
-    "Day-To-Day":  "⚪",
+    "Out":             "🔴",
+    "Injured Reserve": "🔴",   # NHL IR — confirmed miss, treated same as Out
+    "Suspension":      "🚫",
+    "Doubtful":        "🟠",
+    "Questionable":    "🟡",
+    "Day-To-Day":      "⚪",
 }
 
 # Max players shown per sport before truncation (keeps messages readable)
@@ -618,8 +764,10 @@ async def cmd_injuries(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
       /injuries            — summary (count + fetch time per sport)
       /injuries nba        — full NBA player list sorted by severity
       /injuries nfl        — full NFL player list sorted by severity
+      /injuries nhl        — full NHL player list sorted by severity
       /injuries nba lakers — NBA players for the Lakers only
       /injuries nfl chiefs — NFL players for the Chiefs only
+      /injuries nhl oilers — NHL players for the Oilers only
     """
     args = ctx.args or []
     sport_filter = args[0].lower() if args else None
@@ -630,14 +778,14 @@ async def cmd_injuries(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         cache = InjuryCache()
 
         # ── No sport arg: show summary ────────────────────────────────────────
-        if not sport_filter or sport_filter not in ("nba", "nfl"):
+        if not sport_filter or sport_filter not in ("nba", "nfl", "nhl"):
             stats = cache.stats()
             if not stats:
                 await update.message.reply_text(
                     "⚠️ No injury data cached yet.\n"
-                    f"The refresh job runs every {INJURY_REFRESH_MIN // 60}h automatically.\n"
-                    "Try <code>/injuries nba</code> or <code>/injuries nfl</code> "
-                    "after the first refresh completes.",
+                    "Refreshes run at 9am, 1:30pm, and 4:30pm PT automatically.\n"
+                    "Try <code>/injuries nba</code>, <code>/injuries nfl</code>, or "
+                    "<code>/injuries nhl</code> after the first refresh completes.",
                     parse_mode=ParseMode.HTML,
                 )
                 return
@@ -649,10 +797,9 @@ async def cmd_injuries(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
                     f"   Fetched: {_e(info['last_fetch'])} | Expires: {_e(info['expires'])}"
                 )
             lines.append(
-                f"\n<i>Auto-refresh every {INJURY_REFRESH_MIN // 60}h. "
-                "Records expire after 24h.</i>\n"
-                "Tip: <code>/injuries nba</code> or <code>/injuries nfl lakers</code> "
-                "for full player lists."
+                "\n<i>Auto-refresh: 9am, 1:30pm, 4:30pm PT. Records expire after 24h.</i>\n"
+                "Tip: <code>/injuries nba</code>, <code>/injuries nfl</code>, or "
+                "<code>/injuries nhl</code> for full player lists."
             )
             await update.message.reply_text("\n".join(lines), parse_mode=ParseMode.HTML)
             return
@@ -672,7 +819,7 @@ async def cmd_injuries(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
             else:
                 msg = (
                     f"<b>🏥 {_e(label)} Injuries</b>\n"
-                    f"No injury data cached yet. Refreshes every {INJURY_REFRESH_MIN // 60}h."
+                    "No injury data cached yet. Next refresh at 9am, 1:30pm, or 4:30pm PT."
                 )
             await update.message.reply_text(msg, parse_mode=ParseMode.HTML)
             return
@@ -712,7 +859,15 @@ async def cmd_injuries(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
 
             pos_str    = f" ({_e(pos)})" if pos else ""
             detail_str = f" — <i>{_e(inj_type)}</i>" if inj_type else ""
-            src_badge  = " ✅" if src == "nba_official" else ""
+            # Source badge: ✅ = multi-source confirmed | ⚠️ = conflicting sources | 📰 = news confirmed
+            if "nba_official" in src or "+sleeper✓" in src:
+                src_badge = " ✅"
+            elif "⚠️" in src:
+                src_badge = " ⚠️"
+            elif "news✓" in src:
+                src_badge = " 📰"
+            else:
+                src_badge = ""
 
             lines.append(
                 f"  {sem} <b>{_e(player)}</b>{pos_str}: {_e(status)}{detail_str}{src_badge}"
@@ -720,8 +875,7 @@ async def cmd_injuries(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
             shown += 1
 
         lines.append(
-            f"\n<i>Auto-refresh every {INJURY_REFRESH_MIN // 60}h. "
-            "✅ = NBA official report.</i>"
+            "\n<i>✅ multi-source confirmed | ⚠️ conflicting sources (treat as uncertain) | 📰 news confirmed</i>"
         )
 
         msg = "\n".join(lines)
@@ -756,7 +910,7 @@ async def injury_refresh_job(ctx: ContextTypes.DEFAULT_TYPE) -> None:
     log.info("Injury refresh triggered.")
     client = _InjuryClient()
     results = {}
-    for sport in ("nba", "nfl"):
+    for sport in ("nba", "nfl", "nhl"):
         try:
             count = client.fetch_and_store(sport)
             results[sport.upper()] = count
@@ -784,7 +938,7 @@ async def injury_refresh_job(ctx: ContextTypes.DEFAULT_TYPE) -> None:
             old_em = _SEVERITY_EMOJI.get(old_s, "⚪")
             new_em = _SEVERITY_EMOJI.get(new_s, "🔴")
             pos_str = f" ({_e(pos)})" if pos else ""
-            sport_emoji = "🏀" if sport == "NBA" else "🏈"
+            sport_emoji = "🏀" if sport == "NBA" else ("🏒" if sport == "NHL" else "🏈")
 
             msg = (
                 f"🚨 <b>INJURY STATUS WORSENED</b>\n\n"
@@ -851,17 +1005,40 @@ def main() -> None:
     )
 
     # ---------------------------------------------------------------------------
-    # Chat-ID whitelist filter — bot only responds in the authorized CHAT_ID.
-    # Any other group or DM the bot is added to will be silently ignored.
-    # This gives natural conversation flow (no @mention needed) in the one
-    # authorized chat while preventing the bot from leaking into other chats.
+    # Access control — two-layer whitelist:
+    #   Layer 1: filters.Chat — bot only processes updates from TELEGRAM_CHAT_ID.
+    #            Silently ignores every other group or DM the bot is added to.
+    #   Layer 2: filters.User — within that chat, only TELEGRAM_OWNER_ID can
+    #            trigger commands or AI chat. Other group members are ignored.
+    #
+    # Result: natural conversation feel (no @mention needed), bot responds only
+    # to you, and is completely deaf to every other user in the group.
+    #
+    # Get your user ID: message @userinfobot on Telegram, then set in .env:
+    #   TELEGRAM_OWNER_ID=<your numeric id>
     # ---------------------------------------------------------------------------
     try:
-        _auth_filter = filters.Chat(int(CHAT_ID))
+        _chat_filter = filters.Chat(int(CHAT_ID))
         log.info("Chat filter active: only responding to chat_id=%s", CHAT_ID)
     except (ValueError, TypeError):
-        _auth_filter = filters.ALL
+        _chat_filter = filters.ALL
         log.warning("CHAT_ID=%r is not a valid integer — no chat filter applied", CHAT_ID)
+
+    try:
+        _user_filter = filters.User(int(OWNER_ID)) if OWNER_ID else filters.ALL
+        if OWNER_ID:
+            log.info("User filter active: only responding to user_id=%s", OWNER_ID)
+        else:
+            log.warning(
+                "TELEGRAM_OWNER_ID not set — bot will respond to ALL users in the chat. "
+                "Set TELEGRAM_OWNER_ID in .env to restrict to just your account."
+            )
+    except (ValueError, TypeError):
+        _user_filter = filters.ALL
+        log.warning("OWNER_ID=%r is not a valid integer — no user filter applied", OWNER_ID)
+
+    # Combined filter: must be from the authorized chat AND the authorized user
+    _auth_filter = _chat_filter & _user_filter
 
     # Command handlers — only fire in the authorized chat
     app.add_handler(CommandHandler("start",     cmd_start,     filters=_auth_filter))
@@ -882,13 +1059,26 @@ def main() -> None:
         handle_message,
     ))
 
-    # Injury refresh job — runs every INJURY_REFRESH_MIN, first run at 60s after startup
-    # This is the ONLY code path that calls ESPN / NBA CDN injury APIs
-    app.job_queue.run_repeating(
-        injury_refresh_job,
-        interval=INJURY_REFRESH_MIN * 60,
-        first=60,  # warm the injury cache 60s after startup
-    )
+    # ---------------------------------------------------------------------------
+    # Injury refresh — 3 targeted daily pulls aligned to game-prep windows
+    # (Pacific time, handles PST/PDT automatically via ZoneInfo)
+    #
+    #   09:00 PT — morning check: overnight news, NHL morning skate, NFL Wed report
+    #   13:30 PT — mid-day: NBA official PDF opens (5 PM ET), NFL Thu/Fri report
+    #   16:30 PT — pre-game final: last-minute scratches + lineup confirmations
+    #
+    # This replaces the old dumb 4-hour timer — injury lists rarely change
+    # mid-day but are most likely to update in these three windows.
+    # ---------------------------------------------------------------------------
+    for _pull_time in (
+        dt_time(9,  0,  tzinfo=_PACIFIC),   # morning
+        dt_time(13, 30, tzinfo=_PACIFIC),   # mid-day / NBA PDF window
+        dt_time(16, 30, tzinfo=_PACIFIC),   # pre-game final
+    ):
+        app.job_queue.run_daily(injury_refresh_job, time=_pull_time)
+
+    # Startup warmup — populate cache 60s after boot regardless of time of day
+    app.job_queue.run_once(injury_refresh_job, when=60)
 
     # Background market scan loop — reads from injury cache, no live injury API calls
     app.job_queue.run_repeating(
