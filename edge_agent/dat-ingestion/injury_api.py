@@ -800,6 +800,7 @@ class InjuryAPIClient:
         self,
         market_question: str,
         sport: str | None = None,
+        market_prob: float = 0.50,
     ) -> list[dict[str, Any]]:
         """
         Given a prediction market question, return Catalyst-compatible dicts
@@ -807,10 +808,14 @@ class InjuryAPIClient:
 
         Supports NBA, NFL, and NHL markets.
 
-        Team matching uses comprehensive alias maps (abbreviations, nicknames,
-        city names). Star players receive a direction multiplier proportional
-        to their market impact. NHL goalies have elevated multipliers since
-        one goalie is the entire position.
+        Direction values are computed win-probability shifts using sport-specific
+        logistic models (e.g. McDavid Out from a 60% favourite → -14pp shift),
+        not flat sentiment scores. Falls back to static severity values for
+        unknown players.
+
+        market_prob: current market win probability for the team in question.
+                     Used as the logistic baseline so shifts are calibrated to
+                     the actual game context, not a neutral 50% assumption.
 
         Reads from hot-path cache first, then SQLite. No live HTTP calls.
         """
@@ -868,53 +873,81 @@ class InjuryAPIClient:
 
             final_status = inj.get("status", "Questionable")
             sev = dict(_SEVERITY.get(final_status, _SEVERITY["Questionable"]))
+            src = inj.get("source_api", "espn")
 
             # ── Cross-reference confidence adjustment ─────────────────────────
-            src = inj.get("source_api", "espn")
             if "⚠️" in src:
-                # Sources disagree — player may be closer to returning than listed
                 sev["confidence"] = max(0.30, sev["confidence"] - 0.20)
             elif "+sleeper✓" in src or "news✓" in src or "nba_official" in src:
-                # Multiple independent sources confirm → boost confidence
                 sev["confidence"] = min(0.98, sev["confidence"] + 0.05)
 
-            # ── Star player / goalie multiplier ──────────────────────────────
-            player      = inj.get("player_name", "Unknown")
+            # ── Star player lookup (for logistic model and goalie floor) ──────
+            player       = inj.get("player_name", "Unknown")
             player_lower = player.lower()
-            multiplier = 1.0
+            multiplier   = 1.0
             for name_key, mult in _STAR_MULTIPLIERS.items():
                 if name_key in player_lower:
                     multiplier = mult
                     break
 
-            # NHL goalies always have elevated impact even if not a named star
             if sport == "nhl" and pos == "G" and multiplier < 1.12:
                 multiplier = 1.12  # any starting goalie is high-impact
 
-            if multiplier > 1.0:
-                sev["direction"] = max(-1.0, sev["direction"] * multiplier)
-                sev["quality"]   = min(1.0, sev["quality"] * (1.0 + (multiplier - 1.0) * 0.5))
+            # ── Logistic win-probability shift (prediction-market method) ─────
+            # Try to compute an actual probability shift via the sport-specific
+            # logistic model and player impact database.  If the player is not
+            # in the database, fall back to the static severity direction.
+            try:
+                from edge_agent import win_probability as _wp
+                shift, eff_impact, wp_explanation = _wp.injury_win_prob_shift(
+                    player_name    = player,
+                    position       = pos,
+                    status         = final_status,
+                    sport          = sport,
+                    base_win_prob  = market_prob,
+                    star_multiplier= multiplier,
+                )
+                if shift != 0.0:
+                    # Use computed shift as direction — already in probability space
+                    sev["direction"] = max(-0.99, shift)
+                    # Quality reflects how well-calibrated the impact estimate is
+                    if multiplier >= 1.15:
+                        sev["quality"] = min(0.98, sev["quality"] + 0.05)
+                else:
+                    # Unknown player — use static severity, apply star multiplier
+                    if multiplier > 1.0:
+                        sev["direction"] = max(-1.0, sev["direction"] * multiplier)
+                        sev["quality"]   = min(1.0, sev["quality"] * (1.0 + (multiplier - 1.0) * 0.5))
+                    wp_explanation = ""
+            except Exception:
+                # win_probability module unavailable — fall back gracefully
+                if multiplier > 1.0:
+                    sev["direction"] = max(-1.0, sev["direction"] * multiplier)
+                    sev["quality"]   = min(1.0, sev["quality"] * (1.0 + (multiplier - 1.0) * 0.5))
+                wp_explanation = ""
 
-            team_disp   = inj.get("team", "")
-            inj_type    = inj.get("injury_type", "")
-            inj_detail  = inj.get("injury_detail", "")
-            source_api  = inj.get("source_api", "espn")
+            # ── Build catalyst label (prediction-market language) ─────────────
+            team_disp  = inj.get("team", "")
+            inj_type   = inj.get("injury_type", "")
+            inj_detail = inj.get("injury_detail", "")
 
             detail_str = (
                 f"{inj_type}" + (f" - {inj_detail}" if inj_detail else "")
                 if inj_type else ""
             )
 
-            # Build label with sport-specific badges
             pos_badge = "🥅" if (sport == "nhl" and pos == "G") else ""
             label = f"INJURY:{player} ({team_disp}) {final_status}"
             if detail_str:
                 label += f" [{detail_str}]"
             if pos_badge:
                 label += f" {pos_badge}"
-            if multiplier > 1.0:
+            if wp_explanation:
+                # Embed the win-prob derivation so it surfaces in the thesis
+                label += f" | {wp_explanation}"
+            elif multiplier > 1.0:
                 label += " ⭐"
-            if source_api == "nba_official":
+            if "nba_official" in src:
                 label += " [confirmed official]"
 
             catalyst_dicts.append({
@@ -923,6 +956,9 @@ class InjuryAPIClient:
                 "confidence": sev["confidence"],
                 "quality":    sev["quality"],
             })
-            log.debug("[InjuryAPI] Catalyst: %s", label)
+            log.debug(
+                "[InjuryAPI] Catalyst: %s | dir=%+.3f conf=%.2f",
+                player, sev["direction"], sev["confidence"],
+            )
 
         return catalyst_dicts

@@ -713,7 +713,16 @@ async def handle_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None
         "When injury data is provided, always cite it as your source — do NOT answer "
         "from training data if live cache data is available. "
         "If asked about account setup or platform UI, give step-by-step guidance. "
-        "Return plain text (no JSON). Keep replies under 300 words."
+        "Return plain text (no JSON). Keep replies under 300 words.\n\n"
+        "CRITICAL — YOU ARE A PREDICTION MARKET ANALYST, NOT A SPORTSBOOK:\n"
+        "• NEVER use sportsbook spread language: no '+3.5', '-7.5', 'moneyline', "
+        "'ATS', 'cover', 'over/under', 'juice', '-110', or point spreads.\n"
+        "• ALWAYS frame edges as probability: "
+        "'Market: 61% | Model: 56% | Edge: -5pp — sell the favourite.'\n"
+        "• For injury impact say: 'Mahomes out shifts KC win prob ~-7pp from 65% to 58%' "
+        "not 'Chiefs are now -3 underdogs'.\n"
+        "• Prices are probabilities (0-100%), positions are YES/NO contracts, "
+        "not sides or totals."
     )
 
     prompt = user_msg + kb_context + session_context + market_context + scan_context + injury_context
