@@ -479,16 +479,40 @@ async def cmd_tracking(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
 
 
 async def cmd_top(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    from edge_agent.models import QualificationState
     svc = _get_service()
     top = svc.engine.top_opportunities(limit=3)
-    if not top:
-        await update.message.reply_text("No opportunities recorded yet. Run /scan first.")
+    if top:
+        for rec in top:
+            await update.message.reply_text(_fmt_alert(rec), parse_mode=ParseMode.HTML)
         return
-    for rec in top:
+
+    # No fully qualified markets — fall back to watchlist
+    wl_records = svc.engine.repository.list_by_state(QualificationState.WATCHLIST)
+    wl = sorted(
+        [r.recommendation for r in wl_records],
+        key=lambda r: r.ev_net * r.confidence,
+        reverse=True,
+    )[:3]
+
+    if wl:
         await update.message.reply_text(
-            _fmt_alert(rec),
+            "📋 <b>No fully qualified opportunities.</b>\n"
+            "Top watchlist items — close but didn't clear all thresholds "
+            "(volume, depth, or EV margin):",
             parse_mode=ParseMode.HTML,
         )
+        for rec in wl:
+            await update.message.reply_text(_fmt_alert(rec), parse_mode=ParseMode.HTML)
+    else:
+        if not svc.engine.repository.list_all():
+            await update.message.reply_text("No scan data yet — run /scan first.")
+        else:
+            await update.message.reply_text(
+                "No opportunities in last scan.\n"
+                "All markets were priced efficiently or below depth/volume thresholds.\n"
+                "Try again after more markets open."
+            )
 
 
 async def cmd_traders(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
@@ -972,17 +996,15 @@ async def handle_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None
         "Use session context to remember what was discussed earlier. "
         "If asked about account setup or platform UI, give step-by-step guidance. "
         "Return plain text (no JSON). Keep replies under 300 words.\n\n"
-        "CRITICAL — INJURY DATA RULES (hard rules, no exceptions):\n"
-        "• Ground ALL injury and roster facts in [Live injury data] and "
-        "[Live web search results] blocks below — these are your only "
-        "authoritative sources.\n"
-        "• NEVER recall or invent player statuses from training memory.\n"
-        "• If a player is not covered by either block, say: "
-        "'I don't have current data for [name] — use /injuries nba (or nfl/nhl).'\n"
-        "• If no data blocks are present at all, say: "
-        "'My data is unavailable right now — use /injuries nba to refresh.'\n"
-        "• You may acknowledge that a web search was performed if [Live web search results] "
-        "is present — but NEVER claim to search when that block is absent.\n\n"
+        "INJURY DATA RULES — apply ONLY when the user's current message explicitly "
+        "asks about injuries, player health, roster status, or a specific game matchup:\n"
+        "• If injury data IS in [Live injury data] or [Live web search results]: cite it.\n"
+        "• If the player/team is NOT in those blocks: say 'I don't have current data "
+        "for [name] — use /injuries nba (or nfl/nhl) to refresh.'\n"
+        "• NEVER invent or recall injury statuses from training memory.\n"
+        "• For ALL other questions (scan results, market edges, strategy, commands, "
+        "general chat): answer normally — do NOT mention injuries or data blocks "
+        "unless the user directly asked about them.\n\n"
         "CRITICAL — YOU ARE A PREDICTION MARKET ANALYST, NOT A SPORTSBOOK:\n"
         "• NEVER use sportsbook spread language: no '+3.5', '-7.5', 'moneyline', "
         "'ATS', 'cover', 'over/under', 'juice', '-110', or point spreads.\n"
@@ -1314,6 +1336,7 @@ def main() -> None:
     app.add_handler(CommandHandler("help",      cmd_help,      filters=_auth_filter))
     app.add_handler(CommandHandler("scan",      cmd_scan,      filters=_auth_filter))
     app.add_handler(CommandHandler("injuries",  cmd_injuries,  filters=_auth_filter))
+    app.add_handler(CommandHandler("injurys",   cmd_injuries,  filters=_auth_filter))  # typo alias
     app.add_handler(CommandHandler("tracking",  cmd_tracking,  filters=_auth_filter))
     app.add_handler(CommandHandler("top",       cmd_top,       filters=_auth_filter))
     app.add_handler(CommandHandler("traders",   cmd_traders,   filters=_auth_filter))
