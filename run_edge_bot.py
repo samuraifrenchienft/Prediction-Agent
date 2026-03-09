@@ -140,7 +140,45 @@ def _tavily_search(query: str, max_results: int = 5) -> str:
     except Exception as exc:
         log.debug("Tavily search failed: %s", exc)
         return ""
+
+
+def _serper_search(query: str, max_results: int = 5) -> str:
+    """
+    Serper.dev Google search — fallback when Tavily quota is exhausted.
+    Returns "" if SERPER_API_KEY is not set or the call fails.
+    Free tier: 2,500 searches/month, no credit card required.
+    Sign up: https://serper.dev
+    """
+    api_key = os.getenv("SERPER_API_KEY", "").strip()
+    if not api_key:
+        return ""
+    try:
+        import requests as _req
+        resp = _req.post(
+            "https://google.serper.dev/search",
+            headers={"X-API-KEY": api_key, "Content-Type": "application/json"},
+            json={"q": query, "num": max_results},
+            timeout=8,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        lines = ["\n[Live web search results]"]
+        if ans := data.get("answerBox", {}).get("answer"):
+            lines.append(f"Summary: {ans}")
+        for r in data.get("organic", [])[:max_results]:
+            title   = r.get("title", "").strip()
+            snippet = r.get("snippet", "").strip()[:200]
+            url     = r.get("link", "")
+            lines.append(f"• {title}: {snippet}  [{url}]")
+        lines.append("[End web search]")
+        return "\n".join(lines)
+    except Exception as exc:
+        log.debug("Serper search failed: %s", exc)
+        return ""
+
+
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
+logging.getLogger("httpx").setLevel(logging.WARNING)   # silence getUpdates poll noise
 log = logging.getLogger("edge_bot")
 
 # ---------------------------------------------------------------------------
@@ -984,16 +1022,16 @@ async def handle_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None
 
     injury_context = _build_injury_context(q)
 
-    # 6. Tavily real-time web search — fires when a sport is detected.
-    #    Gives the AI actual current data (scores, rosters, news, injuries)
-    #    rather than relying on training-data recall.
+    # 6. Real-time web search — fires when a sport is detected.
+    #    Tries Tavily first (AI-native, 1,000/mo free), then falls back to
+    #    Serper (Google results, 2,500/mo free) if Tavily quota is exhausted.
     search_context = ""
     if _chat_sport:
-        loop = asyncio.get_event_loop()
-        search_context = await loop.run_in_executor(
-            None, _tavily_search,
-            f"{user_msg} {_chat_sport.upper()} injury report today",
-        )
+        _query = f"{user_msg} {_chat_sport.upper()} injury report today"
+        loop   = asyncio.get_event_loop()
+        search_context = await loop.run_in_executor(None, _tavily_search, _query)
+        if not search_context:   # Tavily failed/quota gone → try Serper
+            search_context = await loop.run_in_executor(None, _serper_search, _query)
 
     system_prompt = (
         "You are Edge, an expert prediction market analyst on Telegram. "

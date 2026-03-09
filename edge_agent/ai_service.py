@@ -103,6 +103,13 @@ def _get_candidates(task_type: str) -> list[tuple[OpenAI, str]]:
             (groq_client, _GROQ_MODEL_MAP.get(task_type, "llama-3.1-8b-instant"))
         )
 
+    # DeepSeek — OpenAI-compatible, ultra-cheap overflow ($0.028/1M input cache hit)
+    # Sign up: https://platform.deepseek.com
+    deepseek_key = os.environ.get("DEEPSEEK_API_KEY", "").strip()
+    if deepseek_key:
+        _ds_client = OpenAI(base_url="https://api.deepseek.com", api_key=deepseek_key)
+        candidates.append((_ds_client, "deepseek-chat"))
+
     if not candidates:
         raise ValueError(
             "No AI API key found. Set OPEN_ROUTER_API_KEY or GROQ_API_KEY in .env"
