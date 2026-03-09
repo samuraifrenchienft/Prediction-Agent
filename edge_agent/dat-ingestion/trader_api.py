@@ -68,6 +68,26 @@ _LOW_TRADE_PENALTY_N  = 20     # trades < this → scale performance score down
 _SESS = requests.Session()
 _SESS.headers.update({"Accept": "application/json", "User-Agent": "EdgeBot/1.0"})
 
+# ---------------------------------------------------------------------------
+# In-memory bot address cache  (survives the process lifetime, 24 h TTL)
+# ---------------------------------------------------------------------------
+
+_BOT_FLAG_CACHE: dict[str, float] = {}   # address → unix ts when confirmed bot
+_BOT_FLAG_TTL   = 86_400                  # 24 hours
+
+
+def _is_known_bot(address: str) -> bool:
+    ts = _BOT_FLAG_CACHE.get(address.lower())
+    return ts is not None and (time.time() - ts) < _BOT_FLAG_TTL
+
+
+def _mark_bot(address: str) -> None:
+    _BOT_FLAG_CACHE[address.lower()] = time.time()
+
+
+# Leaderboard field names that carry trade count (varies by API version)
+_TRADES_KEYS = ("tradesCount", "numTrades", "trades_count", "totalTrades", "numPositions")
+
 
 # ---------------------------------------------------------------------------
 # Data class
@@ -141,6 +161,47 @@ def _save_cache(key: str, data: Any) -> None:
 # ---------------------------------------------------------------------------
 
 class TraderAPIClient:
+
+    # ------------------------------------------------------------------
+    # Pre-filter (leaderboard-level, zero extra API calls)
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _prefilter(profile: dict) -> tuple[bool, str]:
+        """
+        Reject obvious non-human accounts using leaderboard data alone.
+        Returns (keep: bool, reason: str).
+        Called before any per-wallet API calls — completely free.
+        """
+        # Resolve trade count from whichever field name this API version uses
+        n_trades = 0
+        for key in _TRADES_KEYS:
+            val = profile.get(key)
+            if val:
+                try:
+                    n_trades = int(val)
+                    break
+                except (TypeError, ValueError):
+                    pass
+
+        # Rule 1 — HFT / scripted market-maker: no human places 10k+ bets
+        if n_trades > 10_000:
+            return False, f"HFT ({n_trades:,} trades)"
+
+        # Rule 2 — Thin history: not enough data to score meaningfully
+        if 0 < n_trades < 20:
+            return False, f"Thin history ({n_trades} trades)"
+
+        # Rule 3 — Micro-trade farmer: avg position size < $5
+        #   Airdrop farmers place hundreds of $1 bets to game reward systems.
+        #   They show inflated win counts but zero real edge.
+        volume = float(profile.get("volume", 0) or 0)
+        if n_trades > 0 and volume > 0:
+            avg_pos = volume / n_trades
+            if avg_pos < 5.0:
+                return False, f"Micro-trades (avg ${avg_pos:.2f})"
+
+        return True, "ok"
 
     # ------------------------------------------------------------------
     # Raw data fetchers
@@ -292,31 +353,53 @@ class TraderAPIClient:
 
     def _bot_score(self, trades: list[dict], profile: dict) -> tuple[float, bool]:
         """Return (score 0-1, hard_bot_flag)."""
+        from collections import Counter
         score = 0.0
 
         # Profile signals
         if profile.get("verifiedBadge") or profile.get("xUsername"):
             score += 0.35
 
-        # Trade-timing analysis
+        # Trade-timing analysis + velocity + burst detection
+        timestamps: list[float] = []
         if len(trades) >= 5:
-            timestamps = sorted(
+            raw_ts = sorted(
                 t.get("timestamp", t.get("createdAt", 0))
                 for t in trades
                 if t.get("timestamp") or t.get("createdAt")
             )
-            if len(timestamps) >= 2:
+            if len(raw_ts) >= 2:
                 intervals = [
-                    abs(timestamps[i+1] - timestamps[i])
-                    for i in range(len(timestamps) - 1)
+                    abs(raw_ts[i+1] - raw_ts[i])
+                    for i in range(len(raw_ts) - 1)
                 ]
-                # Convert to seconds if timestamps are in ms
-                sample = intervals[0]
-                if sample > 1e10:
+                # Normalise to seconds if timestamps are in ms
+                if intervals[0] > 1e10:
                     intervals = [x / 1000 for x in intervals]
+                    timestamps = [x / 1000 for x in raw_ts]
+                else:
+                    timestamps = list(raw_ts)
+
                 median_interval = statistics.median(intervals)
                 if median_interval > 60:
                     score += 0.25
+
+                # ── NEW: Trade velocity (trades per day) ─────────────────
+                account_age_days = (timestamps[-1] - timestamps[0]) / 86_400
+                if account_age_days > 0:
+                    trades_per_day = len(timestamps) / account_age_days
+                    if trades_per_day > 100:
+                        # >100 trades/day is inhuman — hard bot
+                        return 0.0, True
+                    elif trades_per_day > 50:
+                        # Strong bot signal
+                        score = max(0.0, score - 0.25)
+
+                # ── NEW: Burst detection (20+ trades in any 1-hour window)
+                hour_buckets = Counter(int(ts) // 3600 for ts in timestamps)
+                if max(hour_buckets.values(), default=0) > 20:
+                    score = max(0.0, score - 0.30)
+                    log.debug("Burst pattern detected for wallet")
 
         # Position-size variance (bots use uniform sizes)
         sizes = [
@@ -337,6 +420,20 @@ class TraderAPIClient:
         }
         if len(categories) > 1:
             score += 0.20
+
+        # ── NEW: Near-certainty farming (90¢+ or sub-10¢ entries) ────────
+        #   Certainty farmers buy near-resolved markets for airdrop credit.
+        #   Real traders take positions at genuine uncertainty (10¢–90¢).
+        prices = [
+            float(t.get("price", t.get("outcomePrice", t.get("avgPrice", 0.5))) or 0.5)
+            for t in trades
+        ]
+        if prices:
+            near_certain = sum(1 for p in prices if p > 0.90 or p < 0.10)
+            near_pct = near_certain / len(prices)
+            if near_pct > 0.40:
+                score = max(0.0, score - 0.30)
+                log.debug("Farming flag: %.0f%% near-certain trades", near_pct * 100)
 
         score = min(1.0, score)
 
@@ -401,6 +498,12 @@ class TraderAPIClient:
             else:
                 break
 
+        def _price(t: dict) -> float:
+            """Entry price of the trade (0.0–1.0)."""
+            return float(
+                t.get("price", t.get("outcomePrice", t.get("avgPrice", 0.5))) or 0.5
+            )
+
         def _window_stats(bucket: list[dict]) -> dict:
             wins   = sum(1 for t in bucket if _is_win(t) is True)
             losses = sum(1 for t in bucket if _is_win(t) is False)
@@ -419,28 +522,51 @@ class TraderAPIClient:
         pos_pnl = sum(float(p.get("cashPnl", p.get("realizedPnl", 0)) or 0)
                       for p in positions)
 
+        # ── Edge-weighted genuine win rate ───────────────────────────────
+        # Only count wins where entry price reflects REAL uncertainty.
+        # Band 10¢–80¢: genuine bet. Outside that = certainty trade / farming.
+        #   - Buy YES at 98¢ and win → meaningless, excluded
+        #   - Buy YES at 50¢ and win → real edge, counted
+        #   - Buy NO at 4¢ and win   → farming the other side, excluded
+        settled_all = [t for t in trades if _is_win(t) is not None]
+        genuine_wins = sum(
+            1 for t in settled_all
+            if _is_win(t) is True and 0.10 <= _price(t) <= 0.80
+        )
+        n_settled = all_stats["wins"] + all_stats["losses"]
+        quality_win_rate = genuine_wins / max(n_settled, 1)
+
+        # ── Avg position size factor ─────────────────────────────────────
+        # Farmers typically bet $1–5 across thousands of markets.
+        # Real traders take meaningful positions ($20+).
+        avg_pos = all_stats["volume"] / max(n_settled, 1)
+        size_factor = min(avg_pos / 20.0, 1.0)   # full credit at $20+ avg
+
         # Performance sub-score (0–1)
-        wr      = all_stats["win_rate"]
         roi     = all_stats["pnl"] / max(all_stats["volume"], 1)
         streak_factor = min(cur_streak / 10.0, 1.0)
 
         # Low-trade penalty (< 20 settled = less reliable)
-        n_settled = all_stats["wins"] + all_stats["losses"]
         ltp = min(n_settled / _LOW_TRADE_PENALTY_N, 1.0)
 
-        perf_raw = (wr * 0.40 + min(max(roi + 0.5, 0), 1) * 0.35
-                    + streak_factor * 0.15 + 0.10)
+        # quality_win_rate replaces raw win_rate; size_factor replaces flat +0.10
+        perf_raw = (quality_win_rate * 0.40
+                    + min(max(roi + 0.5, 0), 1) * 0.35
+                    + streak_factor * 0.15
+                    + size_factor * 0.10)
         perf_score = perf_raw * ltp
 
         return {
-            "alltime":     all_stats,
-            "30d":         d30_stats,
-            "7d":          d7_stats,
-            "pos_pnl":     round(pos_pnl, 2),
-            "perf_score":  round(min(perf_score, 1.0), 4),
-            "cur_streak":  cur_streak,
-            "max_streak":  max_streak,
-            "n_trades":    len(trades),
+            "alltime":          all_stats,
+            "30d":              d30_stats,
+            "7d":               d7_stats,
+            "pos_pnl":          round(pos_pnl, 2),
+            "perf_score":       round(min(perf_score, 1.0), 4),
+            "cur_streak":       cur_streak,
+            "max_streak":       max_streak,
+            "n_trades":         len(trades),
+            "quality_win_rate": round(quality_win_rate, 4),
+            "avg_pos_size":     round(avg_pos, 2),
         }
 
     def _reliability_score(
@@ -469,6 +595,18 @@ class TraderAPIClient:
 
         address = address.lower().strip()
         profile = profile or {}
+
+        # ── Short-circuit: already confirmed bot in this process session ──
+        if _is_known_bot(address):
+            log.debug("score_trader: cached bot skip for %s…", address[:8])
+            return TraderScore(
+                wallet_address = address,
+                display_name   = profile.get("userName", profile.get("name", "")),
+                bot_flag       = 1,
+                final_score    = 0.0,
+                fetched_at     = time.time(),
+                expires_at     = time.time() + _BOT_FLAG_TTL,
+            )
 
         trades    = self.fetch_wallet_trades(address)
         positions = self.fetch_wallet_positions(address)
@@ -505,6 +643,10 @@ class TraderAPIClient:
             hidden_loss_exposure   = unsettled["total_unrealized_loss"],
         )
 
+        # Cache confirmed bots so we skip them for 24 h
+        if ts.bot_flag:
+            _mark_bot(address)
+
         try:
             TraderCache().upsert(ts.to_dict())
         except Exception as exc:
@@ -520,10 +662,12 @@ class TraderAPIClient:
         self, limit: int = 10, category: str = "OVERALL"
     ) -> list[TraderScore]:
         """
-        Fetch leaderboard, score each wallet concurrently, return top N
-        human traders sorted by final_score (bots filtered out).
+        Fetch leaderboard, pre-filter obvious bots/farmers for free, then
+        score only the surviving candidates concurrently.  Returns top N
+        human traders sorted by final_score.
         """
-        lb = self.fetch_leaderboard(category=category, limit=max(limit * 5, 50))
+        # Pull a large sample to survive pre-filter attrition
+        lb = self.fetch_leaderboard(category=category, limit=100)
         if not lb:
             # Fall back to cached results
             from edge_agent.memory.trader_cache import TraderCache
@@ -532,17 +676,39 @@ class TraderAPIClient:
                                    if k in TraderScore.__dataclass_fields__})
                     for r in cached]
 
+        # ── PRE-FILTER: zero extra API calls ─────────────────────────────
+        candidates: list[dict] = []
+        for entry in lb:
+            addr = entry.get("proxyWallet", "")
+            if not addr:
+                continue
+            if _is_known_bot(addr):
+                log.debug("Skipping known bot: %s…", addr[:8])
+                continue
+            keep, reason = self._prefilter(entry)
+            if not keep:
+                log.debug("Pre-filtered %s…: %s", addr[:8], reason)
+                continue
+            candidates.append(entry)
+
+        log.info(
+            "Leaderboard: %d fetched → %d candidates after pre-filter",
+            len(lb), len(candidates),
+        )
+
+        # ── SCORE only surviving candidates, hard-capped at 25 ──────────
         scores: list[TraderScore] = []
         with ThreadPoolExecutor(max_workers=5) as pool:
             futures = {
                 pool.submit(self.score_trader, entry.get("proxyWallet", ""), entry): entry
-                for entry in lb
-                if entry.get("proxyWallet")
+                for entry in candidates[:25]   # hard cap on API calls
             }
             for fut in as_completed(futures):
                 try:
                     ts = fut.result(timeout=20)
-                    if not ts.bot_flag:
+                    if ts.bot_flag:
+                        _mark_bot(ts.wallet_address)   # cache for 24 h
+                    else:
                         scores.append(ts)
                 except Exception as exc:
                     log.debug("Scoring failed for a wallet: %s", exc)
