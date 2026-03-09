@@ -95,6 +95,9 @@ _kalshi_api   = importlib.import_module(".dat-ingestion.kalshi_api", "edge_agent
 _injury_mod   = importlib.import_module(".dat-ingestion.injury_api", "edge_agent")
 _InjuryClient = _injury_mod.InjuryAPIClient
 
+_trader_mod   = importlib.import_module(".dat-ingestion.trader_api", "edge_agent")
+_TraderClient = _trader_mod.TraderAPIClient
+
 # Per-sport on-demand refresh rate limiter (unix timestamp of last trigger)
 _ONDEMAND_REFRESH_COOLDOWN: dict[str, float] = {}
 
@@ -430,6 +433,9 @@ async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         "/injuries nhl oilers — filter by team\n"
         "/tracking — injury game tracking list\n"
         "/top — top 3 opportunities\n"
+        "/traders — top 10 hot Polymarket traders (scored + bot-filtered)\n"
+        "/traders sports — filter by category (sports/politics/crypto)\n"
+        "/wallet 0x… — deep vet any Polymarket wallet\n"
         "/status — last scan summary\n"
         "/approvals — manage alert signal filter\n"
         "/help — this message\n\n"
@@ -483,6 +489,145 @@ async def cmd_top(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
             _fmt_alert(rec),
             parse_mode=ParseMode.HTML,
         )
+
+
+async def cmd_traders(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    """
+    /traders [category]
+    Show the top 10 human traders on Polymarket ranked by the composite score.
+    Category options: OVERALL (default), SPORTS, POLITICS, CRYPTO, CULTURE.
+    """
+    args     = (update.message.text or "").split()
+    category = args[1].upper() if len(args) > 1 else "OVERALL"
+    valid_cats = {"OVERALL", "SPORTS", "POLITICS", "CRYPTO", "CULTURE",
+                  "ECONOMICS", "FINANCE", "TECH"}
+    if category not in valid_cats:
+        category = "OVERALL"
+
+    await update.message.reply_text(
+        f"⏳ Scoring top Polymarket traders ({category}) — this takes ~30s…"
+    )
+    try:
+        client = _TraderClient()
+        scores = await asyncio.get_event_loop().run_in_executor(
+            None, lambda: client.get_hot_traders(limit=10, category=category)
+        )
+    except Exception as exc:
+        await update.message.reply_text(f"❌ Trader scan failed: {exc}")
+        return
+
+    if not scores:
+        await update.message.reply_text(
+            "No trader data available right now. Try again in a few minutes."
+        )
+        return
+
+    lines = [f"<b>🏆 Hot Traders — Polymarket {category}</b>\n"]
+    for i, ts in enumerate(scores, 1):
+        name    = _e(ts.display_name or ts.wallet_address[:10] + "…")
+        badge   = " ✅" if ts.verified else ""
+        score   = int(ts.final_score * 100)
+        wr7     = f"{ts.win_rate_7d:.0%}"
+        pnl7    = f"+${ts.pnl_7d:,.0f}" if ts.pnl_7d >= 0 else f"-${abs(ts.pnl_7d):,.0f}"
+        streak  = f"🔥{ts.current_streak}W" if ts.current_streak >= 2 else f"{ts.current_streak}W"
+        risk    = (f"⚠️ {ts.unsettled_count} unsettled"
+                   if ts.unsettled_count else "LOW risk")
+        lines.append(
+            f"<b>#{i}</b> {name}{badge} | Score: <b>{score}/100</b>\n"
+            f"   7d: {wr7}  {pnl7} | {streak} | {risk}"
+        )
+
+    lines.append("\n<i>Use /wallet {address} to deep-dive any trader.</i>")
+    await update.message.reply_text(
+        "\n".join(lines), parse_mode=ParseMode.HTML
+    )
+
+
+async def cmd_wallet(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    """
+    /wallet {address}
+    Full vet of a specific Polymarket wallet address.
+    """
+    parts   = (update.message.text or "").split()
+    address = parts[1].strip() if len(parts) > 1 else ""
+
+    if not re.match(r"^0x[0-9a-fA-F]{40}$", address):
+        await update.message.reply_text(
+            "Usage: /wallet <b>0x…address</b>\n"
+            "Provide a valid 42-character Ethereum address.",
+            parse_mode=ParseMode.HTML,
+        )
+        return
+
+    await update.message.reply_text(f"⏳ Vetting wallet {address[:10]}…{address[-4:]}…")
+    try:
+        client = _TraderClient()
+        ts = await asyncio.get_event_loop().run_in_executor(
+            None, lambda: client.score_trader(address)
+        )
+    except Exception as exc:
+        await update.message.reply_text(f"❌ Wallet vet failed: {exc}")
+        return
+
+    score  = int(ts.final_score * 100)
+    ab     = int(ts.anti_bot_score    * 100)
+    pf     = int(ts.performance_score * 100)
+    rl     = int(ts.reliability_score * 100)
+
+    if ts.bot_flag:
+        verdict = "⚠️ LIKELY BOT"
+    elif score >= 75:
+        verdict = "✅ STRONG TRADER"
+    elif score >= 55:
+        verdict = "🟡 LEGIT TRADER"
+    else:
+        verdict = "🔴 WEAK RECORD"
+
+    rl_tag = " ⚠️" if rl < 70 else ""
+    lines  = [
+        f"<b>🔍 Wallet Vet: {_e(ts.wallet_address[:10])}…{_e(ts.wallet_address[-4:])}</b>",
+        f"Score: <b>{score}/100</b> — {verdict}",
+        f"Anti-bot: {ab}  |  Perf: {pf}  |  Reliability: {rl}{rl_tag}",
+        "",
+    ]
+
+    def _fmt_pnl(v: float) -> str:
+        return f"+${v:,.0f}" if v >= 0 else f"-${abs(v):,.0f}"
+
+    if ts.trades_alltime:
+        adj_note = (f" (adj: {_fmt_pnl(ts.pnl_alltime_adj)})"
+                    if ts.hidden_loss_exposure > 0 else "")
+        lines += [
+            f"All-time: {ts.win_rate_alltime:.0%} | {_fmt_pnl(ts.pnl_alltime)}{adj_note}",
+            f"30-day:   {ts.win_rate_30d:.0%} | {_fmt_pnl(ts.pnl_30d)}",
+            f"7-day:    {ts.win_rate_7d:.0%} | {_fmt_pnl(ts.pnl_7d)}",
+            f"Streak:   🔥{ts.current_streak}W now | {ts.max_streak_50}W best (last 50)",
+        ]
+    else:
+        lines.append("Insufficient trade history to score.")
+
+    if ts.hidden_loss_exposure > 0:
+        lines += [
+            "",
+            f"⚠️ Hidden loss exposure: {_fmt_pnl(-ts.hidden_loss_exposure)}",
+            f"   {ts.unsettled_count} position(s) in ended markets priced near $0",
+            "   Adjusted PnL reflects likely unrealized losses.",
+        ]
+
+    await update.message.reply_text(
+        "\n".join(lines), parse_mode=ParseMode.HTML
+    )
+
+
+async def trader_refresh_job(ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    """Daily 8am PT — warm the trader cache with top 50 leaderboard scores."""
+    log.info("Trader refresh triggered.")
+    try:
+        client = _TraderClient()
+        scores = client.get_hot_traders(limit=50, category="OVERALL")
+        log.info("Trader refresh complete — %d traders scored.", len(scores))
+    except Exception as exc:
+        log.warning("Trader refresh failed: %s", exc)
 
 
 async def cmd_status(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1171,6 +1316,8 @@ def main() -> None:
     app.add_handler(CommandHandler("injuries",  cmd_injuries,  filters=_auth_filter))
     app.add_handler(CommandHandler("tracking",  cmd_tracking,  filters=_auth_filter))
     app.add_handler(CommandHandler("top",       cmd_top,       filters=_auth_filter))
+    app.add_handler(CommandHandler("traders",   cmd_traders,   filters=_auth_filter))
+    app.add_handler(CommandHandler("wallet",    cmd_wallet,    filters=_auth_filter))
     app.add_handler(CommandHandler("status",    cmd_status,    filters=_auth_filter))
     app.add_handler(CommandHandler("approvals", cmd_approvals, filters=_auth_filter))
 
@@ -1203,6 +1350,10 @@ def main() -> None:
 
     # Startup warmup — populate cache 60s after boot regardless of time of day
     app.job_queue.run_once(injury_refresh_job, when=60)
+
+    # Trader leaderboard — refresh daily at 8am PT, warm cache 2 min after boot
+    app.job_queue.run_daily(trader_refresh_job, time=dt_time(8, 0, tzinfo=_PACIFIC))
+    app.job_queue.run_once(trader_refresh_job, when=120)
 
     # Background market scan loop — reads from injury cache, no live injury API calls
     app.job_queue.run_repeating(
