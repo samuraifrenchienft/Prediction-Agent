@@ -842,15 +842,14 @@ def _build_injury_context(query: str) -> str:
         if not relevant:
             relevant = all_records[:10]
 
-        # ── Format ────────────────────────────────────────────────────────────
+        # ── Format — split starters vs role players ───────────────────────────
         _SEV_TAG = {
             "Out": "OUT", "Injured Reserve": "OUT(IR)", "Suspension": "SUSP",
             "Doubtful": "DOUBTFUL", "Questionable": "QUEST", "Day-To-Day": "DTD",
         }
         src_note = {"nba_official": "(official)", "+sleeper✓": "(confirmed)", "⚠️": "(⚠️ conflicting)"}
 
-        lines = [f"\n[Live {matched_sport.upper()} injury data from verified cache]"]
-        for r in relevant[:15]:   # hard cap to keep prompt size reasonable
+        def _fmt_row(r: dict) -> str:
             status   = r.get("status", "")
             tag      = _SEV_TAG.get(status, status)
             player   = r.get("player_name", "")
@@ -858,16 +857,23 @@ def _build_injury_context(query: str) -> str:
             pos      = r.get("position", "")
             inj_type = r.get("injury_type", "")
             src      = r.get("source_api", "espn")
+            src_tag  = next((v for k, v in src_note.items() if k in src), "")
+            detail   = f" [{inj_type}]" if inj_type else ""
+            pos_s    = f" ({pos})" if pos else ""
+            return f"  {tag}: {player}{pos_s} — {team}{detail}{src_tag}"
 
-            src_tag = ""
-            for k, v in src_note.items():
-                if k in src:
-                    src_tag = f" {v}"
-                    break
+        starters = [r for r in relevant if r.get("is_starter")]
+        role_players = [r for r in relevant if not r.get("is_starter")]
 
-            detail = f" [{inj_type}]" if inj_type else ""
-            pos_s  = f" ({pos})" if pos else ""
-            lines.append(f"  {tag}: {player}{pos_s} — {team}{detail}{src_tag}")
+        lines = [f"\n[Live {matched_sport.upper()} injury data from verified cache]"]
+        if starters:
+            lines.append("⭐ STARTERS:")
+            for r in starters[:10]:
+                lines.append(_fmt_row(r))
+        if role_players:
+            lines.append("ROLE PLAYERS:")
+            for r in role_players[:5]:   # condensed — less critical
+                lines.append(_fmt_row(r))
 
         import time as _t
         newest_ts = max((r.get("fetched_at", 0) for r in relevant), default=0)
@@ -1115,42 +1121,24 @@ async def cmd_injuries(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
             await update.message.reply_text(msg, parse_mode=ParseMode.HTML)
             return
 
-        # Build the player-list message
+        # Build the player-list message — starters first, role players after
         sport_label = sport.upper()
         header = f"<b>🏥 {sport_label} Injuries</b>"
         if team_filter:
             header += f" — <i>{_e(team_filter.title())}</i>"
-        header += f" ({len(records)} players)"
+        starters_all   = [r for r in records if r.get("is_starter")]
+        role_all       = [r for r in records if not r.get("is_starter")]
+        header += f" ({len(starters_all)} starters · {len(role_all)} role)"
 
-        lines = [header, ""]
-        current_team = None
-        shown = 0
-
-        for r in records:
-            if shown >= _INJURIES_MAX_PER_SPORT:
-                lines.append(
-                    f"\n<i>... and {len(records) - shown} more. "
-                    f"Use /injuries {sport} [team] for filtered view.</i>"
-                )
-                break
-
-            team = r.get("team", "")
-            if team != current_team:
-                if current_team is not None:
-                    lines.append("")       # blank line between teams
-                current_team = team
-                lines.append(f"<b>{_e(team)}</b>")
-
+        def _player_line(r: dict) -> str:
             status    = r.get("status", "")
             sem       = _SEVERITY_EMOJI.get(status, "⚪")
             player    = r.get("player_name", "")
             pos       = r.get("position", "")
             inj_type  = r.get("injury_type", "")
             src       = r.get("source_api", "espn")
-
             pos_str    = f" ({_e(pos)})" if pos else ""
             detail_str = f" — <i>{_e(inj_type)}</i>" if inj_type else ""
-            # Source badge: ✅ = multi-source confirmed | ⚠️ = conflicting sources | 📰 = news confirmed
             if "nba_official" in src or "+sleeper✓" in src:
                 src_badge = " ✅"
             elif "⚠️" in src:
@@ -1159,14 +1147,46 @@ async def cmd_injuries(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
                 src_badge = " 📰"
             else:
                 src_badge = ""
+            return f"  {sem} <b>{_e(player)}</b>{pos_str}: {_e(status)}{detail_str}{src_badge}"
 
-            lines.append(
-                f"  {sem} <b>{_e(player)}</b>{pos_str}: {_e(status)}{detail_str}{src_badge}"
-            )
-            shown += 1
+        lines = [header, ""]
+
+        # ── STARTERS section ─────────────────────────────────────────────────
+        if starters_all:
+            lines.append("<b>⭐ STARTERS</b>")
+            current_team = None
+            for r in starters_all:
+                team = r.get("team", "")
+                if team != current_team:
+                    if current_team is not None:
+                        lines.append("")
+                    current_team = team
+                    lines.append(f"<b>{_e(team)}</b>")
+                lines.append(_player_line(r))
+
+        # ── ROLE PLAYERS section ─────────────────────────────────────────────
+        if role_all:
+            lines.append("\n<b>ROLE PLAYERS</b>")
+            current_team = None
+            shown = 0
+            for r in role_all:
+                if shown >= _INJURIES_MAX_PER_SPORT:
+                    lines.append(
+                        f"<i>... and {len(role_all) - shown} more. "
+                        f"Use /injuries {sport} [team] for filtered view.</i>"
+                    )
+                    break
+                team = r.get("team", "")
+                if team != current_team:
+                    if current_team is not None:
+                        lines.append("")
+                    current_team = team
+                    lines.append(f"<b>{_e(team)}</b>")
+                lines.append(_player_line(r))
+                shown += 1
 
         lines.append(
-            "\n<i>✅ multi-source confirmed | ⚠️ conflicting sources (treat as uncertain) | 📰 news confirmed</i>"
+            "\n<i>✅ multi-source confirmed | ⚠️ conflicting sources | 📰 news confirmed</i>"
         )
 
         msg = "\n".join(lines)

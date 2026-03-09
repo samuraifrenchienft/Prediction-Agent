@@ -547,12 +547,14 @@ class InjuryAPIClient:
 
     # ── Secondary source: Sleeper API (NFL/NBA) ──────────────────────────────
 
-    def _fetch_sleeper(self, sport: str) -> dict[str, str]:
+    def _fetch_sleeper(self, sport: str) -> dict[str, dict]:
         """
-        Return {full_name_lower: normalized_status} from the Sleeper player API.
+        Return {full_name_lower: {"status": str, "depth_chart_order": int|None}}
+        from the Sleeper player API.
         File-cached for 6 hours (response is ~8MB — we don't want to re-fetch
         on every scan cycle).  Returns {} for NHL (Sleeper doesn't cover it)
         or if the request fails.
+        depth_chart_order == 1 means the player is the starter at their position.
         """
         sport_lower = sport.lower()
         if sport_lower not in ("nba", "nfl"):
@@ -577,16 +579,27 @@ class InjuryAPIClient:
             log.warning("[InjuryAPI] Sleeper %s fetch failed: %s", sport.upper(), exc)
             return {}
 
-        result: dict[str, str] = {}
+        result: dict[str, dict] = {}
         for player_data in raw.values():
             if not isinstance(player_data, dict):
                 continue
             full_name = player_data.get("full_name") or ""
-            inj_status = player_data.get("injury_status") or ""
-            if full_name and inj_status:
-                normalized = _SLEEPER_STATUS_MAP.get(inj_status)
-                if normalized:
-                    result[full_name.lower()] = normalized
+            if not full_name:
+                continue
+            inj_status  = player_data.get("injury_status") or ""
+            depth_order = player_data.get("depth_chart_order")
+            # Normalise depth_chart_order to int or None
+            try:
+                depth_order = int(depth_order) if depth_order is not None else None
+            except (TypeError, ValueError):
+                depth_order = None
+            normalized = _SLEEPER_STATUS_MAP.get(inj_status) if inj_status else None
+            # Store every player that has injury status OR depth_chart_order == 1
+            if normalized or depth_order == 1:
+                result[full_name.lower()] = {
+                    "status":             normalized,
+                    "depth_chart_order":  depth_order,
+                }
 
         try:
             with open(cache_file, "w") as f:
@@ -594,7 +607,9 @@ class InjuryAPIClient:
         except Exception:
             pass
 
-        log.info("[InjuryAPI] Sleeper %s: %d players with active injury status", sport.upper(), len(result))
+        starters  = sum(1 for v in result.values() if v.get("depth_chart_order") == 1)
+        log.info("[InjuryAPI] Sleeper %s: %d players cached (%d starters)",
+                 sport.upper(), len(result), starters)
         return result
 
     # ── Star player news spot-check ───────────────────────────────────────────
@@ -711,14 +726,20 @@ class InjuryAPIClient:
                         except ValueError:
                             pass
 
-        # NFL/NBA: cross-reference with Sleeper's independent injury data
+        # NFL/NBA: cross-reference with Sleeper (status + depth_chart_order)
         if sport in ("nfl", "nba"):
             sleeper = self._fetch_sleeper(sport)
             if sleeper:
-                confirmed = upgraded = conflicted = 0
+                confirmed = upgraded = conflicted = starters_found = 0
                 for r in records:
                     name_lower = r["player_name"].lower()
-                    sl_status = sleeper.get(name_lower)
+                    sl_entry   = sleeper.get(name_lower)
+                    # ── Starter flag from depth_chart_order ──────────────────
+                    if sl_entry and sl_entry.get("depth_chart_order") == 1:
+                        r["is_starter"] = 1
+                        starters_found += 1
+                    # ── Status cross-reference ────────────────────────────────
+                    sl_status = sl_entry.get("status") if sl_entry else None
                     if not sl_status:
                         continue
                     cur_src = r.get("source_api", "espn")
@@ -726,24 +747,31 @@ class InjuryAPIClient:
                         espn_idx = _SEVERITY_ORDER.index(r["status"])
                         sl_idx   = _SEVERITY_ORDER.index(sl_status)
                         if sl_idx < espn_idx:
-                            # Sleeper shows a worse status → upgrade
                             r["status"]     = sl_status
                             r["source_api"] = cur_src + "+sleeper↑"
                             upgraded += 1
                         elif sl_idx == espn_idx:
-                            # Both sources agree → confirmed
                             r["source_api"] = cur_src + "+sleeper✓"
                             confirmed += 1
                         else:
-                            # Sleeper shows lighter status → flag conflict
                             r["source_api"] = cur_src + "+sleeper⚠️"
                             conflicted += 1
                     except ValueError:
                         pass
                 log.info(
-                    "[InjuryAPI] Sleeper %s cross-ref: %d confirmed | %d upgraded | %d conflicted",
-                    sport.upper(), confirmed, upgraded, conflicted,
+                    "[InjuryAPI] Sleeper %s: %d confirmed | %d upgraded | %d conflicted | %d starters flagged",
+                    sport.upper(), confirmed, upgraded, conflicted, starters_found,
                 )
+
+        # All sports: flag starters via _STAR_MULTIPLIERS (covers NHL + fills gaps)
+        for r in records:
+            if r.get("is_starter"):
+                continue  # already set by Sleeper
+            player_lower = r["player_name"].lower()
+            for name_key, mult in _STAR_MULTIPLIERS.items():
+                if name_key in player_lower and mult >= 1.05:
+                    r["is_starter"] = 1
+                    break
 
         # All sports: headline spot-check for named star players only
         self._verify_stars_with_news(records, sport)

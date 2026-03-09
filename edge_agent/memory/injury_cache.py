@@ -56,12 +56,19 @@ def _init_db(conn: sqlite3.Connection) -> None:
             return_date  TEXT NOT NULL DEFAULT '',
             comment      TEXT NOT NULL DEFAULT '',
             source_api   TEXT NOT NULL DEFAULT 'espn',
+            is_starter   INTEGER NOT NULL DEFAULT 0,
             fetched_at   REAL NOT NULL,
             expires_at   REAL NOT NULL
         )
     """)
     conn.execute("CREATE INDEX IF NOT EXISTS idx_sport ON injury_cache(sport)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_expires ON injury_cache(expires_at)")
+    # Schema migration — add is_starter to existing DBs that pre-date this column
+    try:
+        conn.execute("ALTER TABLE injury_cache ADD COLUMN is_starter INTEGER NOT NULL DEFAULT 0")
+        conn.commit()
+    except Exception:
+        pass  # column already exists
 
     # Change detection alerts — proactive Telegram notifications
     conn.execute("""
@@ -121,8 +128,8 @@ class InjuryCache:
                     INSERT INTO injury_cache
                         (sport, player_name, team, position, status,
                          injury_type, injury_detail, return_date, comment,
-                         source_api, fetched_at, expires_at)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                         source_api, is_starter, fetched_at, expires_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         sport.lower(),
@@ -135,6 +142,7 @@ class InjuryCache:
                         r.get("return_date", ""),
                         r.get("comment", ""),
                         r.get("source_api", "espn"),
+                        int(bool(r.get("is_starter", 0))),
                         now,
                         expires,
                     ),
@@ -162,7 +170,7 @@ class InjuryCache:
             """
             SELECT player_name, team, position, status,
                    injury_type, injury_detail, return_date, comment,
-                   source_api, fetched_at
+                   source_api, is_starter, fetched_at
             FROM   injury_cache
             WHERE  sport = ? AND expires_at > ?
             ORDER BY player_name
@@ -189,7 +197,7 @@ class InjuryCache:
             """
             SELECT player_name, team, position, status,
                    injury_type, injury_detail, return_date, comment,
-                   source_api, fetched_at
+                   source_api, is_starter, fetched_at
             FROM   injury_cache
             WHERE  sport = ? AND expires_at > ?
             """,
