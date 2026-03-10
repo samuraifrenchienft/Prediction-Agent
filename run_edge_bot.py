@@ -1204,7 +1204,7 @@ def _build_tonight_injury_alerts() -> str:
                 continue
 
             # Header — tag NBA with "(Tonight's Games)" when schedule is available
-            header_suffix = " (Tonight's Games)" if sport == "nba" and tonight_nba else ""
+            header_suffix = " (Tonight & Tomorrow)" if sport == "nba" and tonight_nba else ""
             lines.append(f"\n🏥 <b>{sport.upper()} Starter Alerts{header_suffix}:</b>")
 
             shown = 0
@@ -1292,15 +1292,17 @@ _bdl_game_cache: dict = {"teams": None, "fetched_at": 0.0}
 
 def _get_tonight_nba_games() -> frozenset:
     """
-    Fetch tonight's NBA game schedule from BallDontLie free tier.
-    Returns a frozenset of lowercase team-name tokens so alerts can be
-    filtered to teams actually playing tonight.
+    Fetch tonight's AND tomorrow's NBA game schedule from BallDontLie free tier.
+    Returns a frozenset of lowercase team-name tokens so alerts can be filtered
+    to teams playing in the next 48-hour window — useful for planning trades
+    the night before a game.
     E.g. "Los Angeles Lakers" → {"los", "angeles", "lakers"}
 
     Caches result for 30 minutes. Returns frozenset() if API key is
     missing or the call fails — callers must treat empty set as "show all".
     """
     import time
+    from datetime import timedelta
     import requests as _req
 
     if not _BALLDONTLIE_API:
@@ -1310,12 +1312,14 @@ def _get_tonight_nba_games() -> frozenset:
     if _bdl_game_cache["teams"] is not None and now - _bdl_game_cache["fetched_at"] < 1800:
         return _bdl_game_cache["teams"]
 
-    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    today    = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    tomorrow = (datetime.now(timezone.utc) + timedelta(days=1)).strftime("%Y-%m-%d")
     try:
         resp = _req.get(
             "https://api.balldontlie.io/v1/games",
             headers={"Authorization": _BALLDONTLIE_API},
-            params={"dates[]": today},
+            # Pass both dates in one request — BallDontLie supports repeated params
+            params=[("dates[]", today), ("dates[]", tomorrow)],
             timeout=8,
         )
         resp.raise_for_status()
@@ -1328,7 +1332,7 @@ def _get_tonight_nba_games() -> frozenset:
         result = frozenset(tokens)
         _bdl_game_cache["teams"]      = result
         _bdl_game_cache["fetched_at"] = now
-        log.info("[BALLDONTLIE] Tonight NBA team tokens: %s", sorted(result))
+        log.info("[BALLDONTLIE] Tonight+Tomorrow NBA team tokens: %s", sorted(result))
         return result
     except Exception as exc:
         log.warning("[BALLDONTLIE] Game fetch failed: %s", exc)
