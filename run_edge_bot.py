@@ -378,10 +378,16 @@ async def _run_scan(bot, notify: bool = True) -> str:
 
     svc = _get_service()
     scanner = _get_scanner()
+    loop = asyncio.get_event_loop()
 
     try:
-        inputs = scanner.collect()
-        recs, summary = svc.run_scan(inputs, portfolio=_portfolio)
+        # ── Run all blocking I/O in a thread pool so the bot stays responsive ──
+        # scanner.collect() hits Kalshi/Polymarket HTTP APIs (can take 10-30s)
+        inputs = await loop.run_in_executor(None, scanner.collect)
+        # svc.run_scan() processes all markets synchronously
+        recs, summary = await loop.run_in_executor(
+            None, lambda: svc.run_scan(inputs, portfolio=_portfolio)
+        )
 
         new_alerts = 0
         for rec in recs:
@@ -438,14 +444,16 @@ async def _run_scan(bot, notify: bool = True) -> str:
         tracker_text = svc.game_tracker_summary()
 
         # Build injury alert block — independent of qualification pipeline
-        injury_alert_block = _build_tonight_injury_alerts()
+        # (calls BallDontLie HTTP + injury cache, so run off the event loop)
+        injury_alert_block = await loop.run_in_executor(None, _build_tonight_injury_alerts)
 
         # Fetch sportsbook lines for any sport that has alerts (1 search per sport)
+        # Each call hits Tavily/Serper HTTP — run in executor to avoid blocking
         book_lines_block = ""
         if injury_alert_block:
             for _sp in ("nba", "nfl", "nhl"):
                 if _sp in injury_alert_block.lower():
-                    _lines = _fetch_sportsbook_lines(_sp)
+                    _lines = await loop.run_in_executor(None, _fetch_sportsbook_lines, _sp)
                     if _lines:
                         book_lines_block += f"\n\n📊 <b>{_sp.upper()} Sportsbook Lines:</b>\n{_lines}"
 
