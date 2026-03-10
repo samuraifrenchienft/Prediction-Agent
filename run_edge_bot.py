@@ -192,6 +192,9 @@ SCAN_INTERVAL_MIN    = int(os.environ.get("SCAN_INTERVAL_MINUTES", "180"))  # de
 INJURY_REFRESH_MIN   = int(os.environ.get("INJURY_REFRESH_MINUTES", "240"))  # default 4 hours
 BANKROLL_USD         = float(os.environ.get("BANKROLL_USD", "10000"))
 
+# BallDontLie — NBA game schedule (free tier: /v1/games endpoint)
+_BALLDONTLIE_API = os.environ.get("BALLDONTLIE_API", "")
+
 # ---------------------------------------------------------------------------
 # Approved signals — persisted across restarts
 # ---------------------------------------------------------------------------
@@ -1070,6 +1073,15 @@ async def handle_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None
         if not search_context:   # Tavily failed/quota gone → try Serper
             search_context = await loop.run_in_executor(None, _serper_search, _query)
 
+    # 7. Win-probability impact context — injected when a sport is detected.
+    #    Prepended to search_context so the AI reasons with actual shift math
+    #    (e.g. "LeBron Out → -12.3% win-prob shift, 10.5 pts/gm impact") rather
+    #    than generic statements about a player being injured.
+    if _chat_sport and _chat_sport != "unknown":
+        wp_context = _build_win_prob_context(_chat_sport)
+        if wp_context:
+            search_context = wp_context + ("\n\n" + search_context if search_context else "")
+
     # ── Correction mode instruction — prepended to system prompt ─────────────
     correction_instruction = (
         "CORRECTION MODE ACTIVE: The user indicated your previous response was wrong. "
@@ -1163,12 +1175,20 @@ def _build_tonight_injury_alerts() -> str:
     Reads injury cache for all 3 sports and returns a formatted alert block
     listing Out/Doubtful starters. Completely independent of the qualification
     pipeline — shows useful info even when Qualified: 0.
-    Zero extra API calls (cache reads only).
+
+    Enhancements:
+    • NBA alerts are filtered to teams playing tonight via BallDontLie API.
+    • Each alert shows the win-probability shift calculated by injury_win_prob_shift()
+      e.g. "🔴 LeBron James [SF] (Lakers) — Out ✓ → -12.3% win prob (10.5 pts/gm)"
     """
     try:
         from edge_agent.memory.injury_cache import InjuryCache
+        from edge_agent.win_probability import injury_win_prob_shift
         db = InjuryCache()
         lines: list[str] = []
+
+        # Fetch tonight's NBA game schedule once (cached 30 min)
+        tonight_nba = _get_tonight_nba_games()   # frozenset of lowercase team tokens
 
         for sport in ("nba", "nfl", "nhl"):
             records = db.get_all(sport)
@@ -1182,14 +1202,43 @@ def _build_tonight_injury_alerts() -> str:
             ]
             if not alerts:
                 continue
-            lines.append(f"\n🏥 <b>{sport.upper()} Starter Alerts:</b>")
-            for r in alerts[:10]:   # cap at 10 per sport to keep message compact
+
+            # Header — tag NBA with "(Tonight's Games)" when schedule is available
+            header_suffix = " (Tonight's Games)" if sport == "nba" and tonight_nba else ""
+            lines.append(f"\n🏥 <b>{sport.upper()} Starter Alerts{header_suffix}:</b>")
+
+            shown = 0
+            for r in alerts:
+                if shown >= 10:   # cap at 10 per sport to keep message compact
+                    break
                 name   = r.get("player_name", "Unknown")
                 team   = r.get("team", "")
                 status = r.get("status", "")
                 src    = r.get("source_api", "")
                 pos    = r.get("position", "")
                 emoji  = _SEVERITY_EMOJI.get(status, "⚪")
+
+                # NBA: filter to teams playing tonight when schedule data is available
+                if sport == "nba" and tonight_nba:
+                    team_tokens = set(team.lower().split())
+                    if not team_tokens.intersection(tonight_nba):
+                        continue   # this team isn't playing tonight — skip
+
+                # ── Win-probability shift (points-system math) ────────────────
+                shift, eff_impact, _expl = injury_win_prob_shift(
+                    player_name=name,
+                    position=pos,
+                    status=status,
+                    sport=sport,
+                    base_win_prob=0.50,
+                    star_multiplier=1.0,
+                )
+                if shift != 0.0:
+                    unit      = "goals/gm" if sport == "nhl" else "pts/gm"
+                    shift_str = f" → <b>{shift:+.1%}</b> win prob ({eff_impact:.1f} {unit})"
+                else:
+                    shift_str = ""
+
                 # Source confidence badge
                 if "⚠️" in src:
                     badge = " ⚠️"
@@ -1197,8 +1246,13 @@ def _build_tonight_injury_alerts() -> str:
                     badge = " ✓"
                 else:
                     badge = ""
+
                 pos_str = f" [{pos}]" if pos else ""
-                lines.append(f"  {emoji} <b>{_e(name)}</b>{pos_str} ({_e(team)}) — {_e(status)}{badge}")
+                lines.append(
+                    f"  {emoji} <b>{_e(name)}</b>{pos_str} ({_e(team)}) "
+                    f"— {_e(status)}{badge}{shift_str}"
+                )
+                shown += 1
 
         return "\n".join(lines) if lines else ""
     except Exception as exc:
@@ -1225,6 +1279,105 @@ def _fetch_sportsbook_lines(sport: str) -> str:
         return result[:700] if result else ""
     except Exception as exc:
         log.debug("_fetch_sportsbook_lines failed for %s: %s", sport, exc)
+        return ""
+
+
+# ---------------------------------------------------------------------------
+# BallDontLie — tonight's NBA game schedule (free tier)
+# ---------------------------------------------------------------------------
+
+# In-process cache so we don't hammer the API on every scan (30-min TTL)
+_bdl_game_cache: dict = {"teams": None, "fetched_at": 0.0}
+
+
+def _get_tonight_nba_games() -> frozenset:
+    """
+    Fetch tonight's NBA game schedule from BallDontLie free tier.
+    Returns a frozenset of lowercase team-name tokens so alerts can be
+    filtered to teams actually playing tonight.
+    E.g. "Los Angeles Lakers" → {"los", "angeles", "lakers"}
+
+    Caches result for 30 minutes. Returns frozenset() if API key is
+    missing or the call fails — callers must treat empty set as "show all".
+    """
+    import time
+    import requests as _req
+
+    if not _BALLDONTLIE_API:
+        return frozenset()
+
+    now = time.time()
+    if _bdl_game_cache["teams"] is not None and now - _bdl_game_cache["fetched_at"] < 1800:
+        return _bdl_game_cache["teams"]
+
+    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    try:
+        resp = _req.get(
+            "https://api.balldontlie.io/v1/games",
+            headers={"Authorization": _BALLDONTLIE_API},
+            params={"dates[]": today},
+            timeout=8,
+        )
+        resp.raise_for_status()
+        data = resp.json().get("data", [])
+        tokens: set = set()
+        for game in data:
+            for side in ("home_team", "visitor_team"):
+                full_name = game.get(side, {}).get("full_name", "")
+                tokens.update(full_name.lower().split())
+        result = frozenset(tokens)
+        _bdl_game_cache["teams"]      = result
+        _bdl_game_cache["fetched_at"] = now
+        log.info("[BALLDONTLIE] Tonight NBA team tokens: %s", sorted(result))
+        return result
+    except Exception as exc:
+        log.warning("[BALLDONTLIE] Game fetch failed: %s", exc)
+        _bdl_game_cache["teams"]      = frozenset()
+        _bdl_game_cache["fetched_at"] = now
+        return frozenset()
+
+
+# ---------------------------------------------------------------------------
+# Win-probability context builder for AI chat
+# ---------------------------------------------------------------------------
+
+def _build_win_prob_context(sport: str) -> str:
+    """
+    Build a compact win-prob impact summary from the injury cache.
+    Injected into the AI chat system prompt so the AI can reason with
+    real numbers instead of generic statements.
+    Returns "" if cache is empty or sport is unknown/unsupported.
+    """
+    if not sport or sport == "unknown":
+        return ""
+    try:
+        from edge_agent.memory.injury_cache import InjuryCache
+        from edge_agent.win_probability import injury_win_prob_shift
+        db      = InjuryCache()
+        records = db.get_all(sport)
+        lines: list[str] = []
+        for r in records:
+            if r.get("status", "").lower() not in _ALERT_STATUSES:
+                continue
+            shift, impact, _expl = injury_win_prob_shift(
+                player_name=r.get("player_name", ""),
+                position=r.get("position", ""),
+                status=r.get("status", ""),
+                sport=sport,
+            )
+            if shift != 0.0:
+                unit = "goals/gm" if sport == "nhl" else "pts/gm"
+                lines.append(
+                    f"- {r.get('player_name', '?')} ({r.get('team', '?')}) "
+                    f"{r.get('status', '?')}: {shift:+.1%} win-prob shift "
+                    f"({impact:.1f} {unit} impact)"
+                )
+        if not lines:
+            return ""
+        header = f"[INJURY WIN-PROB IMPACTS — {sport.upper()}]\n"
+        return header + "\n".join(lines[:15])
+    except Exception as exc:
+        log.debug("_build_win_prob_context failed: %s", exc)
         return ""
 
 
