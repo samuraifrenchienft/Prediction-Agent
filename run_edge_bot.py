@@ -433,6 +433,19 @@ async def _run_scan(bot, notify: bool = True) -> str:
                     )
 
         tracker_text = svc.game_tracker_summary()
+
+        # Build injury alert block — independent of qualification pipeline
+        injury_alert_block = _build_tonight_injury_alerts()
+
+        # Fetch sportsbook lines for any sport that has alerts (1 search per sport)
+        book_lines_block = ""
+        if injury_alert_block:
+            for _sp in ("nba", "nfl", "nhl"):
+                if _sp in injury_alert_block.lower():
+                    _lines = _fetch_sportsbook_lines(_sp)
+                    if _lines:
+                        book_lines_block += f"\n\n📊 <b>{_sp.upper()} Sportsbook Lines:</b>\n{_lines}"
+
         _last_status = (
             f"Scan @ {datetime.now(timezone.utc).strftime('%H:%M UTC')}\n"
             f"Markets: {summary.total_markets} | "
@@ -441,6 +454,8 @@ async def _run_scan(bot, notify: bool = True) -> str:
             f"Rejected: {summary.rejected}\n"
             f"New alerts: {new_alerts}\n\n"
             f"{tracker_text}"
+            f"{injury_alert_block}"
+            f"{book_lines_block}"
         )
         return _last_status
 
@@ -947,6 +962,19 @@ async def handle_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None
 
     await update.message.chat.send_action("typing")
 
+    # ── Correction detection ──────────────────────────────────────────────────
+    # If the user signals the previous answer was wrong, we expand the search
+    # query and inject a CORRECTION MODE instruction into the system prompt so
+    # the AI knows NOT to repeat its prior response.
+    _CORRECTION_TRIGGERS = {
+        "wrong", "try again", "retry", "that's not", "thats not",
+        "incorrect", "not right", "different answer", "try harder",
+        "still wrong", "no that", "you said", "that was wrong",
+        "redo", "search again", "look again", "check again", "that's wrong",
+        "thats wrong", "bad answer", "wrong answer",
+    }
+    _is_correction = any(t in user_msg.lower() for t in _CORRECTION_TRIGGERS)
+
     # 1. Knowledge base context
     kb_context = _kb.get_context_for_question(user_msg)
 
@@ -1022,19 +1050,40 @@ async def handle_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None
 
     injury_context = _build_injury_context(q)
 
-    # 6. Real-time web search — fires when a sport is detected.
+    # 6. Real-time web search — fires when a sport is detected OR when the user
+    #    is correcting a previous answer (correction forces a fresh search even
+    #    without a sport keyword so the AI has new data to work from).
     #    Tries Tavily first (AI-native, 1,000/mo free), then falls back to
     #    Serper (Google results, 2,500/mo free) if Tavily quota is exhausted.
     search_context = ""
-    if _chat_sport:
-        _query = f"{user_msg} {_chat_sport.upper()} injury report today"
-        loop   = asyncio.get_event_loop()
+    if _chat_sport or _is_correction:
+        if _is_correction and _chat_sport:
+            # Expand query to force fresher / different results on correction
+            _query = f"{user_msg} {_chat_sport.upper()} latest confirmed update today"
+        elif _is_correction:
+            # No sport detected but user is correcting — search exactly what they said
+            _query = f"{user_msg} latest news today confirmed"
+        else:
+            _query = f"{user_msg} {_chat_sport.upper()} injury report today"
+        loop = asyncio.get_event_loop()
         search_context = await loop.run_in_executor(None, _tavily_search, _query)
         if not search_context:   # Tavily failed/quota gone → try Serper
             search_context = await loop.run_in_executor(None, _serper_search, _query)
 
+    # ── Correction mode instruction — prepended to system prompt ─────────────
+    correction_instruction = (
+        "CORRECTION MODE ACTIVE: The user indicated your previous response was wrong. "
+        "Do NOT repeat or rephrase your previous answer. "
+        "Search the [Live web search results] block below for updated information and use that. "
+        "If the search results contradict what you said before, use the search results. "
+        "If you still cannot find clear data, say exactly what you found and what is uncertain — "
+        "do not guess or hallucinate.\n\n"
+        if _is_correction else ""
+    )
+
     system_prompt = (
-        "You are Edge, an expert prediction market analyst on Telegram. "
+        correction_instruction
+        + "You are Edge, an expert prediction market analyst on Telegram. "
         "Be concise — Telegram users want short, direct answers. "
         "Reference live market data and knowledge base context when provided. "
         "Use session context to remember what was discussed earlier. "
@@ -1059,6 +1108,14 @@ async def handle_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None
         "• Prices are probabilities (0-100%), positions are YES/NO contracts, "
         "not sides or totals."
     )
+
+    # Save correction event to session memory so the AI's next response
+    # has full context that a correction happened
+    if _is_correction:
+        _mem.add_exchange(
+            "[USER CORRECTION]",
+            "[Bot acknowledged correction — performed expanded search]",
+        )
 
     prompt = user_msg + kb_context + session_context + market_context + scan_context + injury_context + search_context
     reply = get_chat_response(prompt, task_type="creative", system_prompt=system_prompt) or "Sorry, I couldn't generate a response right now."
@@ -1089,6 +1146,86 @@ _SEVERITY_EMOJI = {
 
 # Max players shown per sport before truncation (keeps messages readable)
 _INJURIES_MAX_PER_SPORT = 40
+
+# Key positions per sport — only these count as impactful starters for alert purposes
+_KEY_POSITIONS = {
+    "nba": {"PG", "SG", "SF", "PF", "C"},
+    "nfl": {"QB", "RB", "WR", "TE"},
+    "nhl": {"C", "LW", "RW", "D", "G"},
+}
+
+# Statuses that count as "starter alert" material (not just minor bumps)
+_ALERT_STATUSES = {"out", "doubtful", "suspension", "injured reserve"}
+
+
+def _build_tonight_injury_alerts() -> str:
+    """
+    Reads injury cache for all 3 sports and returns a formatted alert block
+    listing Out/Doubtful starters. Completely independent of the qualification
+    pipeline — shows useful info even when Qualified: 0.
+    Zero extra API calls (cache reads only).
+    """
+    try:
+        from edge_agent.memory.injury_cache import InjuryCache
+        db = InjuryCache()
+        lines: list[str] = []
+
+        for sport in ("nba", "nfl", "nhl"):
+            records = db.get_all(sport)
+            if not records:
+                continue
+            key_pos = _KEY_POSITIONS.get(sport, set())
+            alerts = [
+                r for r in records
+                if r.get("status", "").lower() in _ALERT_STATUSES
+                and (not r.get("position") or r.get("position", "") in key_pos)
+            ]
+            if not alerts:
+                continue
+            lines.append(f"\n🏥 <b>{sport.upper()} Starter Alerts:</b>")
+            for r in alerts[:10]:   # cap at 10 per sport to keep message compact
+                name   = r.get("player_name", "Unknown")
+                team   = r.get("team", "")
+                status = r.get("status", "")
+                src    = r.get("source_api", "")
+                pos    = r.get("position", "")
+                emoji  = _SEVERITY_EMOJI.get(status, "⚪")
+                # Source confidence badge
+                if "⚠️" in src:
+                    badge = " ⚠️"
+                elif any(x in src for x in ("news✓", "official", "sleeper✓")):
+                    badge = " ✓"
+                else:
+                    badge = ""
+                pos_str = f" [{pos}]" if pos else ""
+                lines.append(f"  {emoji} <b>{_e(name)}</b>{pos_str} ({_e(team)}) — {_e(status)}{badge}")
+
+        return "\n".join(lines) if lines else ""
+    except Exception as exc:
+        log.debug("_build_tonight_injury_alerts failed: %s", exc)
+        return ""
+
+
+def _fetch_sportsbook_lines(sport: str) -> str:
+    """
+    Search for tonight's sportsbook moneyline odds for the given sport.
+    Tries Tavily first, Serper fallback. Returns "" if both fail or no
+    sport keywords matched.
+    Costs 1 search call per sport — only fired when injury alerts exist.
+    """
+    try:
+        from datetime import date
+        today = date.today().strftime("%B %d")
+        query = f"{sport.upper()} games tonight moneyline odds spread {today}"
+        result = _tavily_search(query, max_results=3)
+        if not result:
+            result = _serper_search(query, max_results=3)
+        # Strip the wrapper tags and trim to keep scan message readable
+        result = result.replace("\n[Live web search results]\n", "").replace("\n[End web search]", "").strip()
+        return result[:700] if result else ""
+    except Exception as exc:
+        log.debug("_fetch_sportsbook_lines failed for %s: %s", sport, exc)
+        return ""
 
 
 async def cmd_injuries(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:

@@ -377,7 +377,7 @@ def detect_sport(text: str) -> str:
     nhl_score = sum(1 for k in _NHL_KW if k in t)
     best = max(nba_score, nfl_score, nhl_score)
     if best == 0:
-        return "nba"  # safe default
+        return "unknown"  # no sport keywords found — never silently default to wrong sport
     if nhl_score == best:
         return "nhl"
     if nfl_score == best:
@@ -813,6 +813,9 @@ class InjuryAPIClient:
                             pass
 
         if db is not None:
+            # Tag each record with its sport so cross-sport filtering is possible downstream
+            for _r in records:
+                _r["sport"] = sport
             db.store(sport, records)
             if change_alerts:
                 db.store_change_alerts(change_alerts)
@@ -850,6 +853,10 @@ class InjuryAPIClient:
         if not sport:
             sport = detect_sport(market_question)
         sport = sport.lower()
+
+        # Cannot match injuries when sport is unknown — avoids cross-sport false positives
+        if sport == "unknown":
+            return []
 
         # 1. Try hot-path cache
         records = self._hot_get(sport)
