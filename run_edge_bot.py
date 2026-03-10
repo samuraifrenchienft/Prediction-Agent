@@ -455,7 +455,7 @@ async def _run_scan(bot, notify: bool = True) -> str:
                 if _sp in injury_alert_block.lower():
                     _lines = await loop.run_in_executor(None, _fetch_sportsbook_lines, _sp)
                     if _lines:
-                        book_lines_block += f"\n\n📊 <b>{_sp.upper()} Sportsbook Lines:</b>\n{_lines}"
+                        book_lines_block += f"\n\n📊 <b>{_sp.upper()} Sportsbook Lines:</b>\n{html.escape(_lines)}"
 
         _last_status = (
             f"Scan @ {datetime.now(timezone.utc).strftime('%H:%M UTC')}\n"
@@ -1255,7 +1255,7 @@ def _build_tonight_injury_alerts() -> str:
                 else:
                     badge = ""
 
-                pos_str = f" [{pos}]" if pos else ""
+                pos_str = f" [{_e(pos)}]" if pos else ""
                 lines.append(
                     f"  {emoji} <b>{_e(name)}</b>{pos_str} ({_e(team)}) "
                     f"— {_e(status)}{badge}{shift_str}"
