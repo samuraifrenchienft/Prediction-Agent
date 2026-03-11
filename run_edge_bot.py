@@ -302,6 +302,38 @@ def _e(text: str) -> str:
     return html.escape(str(text))
 
 
+_TG_MAX = 4000  # conservative limit below Telegram's 4096-char hard cap
+
+
+async def _send_chunked(
+    reply_fn,
+    text: str,
+    parse_mode: str = ParseMode.HTML,
+    **kwargs,
+) -> None:
+    """
+    Send a potentially long HTML message as multiple ≤4000-char parts.
+    Splits on newline boundaries so HTML tags within a single line are
+    never broken mid-tag. Each chunk is sent as a separate message.
+    """
+    if len(text) <= _TG_MAX:
+        await reply_fn(text, parse_mode=parse_mode, **kwargs)
+        return
+
+    lines = text.split("\n")
+    chunk = ""
+    for line in lines:
+        candidate = chunk + line + "\n"
+        if len(candidate) > _TG_MAX:
+            if chunk.strip():
+                await reply_fn(chunk.rstrip(), parse_mode=parse_mode, **kwargs)
+            chunk = line + "\n"
+        else:
+            chunk = candidate
+    if chunk.strip():
+        await reply_fn(chunk.rstrip(), parse_mode=parse_mode, **kwargs)
+
+
 def _fmt_alert(rec: Recommendation) -> str:
     signal = rec.metadata.get("signal", "NONE")
     sem = _SIGNAL_EMOJI.get(signal, "📊")
@@ -521,10 +553,7 @@ async def cmd_scan(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     if "Scan error" in result:
         await update.message.reply_text(f"⚠️ {result}")
     else:
-        await update.message.reply_text(
-            f"✅ Scan complete.\n<pre>{_e(result)}</pre>",
-            parse_mode=ParseMode.HTML,
-        )
+        await _send_chunked(update.message.reply_text, f"✅ Scan complete.\n\n{result}")
 
 
 async def cmd_tracking(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
@@ -719,10 +748,7 @@ async def trader_refresh_job(ctx: ContextTypes.DEFAULT_TYPE) -> None:
 
 
 async def cmd_status(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
-    await update.message.reply_text(
-        f"<pre>{_e(_last_status)}</pre>",
-        parse_mode=ParseMode.HTML,
-    )
+    await _send_chunked(update.message.reply_text, _last_status)
 
 
 async def cmd_approvals(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
