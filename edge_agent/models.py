@@ -71,9 +71,9 @@ class RiskPolicy:
     max_position_pct_bankroll: float = 0.03
     max_theme_exposure_pct: float = 0.20
     max_daily_drawdown_pct: float = 0.05
-    min_confidence: float = 0.70
+    min_confidence: float = 0.60   # was 0.70 — lowered so Doubtful injuries qualify
     max_spread_bps: float = 220
-    min_depth_usd: float = 1500
+    min_depth_usd: float = 1000   # was 1500 — lowered for shallower Kalshi markets
     min_time_to_resolution_hours: float = 1.0
     max_ambiguity_score: float = 0.55
     max_volatility_entropy_score: float = 0.80

@@ -489,6 +489,32 @@ async def _run_scan(bot, notify: bool = True) -> str:
                     if _lines:
                         book_lines_block += f"\n\n📊 <b>{_sp.upper()} Sportsbook Lines:</b>\n{html.escape(_lines)}"
 
+        # ── Persist scan results to scan_log for /performance ───────────────
+        try:
+            from edge_agent.memory.scan_log import ScanLog
+            _sl = ScanLog()
+            _run_id = _sl.log_scan(
+                total=summary.total_markets,
+                qualified=summary.qualified,
+                watchlist=summary.watchlist,
+                rejected=summary.rejected,
+                new_alerts=new_alerts,
+            )
+            for _rec in recs:
+                if _rec.qualification_state.value == "qualified":
+                    _sl.log_signal(
+                        scan_run_id=_run_id,
+                        market_id=_rec.market_id,
+                        venue=_rec.venue.value,
+                        signal_type=_rec.metadata.get("signal"),
+                        ev_net=_rec.ev_net,
+                        confidence=_rec.confidence,
+                        action=_rec.action,
+                        market_prob=_rec.market_prob,
+                    )
+        except Exception as _log_exc:
+            log.debug("scan_log write failed: %s", _log_exc)
+
         _last_status = (
             f"Scan @ {datetime.now(timezone.utc).strftime('%H:%M UTC')}\n"
             f"Markets: {summary.total_markets} | "
@@ -529,9 +555,11 @@ async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         "/injuries nhl oilers — filter by team\n"
         "/tracking — injury game tracking list\n"
         "/top — top 3 opportunities\n"
-        "/traders — top 10 hot Polymarket traders (scored + bot-filtered)\n"
+        "/traders — top 20 smart money traders (auto-cached, instant)\n"
         "/traders sports — filter by category (sports/politics/crypto)\n"
         "/wallet 0x… — deep vet any Polymarket wallet\n"
+        "/performance — scan stats: signals found, avg EV, best pick\n"
+        "/performance 7 — last 7 days\n"
         "/status — last scan summary\n"
         "/approvals — manage alert signal filter\n"
         "/help — this message\n\n"
@@ -611,7 +639,8 @@ async def cmd_top(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
 async def cmd_traders(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     """
     /traders [category]
-    Show the top 10 human traders on Polymarket ranked by the composite score.
+    Show top 20 Polymarket smart money traders. Reads from pre-warmed cache (instant).
+    Falls back to live scoring (~30s) only if cache is empty.
     Category options: OVERALL (default), SPORTS, POLITICS, CRYPTO, CULTURE.
     """
     args     = (update.message.text or "").split()
@@ -621,43 +650,70 @@ async def cmd_traders(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     if category not in valid_cats:
         category = "OVERALL"
 
-    await update.message.reply_text(
-        f"⏳ Scoring top Polymarket traders ({category}) — this takes ~30s…"
-    )
-    try:
-        client = _TraderClient()
-        scores = await asyncio.get_event_loop().run_in_executor(
-            None, lambda: client.get_hot_traders(limit=10, category=category)
-        )
-    except Exception as exc:
-        await update.message.reply_text(f"❌ Trader scan failed: {exc}")
-        return
+    from edge_agent.memory.trader_cache import TraderCache
+    _TraderScore = _trader_mod.TraderScore  # already imported via importlib at top
 
-    if not scores:
+    # ── Cache-first: pre-warmed by daily job, instant response ──────────────
+    cache     = TraderCache()
+    cache_rows = cache.get_top(20)
+
+    if cache_rows:
+        # Convert SQLite dicts → TraderScore objects for uniform display
+        _fields = _TraderScore.__dataclass_fields__
+        scores  = [_TraderScore(**{k: v for k, v in r.items() if k in _fields})
+                   for r in cache_rows]
+        st      = cache.stats()
+        source_note = (
+            f"<i>Smart money cache — {st['count']} traders | "
+            f"Updated: {st['last_fetch']}</i>"
+        )
+    else:
+        # Cache empty — score live (happens on first boot before warmup job runs)
         await update.message.reply_text(
-            "No trader data available right now. Try again in a few minutes."
+            f"⏳ Cache empty — scoring top Polymarket traders ({category}) live (~30s)…"
         )
-        return
+        try:
+            client = _TraderClient()
+            scores = await asyncio.get_event_loop().run_in_executor(
+                None, lambda: client.get_hot_traders(limit=20, category=category)
+            )
+        except Exception as exc:
+            await update.message.reply_text(f"❌ Trader scan failed: {exc}")
+            return
+        if not scores:
+            await update.message.reply_text(
+                "No trader data available right now. Try again in a few minutes."
+            )
+            return
+        source_note = f"<i>Live scored — {len(scores)} traders</i>"
 
-    lines = [f"<b>🏆 Hot Traders — Polymarket {category}</b>\n"]
+    lines = [f"<b>🏆 Smart Money — Polymarket {category} (Top {len(scores)})</b>\n"]
     for i, ts in enumerate(scores, 1):
-        name    = _e(ts.display_name or ts.wallet_address[:10] + "…")
-        badge   = " ✅" if ts.verified else ""
-        score   = int(ts.final_score * 100)
-        wr7     = f"{ts.win_rate_7d:.0%}"
-        pnl7    = f"+${ts.pnl_7d:,.0f}" if ts.pnl_7d >= 0 else f"-${abs(ts.pnl_7d):,.0f}"
-        streak  = f"🔥{ts.current_streak}W" if ts.current_streak >= 2 else f"{ts.current_streak}W"
-        risk    = (f"⚠️ {ts.unsettled_count} unsettled"
-                   if ts.unsettled_count else "LOW risk")
+        name   = _e(ts.display_name or ts.wallet_address[:10] + "…")
+        badge  = " ✅" if ts.verified else ""
+        score  = int(ts.final_score * 100)
+        wr7    = f"{ts.win_rate_7d:.0%}"
+        pnl30  = f"+${ts.pnl_30d:,.0f}" if ts.pnl_30d >= 0 else f"-${abs(ts.pnl_30d):,.0f}"
+        pnl7   = f"+${ts.pnl_7d:,.0f}"  if ts.pnl_7d  >= 0 else f"-${abs(ts.pnl_7d):,.0f}"
+        streak = f"🔥{ts.current_streak}W" if ts.current_streak >= 2 else f"{ts.current_streak}W"
+        risk   = (f"⚠️ {ts.unsettled_count} unsettled" if ts.unsettled_count else "")
+
+        if score >= 75:
+            verdict = "✅"
+        elif score >= 55:
+            verdict = "🟡"
+        else:
+            verdict = "🔴"
+
         lines.append(
-            f"<b>#{i}</b> {name}{badge} | Score: <b>{score}/100</b>\n"
-            f"   7d: {wr7}  {pnl7} | {streak} | {risk}"
+            f"{verdict} <b>#{i}</b> {name}{badge} — <b>{score}/100</b>\n"
+            f"   7d: {wr7}  {pnl7} | 30d: {pnl30} | {streak}"
+            + (f" | {risk}" if risk else "")
         )
 
-    lines.append("\n<i>Use /wallet {address} to deep-dive any trader.</i>")
-    await update.message.reply_text(
-        "\n".join(lines), parse_mode=ParseMode.HTML
-    )
+    lines.append(f"\n{source_note}")
+    lines.append("<i>Use /wallet 0x… to deep-dive any trader.</i>")
+    await _send_chunked(update.message.reply_text, "\n".join(lines), parse_mode=ParseMode.HTML)
 
 
 async def cmd_wallet(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
@@ -736,12 +792,99 @@ async def cmd_wallet(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     )
 
 
+async def cmd_performance(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    """
+    /performance [days]
+    Show scan performance summary: qualified signals, signal breakdown, avg EV.
+    Defaults to last 30 days. Use /performance 7 for last 7 days.
+    """
+    parts = (update.message.text or "").split()
+    try:
+        days = int(parts[1]) if len(parts) > 1 else 30
+        days = max(1, min(days, 365))
+    except ValueError:
+        days = 30
+
+    try:
+        from edge_agent.memory.scan_log import ScanLog
+        data = await asyncio.get_event_loop().run_in_executor(
+            None, lambda: ScanLog().get_summary(days=days)
+        )
+    except Exception as exc:
+        await update.message.reply_text(f"❌ Performance data unavailable: {exc}")
+        return
+
+    scans  = data["scans"]
+    qual   = data["total_qualified"]
+    watch  = data["total_watchlist"]
+    alerts = data["total_alerts"]
+    avg_q  = data["avg_qual_per_scan"]
+
+    if scans == 0:
+        await update.message.reply_text(
+            f"📊 No scan data yet for the last {days} days.\n"
+            "Run /scan to start building a performance history."
+        )
+        return
+
+    lines = [
+        f"<b>📊 EDGE Performance — Last {days} Days</b>\n",
+        f"Scans run:         <b>{scans}</b>",
+        f"Markets evaluated: <b>{data['total_markets']:,}</b>",
+        f"Qualified signals: <b>{qual}</b> (avg {avg_q:.2f}/scan)",
+        f"Watchlist entries: <b>{watch}</b>",
+        f"Alerts sent:       <b>{alerts}</b>",
+    ]
+
+    breakdown = data.get("signal_breakdown", [])
+    if breakdown:
+        lines.append("\n<b>Signal Breakdown:</b>")
+        for sig in breakdown:
+            ev_pct = f"{sig['avg_ev']*100:+.1f}%"
+            lines.append(
+                f"  <code>{_e(sig['signal'])}</code>: "
+                f"<b>{sig['count']}</b> signals | "
+                f"Avg EV: {ev_pct} | "
+                f"Avg conf: {sig['avg_conf']:.0%}"
+            )
+
+    best = data.get("best_signal")
+    if best:
+        lines.append(
+            f"\n🏆 <b>Best signal found:</b>\n"
+            f"  <code>{_e(best['market_id'][:40])}</code> @ {_e(best['venue'])}\n"
+            f"  Signal: {_e(best['signal_type'])} | "
+            f"EV: <b>{best['ev_net']*100:+.1f}%</b> | "
+            f"Conf: {best['confidence']:.0%}\n"
+            f"  Found: {best['ts_str']}"
+        )
+
+    # Smart money cache stats
+    try:
+        from edge_agent.memory.trader_cache import TraderCache
+        st = TraderCache().stats()
+        if st["count"]:
+            lines.append(
+                f"\n📈 <b>Smart Money Cache:</b> "
+                f"{st['count']} traders | "
+                f"Avg score: {st['avg_score']:.0f} | "
+                f"Updated: {st['last_fetch']}"
+            )
+    except Exception:
+        pass
+
+    await _send_chunked(update.message.reply_text, "\n".join(lines), parse_mode=ParseMode.HTML)
+
+
 async def trader_refresh_job(ctx: ContextTypes.DEFAULT_TYPE) -> None:
-    """Daily 8am PT — warm the trader cache with top 50 leaderboard scores."""
+    """Daily 8am PT — warm the trader cache with full top-100 leaderboard scores."""
     log.info("Trader refresh triggered.")
     try:
+        loop   = asyncio.get_event_loop()
         client = _TraderClient()
-        scores = client.get_hot_traders(limit=50, category="OVERALL")
+        scores = await loop.run_in_executor(
+            None, lambda: client.get_hot_traders(limit=100, category="OVERALL")
+        )
         log.info("Trader refresh complete — %d traders scored.", len(scores))
     except Exception as exc:
         log.warning("Trader refresh failed: %s", exc)
@@ -1726,9 +1869,10 @@ def main() -> None:
     app.add_handler(CommandHandler("tracking",  cmd_tracking,  filters=_auth_filter))
     app.add_handler(CommandHandler("top",       cmd_top,       filters=_auth_filter))
     app.add_handler(CommandHandler("traders",   cmd_traders,   filters=_auth_filter))
-    app.add_handler(CommandHandler("wallet",    cmd_wallet,    filters=_auth_filter))
-    app.add_handler(CommandHandler("status",    cmd_status,    filters=_auth_filter))
-    app.add_handler(CommandHandler("approvals", cmd_approvals, filters=_auth_filter))
+    app.add_handler(CommandHandler("wallet",      cmd_wallet,      filters=_auth_filter))
+    app.add_handler(CommandHandler("performance", cmd_performance, filters=_auth_filter))
+    app.add_handler(CommandHandler("status",      cmd_status,      filters=_auth_filter))
+    app.add_handler(CommandHandler("approvals",   cmd_approvals,   filters=_auth_filter))
 
     # Inline keyboard (callback queries are always scoped to the chat they came from)
     app.add_handler(CallbackQueryHandler(handle_callback))

@@ -22,7 +22,7 @@ from typing import Any
 log = logging.getLogger(__name__)
 
 _DB_PATH  = Path(__file__).parent / "data" / "trader_cache.db"
-_TTL_SECS = 7200  # 2 hours
+_TTL_SECS = 86400  # 24 hours — matches daily refresh cadence (was 2h, left cache empty 22h/day)
 
 
 def _connect() -> sqlite3.Connection:
