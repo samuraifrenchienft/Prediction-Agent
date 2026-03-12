@@ -120,6 +120,16 @@ class TraderScore:
     # hidden-loss
     unsettled_count:       int   = 0
     hidden_loss_exposure:  float = 0.0
+    # specialization — top categories by winning PnL (comma-separated)
+    top_categories:        str   = ""
+    # timing — how early/contrarian entries are (0–1)
+    timing_score:          float = 0.0
+    # consistency — low variance in winning PnL = steady earner (0–1)
+    consistency_score:     float = 0.0
+    # fade — proportion of wins that were contrarian bets (0–1)
+    fade_score:            float = 0.0
+    # sizing discipline — bets bigger on wins than losses (0–1)
+    sizing_discipline:     float = 0.0
     # meta
     fetched_at:  float = field(default_factory=time.time)
     expires_at:  float = field(default_factory=lambda: time.time() + _SCORE_TTL)
@@ -556,6 +566,72 @@ class TraderAPIClient:
                     + size_factor * 0.10)
         perf_score = perf_raw * ltp
 
+        # ── Market timing score ───────────────────────────────────────────
+        # Measures how early / contrarian entries are.
+        # Entry price on a winning trade that resolves YES:
+        #   low entry price (e.g. 0.20) = bought cheap before crowd → high timing
+        #   high entry price (e.g. 0.85) = bought near-certainty → low timing
+        # Only genuine-uncertainty trades (10¢–80¢) count.
+        timing_prices = [
+            _price(t) for t in settled_all
+            if _is_win(t) is True and 0.10 <= _price(t) <= 0.80
+        ]
+        if timing_prices:
+            avg_entry = sum(timing_prices) / len(timing_prices)
+            # Lower avg entry = earlier/better timing. Score peaks at 0.10, zero at 0.80.
+            timing_score = round(1.0 - (avg_entry - 0.10) / 0.70, 4)
+        else:
+            timing_score = 0.0
+
+        # ── Profit consistency score ──────────────────────────────────────
+        # Coefficient of variation on per-trade PnL for winning trades.
+        # Low CV = steady earner. High CV = one lucky hit skewing the record.
+        win_pnls = [_pnl(t) for t in settled_all if _is_win(t) is True and _pnl(t) > 0]
+        if len(win_pnls) >= 5:
+            mean_pnl = sum(win_pnls) / len(win_pnls)
+            variance = sum((x - mean_pnl) ** 2 for x in win_pnls) / len(win_pnls)
+            cv = (variance ** 0.5) / mean_pnl if mean_pnl > 0 else 1.0
+            # CV < 0.5 = very consistent, CV > 2.0 = one-hit wonder
+            consistency_score = round(max(0.0, 1.0 - cv / 2.0), 4)
+        else:
+            consistency_score = 0.0   # not enough data
+
+        # ── Fade (contrarian) detection ───────────────────────────────────
+        # Entry price IS the market consensus probability at bet time.
+        # Winning at a low entry price = you bet against the crowd and were right.
+        # Fade score = proportion of genuine wins where entry was < 0.45
+        # (crowd gave the outcome less than 45% chance).
+        genuine_win_trades = [
+            t for t in settled_all
+            if _is_win(t) is True and 0.10 <= _price(t) <= 0.80
+        ]
+        contrarian_wins = sum(1 for t in genuine_win_trades if _price(t) < 0.45)
+        fade_score = round(contrarian_wins / max(len(genuine_win_trades), 1), 4)
+
+        # ── Position sizing discipline ────────────────────────────────────
+        # Disciplined traders bet larger when they have edge — avg size on wins
+        # should exceed avg size on losses. Ratio > 1.5 = strong discipline.
+        win_sizes  = [_size(t) for t in settled_all if _is_win(t) is True  and _size(t) > 0]
+        loss_sizes = [_size(t) for t in settled_all if _is_win(t) is False and _size(t) > 0]
+        if win_sizes and loss_sizes:
+            avg_win_size  = sum(win_sizes)  / len(win_sizes)
+            avg_loss_size = sum(loss_sizes) / len(loss_sizes)
+            size_ratio    = avg_win_size / max(avg_loss_size, 0.01)
+            # Score 1.0 at ratio >= 1.5, 0.5 at ratio == 1.0, 0.0 at ratio <= 0.6
+            sizing_discipline = round(min(1.0, max(0.0, (size_ratio - 0.6) / 0.9)), 4)
+        else:
+            sizing_discipline = 0.0
+
+        # ── Category specialization ──────────────────────────────────────
+        # Tally winning PnL per category; top 2 = trader's specialty.
+        cat_pnl: dict[str, float] = {}
+        for t in trades:
+            cat = (t.get("category") or t.get("market_category") or "").strip()
+            if not cat or _is_win(t) is not True:
+                continue
+            cat_pnl[cat] = cat_pnl.get(cat, 0.0) + _pnl(t)
+        top_cats = [c for c, _ in sorted(cat_pnl.items(), key=lambda x: x[1], reverse=True)[:2]]
+
         return {
             "alltime":          all_stats,
             "30d":              d30_stats,
@@ -565,8 +641,13 @@ class TraderAPIClient:
             "cur_streak":       cur_streak,
             "max_streak":       max_streak,
             "n_trades":         len(trades),
-            "quality_win_rate": round(quality_win_rate, 4),
-            "avg_pos_size":     round(avg_pos, 2),
+            "quality_win_rate":   round(quality_win_rate, 4),
+            "avg_pos_size":       round(avg_pos, 2),
+            "top_categories":     top_cats,
+            "timing_score":       timing_score,
+            "consistency_score":  consistency_score,
+            "fade_score":         fade_score,
+            "sizing_discipline":  sizing_discipline,
         }
 
     def _reliability_score(
@@ -641,6 +722,11 @@ class TraderAPIClient:
             max_streak_50     = perf["max_streak"],
             unsettled_count        = unsettled["count"],
             hidden_loss_exposure   = unsettled["total_unrealized_loss"],
+            top_categories         = ", ".join(perf["top_categories"]),
+            timing_score           = perf["timing_score"],
+            consistency_score      = perf["consistency_score"],
+            fade_score             = perf["fade_score"],
+            sizing_discipline      = perf["sizing_discipline"],
         )
 
         # Cache confirmed bots so we skip them for 24 h

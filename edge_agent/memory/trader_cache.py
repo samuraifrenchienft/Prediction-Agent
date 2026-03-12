@@ -60,11 +60,31 @@ def _init_db(conn: sqlite3.Connection) -> None:
             -- hidden-loss risk
             unsettled_count        INTEGER NOT NULL DEFAULT 0,
             hidden_loss_exposure   REAL NOT NULL DEFAULT 0,
+            -- specialization
+            top_categories         TEXT NOT NULL DEFAULT '',
+            -- vetting signals
+            timing_score           REAL NOT NULL DEFAULT 0,
+            consistency_score      REAL NOT NULL DEFAULT 0,
+            fade_score             REAL NOT NULL DEFAULT 0,
+            sizing_discipline      REAL NOT NULL DEFAULT 0,
             -- meta
             fetched_at         REAL NOT NULL,
             expires_at         REAL NOT NULL
         )
     """)
+    # Migrations: add columns to existing DBs that predate them
+    for _col, _ddl in [
+        ("top_categories",    "TEXT NOT NULL DEFAULT ''"),
+        ("timing_score",      "REAL NOT NULL DEFAULT 0"),
+        ("consistency_score", "REAL NOT NULL DEFAULT 0"),
+        ("fade_score",        "REAL NOT NULL DEFAULT 0"),
+        ("sizing_discipline", "REAL NOT NULL DEFAULT 0"),
+    ]:
+        try:
+            conn.execute(f"ALTER TABLE trader_profiles ADD COLUMN {_col} {_ddl}")
+            conn.commit()
+        except Exception:
+            pass  # column already exists
     conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_trader_score "
         "ON trader_profiles(final_score)"

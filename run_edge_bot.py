@@ -687,7 +687,7 @@ async def cmd_traders(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
             return
         source_note = f"<i>Live scored — {len(scores)} traders</i>"
 
-    lines = [f"<b>🏆 Smart Money — Polymarket {category} (Top {len(scores)})</b>\n"]
+    lines = [f"<b>🏆 Smart Money — Polymarket {category} (Top {len(scores)})</b>"]
     for i, ts in enumerate(scores, 1):
         name   = _e(ts.display_name or ts.wallet_address[:10] + "…")
         badge  = " ✅" if ts.verified else ""
@@ -696,7 +696,7 @@ async def cmd_traders(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         pnl30  = f"+${ts.pnl_30d:,.0f}" if ts.pnl_30d >= 0 else f"-${abs(ts.pnl_30d):,.0f}"
         pnl7   = f"+${ts.pnl_7d:,.0f}"  if ts.pnl_7d  >= 0 else f"-${abs(ts.pnl_7d):,.0f}"
         streak = f"🔥{ts.current_streak}W" if ts.current_streak >= 2 else f"{ts.current_streak}W"
-        risk   = (f"⚠️ {ts.unsettled_count} unsettled" if ts.unsettled_count else "")
+        risk   = (f" ⚠️{ts.unsettled_count} open" if ts.unsettled_count else "")
 
         if score >= 75:
             verdict = "✅"
@@ -705,10 +705,11 @@ async def cmd_traders(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         else:
             verdict = "🔴"
 
+        specialty = f"   📌 {_e(ts.top_categories)}\n" if ts.top_categories else ""
         lines.append(
-            f"{verdict} <b>#{i}</b> {name}{badge} — <b>{score}/100</b>\n"
-            f"   7d: {wr7}  {pnl7} | 30d: {pnl30} | {streak}"
-            + (f" | {risk}" if risk else "")
+            f"\n{verdict} <b>#{i} {name}</b>{badge}  <code>{score}/100</code>\n"
+            f"{specialty}"
+            f"   7d {wr7} {pnl7}  ·  30d {pnl30}  ·  {streak}{risk}"
         )
 
     lines.append(f"\n{source_note}")
@@ -756,11 +757,26 @@ async def cmd_wallet(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     else:
         verdict = "🔴 WEAK RECORD"
 
-    rl_tag = " ⚠️" if rl < 70 else ""
+    rl_tag  = " ⚠️" if rl < 70 else ""
+    timing  = int(ts.timing_score      * 100)
+    consist = int(ts.consistency_score * 100)
+    fade    = int(ts.fade_score        * 100)
+    sizing  = int(ts.sizing_discipline * 100)
+
+    timing_label  = "Early/contrarian" if timing  >= 60 else ("Late to market"  if timing  < 35 else "Average timing")
+    consist_label = "Steady earner"    if consist >= 60 else ("One-hit wonder?" if consist < 35 else "Moderate variance")
+    fade_label    = "Contrarian"       if fade    >= 60 else ("Follows crowd"   if fade    < 35 else "Mixed style")
+    sizing_label  = "Sizes up on edge" if sizing  >= 60 else ("Flat/undisciplined" if sizing < 35 else "Moderate")
+
     lines  = [
         f"<b>🔍 Wallet Vet: {_e(ts.wallet_address[:10])}…{_e(ts.wallet_address[-4:])}</b>",
         f"Score: <b>{score}/100</b> — {verdict}",
         f"Anti-bot: {ab}  |  Perf: {pf}  |  Reliability: {rl}{rl_tag}",
+        "",
+        f"🕐 Timing:      {timing}/100  {timing_label}",
+        f"📊 Consistency: {consist}/100  {consist_label}",
+        f"🔄 Style:       {fade}/100 contrarian  ({fade_label})",
+        f"💰 Sizing:      {sizing}/100  {sizing_label}",
         "",
     ]
 
@@ -778,6 +794,9 @@ async def cmd_wallet(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         ]
     else:
         lines.append("Insufficient trade history to score.")
+
+    if ts.top_categories:
+        lines += ["", f"📌 Specializes in: {_e(ts.top_categories)}"]
 
     if ts.hidden_loss_exposure > 0:
         lines += [

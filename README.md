@@ -30,6 +30,34 @@ python run_edge_demo.py
 pytest -q
 ```
 
+## Telegram Bot Commands
+
+| Command | Description |
+|---------|-------------|
+| `/traders [category]` | Top 20 Polymarket smart-money traders |
+| `/wallet 0x…` | Deep-dive a specific trader wallet |
+| `/top` | Top open market opportunities |
+| `/status` | Bot health & cache status |
+
+### Understanding the `/traders` score
+
+Each trader shows a **composite trust score out of 100** — this is NOT a win/loss ratio or trade count. It's calculated as:
+
+```
+score = anti-bot (25%) + performance (50%) + reliability (25%)
+```
+
+- **Anti-bot** — how human-like the trading behavior is (penalizes wash trading, bot patterns)
+- **Performance** — profitability and edge over time
+- **Reliability** — consistency across time windows
+
+The verdict emoji reflects the score tier:
+- ✅ 75–100 — strong smart money signal
+- 🟡 55–74 — moderate, worth watching
+- 🔴 0–54 — weak signal, likely noise
+
+Win rates and PnL are shown separately in the `7d` / `30d` stats line.
+
 ## Important
 
 This scaffold is **proposal-first** and intentionally does not place real trades.
