@@ -231,6 +231,49 @@ _portfolio = PortfolioState(bankroll_usd=BANKROLL_USD)
 _kb = KnowledgeBase()
 _mem = SessionMemory()
 
+# ---------------------------------------------------------------------------
+# Platform docs — loaded once at startup for AI onboarding context
+# ---------------------------------------------------------------------------
+_DOCS_DIR = Path(__file__).parent / "docs"
+
+def _load_platform_doc(filename: str) -> str:
+    """Load a markdown doc from the docs/ folder. Returns '' on failure."""
+    try:
+        return (_DOCS_DIR / filename).read_text(encoding="utf-8")
+    except Exception:
+        return ""
+
+_POLYMARKET_DOC = _load_platform_doc("polymarket_guide.md")
+_KALSHI_DOC     = _load_platform_doc("kalshi_guide.md")
+
+_ONBOARD_KEYWORDS = {
+    "sign up", "signup", "register", "how to start", "getting started",
+    "deposit", "withdraw", "usdc", "how do i", "how to use",
+    "what is polymarket", "what is kalshi", "how does", "fees",
+    "wallet", "account", "polygon", "matic", "bridge", "swap",
+    "coinbase", "how to buy", "how to trade", "new to", "beginner",
+    "first time", "set up", "setup", "onboard",
+}
+
+def _get_platform_doc_context(user_msg: str) -> str:
+    """Return relevant platform doc snippets when user asks onboarding questions."""
+    q = user_msg.lower()
+    if not any(kw in q for kw in _ONBOARD_KEYWORDS):
+        return ""
+
+    ctx = "\n\n[Platform Setup Reference]\n"
+    if "kalshi" in q and _KALSHI_DOC:
+        ctx += _KALSHI_DOC
+    elif "polymarket" in q and _POLYMARKET_DOC:
+        ctx += _POLYMARKET_DOC
+    else:
+        # Generic onboarding question — include both, trimmed
+        if _POLYMARKET_DOC:
+            ctx += "=== POLYMARKET ===\n" + _POLYMARKET_DOC[:1500]
+        if _KALSHI_DOC:
+            ctx += "\n\n=== KALSHI ===\n" + _KALSHI_DOC[:1500]
+    return ctx
+
 # Tracks already-alerted market keys to avoid duplicate alerts per scan cycle
 _alerted_keys: set[str] = set()
 
@@ -545,28 +588,31 @@ async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         else "🔓 Alerting on all qualified signals (approve an alert to filter)."
     )
     await update.message.reply_text(
-        "👋 <b>EDGE Agent online.</b>\n\n"
-        "<b>Commands:</b>\n"
-        "/scan — run market scan now\n"
-        "/injuries — injury cache summary\n"
-        "/injuries nba — full NBA injury list\n"
-        "/injuries nfl — full NFL injury list\n"
-        "/injuries nhl — full NHL injury list\n"
-        "/injuries nhl oilers — filter by team\n"
-        "/tracking — injury game tracking list\n"
-        "/top — top 3 opportunities\n"
-        "/traders — top 20 smart money traders (auto-cached, instant)\n"
-        "/traders sports — filter by category (sports/politics/crypto)\n"
-        "/wallet 0x… — deep vet any Polymarket wallet\n"
-        "/performance — scan stats: signals found, avg EV, best pick\n"
-        "/performance 7 — last 7 days\n"
+        "👋 <b>EDGE — Prediction Market Intelligence Agent</b>\n\n"
+        "I scan Polymarket and Kalshi for mispriced markets, vet smart money wallets, "
+        "track injuries, and help you understand prediction market trading.\n\n"
+        "<b>🔍 Market Analysis</b>\n"
+        "/scan — run live market scan for edge opportunities\n"
+        "/top — top 3 highest-EV opportunities right now\n"
         "/status — last scan summary\n"
-        "/approvals — manage alert signal filter\n"
-        "/help — this message\n\n"
+        "/performance — signal history and accuracy stats\n\n"
+        "<b>👛 Trader Intel</b>\n"
+        "/traders — top smart money traders (auto-cached)\n"
+        "/traders politics — filter by category (sports/crypto/politics)\n"
+        "/wallet 0x… — deep vet any Polymarket wallet address\n\n"
+        "<b>🏥 Injury Tracking</b>\n"
+        "/injuries — injury cache summary\n"
+        "/injuries nba|nfl|nhl — full league injury list\n"
+        "/injuries nhl oilers — filter by team\n"
+        "/tracking — injury game tracking list\n\n"
+        "<b>⚙️ Settings</b>\n"
+        "/approvals — manage alert signal filters\n"
+        "/help — show this message\n\n"
         f"{filter_note}\n"
-        f"⏱ Market scan every {SCAN_INTERVAL_MIN // 60}h | "
-        "Injury refresh: 9am, 1:30pm, 4:30pm PT.\n\n"
-        "💬 Send any message to chat with EDGE about markets.",
+        f"⏱ Auto-scan every {SCAN_INTERVAL_MIN // 60}h | "
+        "Injury refresh: 9am, 1:30pm, 4:30pm PT\n\n"
+        "💬 <b>Chat with me anytime</b> — ask about markets, platform setup, "
+        "how to deposit USDC, Kalshi fees, or anything prediction market related.",
         parse_mode=ParseMode.HTML,
     )
 
@@ -663,10 +709,30 @@ async def cmd_traders(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         scores  = [_TraderScore(**{k: v for k, v in r.items() if k in _fields})
                    for r in cache_rows]
         st      = cache.stats()
+
+        # How many extra are in cache but filtered out as bots?
+        bot_filtered = max(0, st["count"] - len(scores))
+        bot_note     = f" · {bot_filtered} bot-filtered" if bot_filtered else ""
+
         source_note = (
-            f"<i>Smart money cache — {st['count']} traders | "
+            f"<i>Smart money cache — {len(scores)} legit traders{bot_note} | "
             f"Updated: {st['last_fetch']}</i>"
         )
+
+        # If the legit pool is thin (< 5), kick off a background live rescore
+        # so the next /traders call has a richer cache
+        if len(scores) < 5:
+            async def _background_rescore():
+                try:
+                    client = _TraderClient()
+                    fresh = await asyncio.get_event_loop().run_in_executor(
+                        None, lambda: client.get_hot_traders(limit=20, category=category)
+                    )
+                    log.info("Background rescore complete — %d traders cached.", len(fresh))
+                except Exception as exc:
+                    log.warning("Background rescore failed: %s", exc)
+            asyncio.ensure_future(_background_rescore())
+            source_note += "\n<i>⚙️ Refreshing cache in background — more traders soon.</i>"
     else:
         # Cache empty — score live (happens on first boot before warmup job runs)
         await update.message.reply_text(
@@ -1177,6 +1243,9 @@ async def handle_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None
     # 1. Knowledge base context
     kb_context = _kb.get_context_for_question(user_msg)
 
+    # 1b. Platform docs context — injected for onboarding/setup questions
+    platform_doc_context = _get_platform_doc_context(user_msg)
+
     # 2. Session memory context
     session_context = _mem.get_session_context(max_exchanges=4)
 
@@ -1291,11 +1360,18 @@ async def handle_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None
 
     system_prompt = (
         correction_instruction
-        + "You are Edge, an expert prediction market analyst on Telegram. "
+        + "You are EDGE, an AI prediction market analyst operating on Telegram. "
+        "Your job: help users find and act on mispriced prediction markets on Polymarket and Kalshi. "
+        "You scan markets for edge (mispriced probability), vet smart money traders, track injuries, "
+        "and answer questions about trading, strategy, and platform setup.\n\n"
+        "PLATFORMS YOU SUPPORT:\n"
+        "• Polymarket — decentralized, USDC on Polygon, no KYC, 0% fees, global\n"
+        "• Kalshi — US-regulated (CFTC), USD via bank/card, KYC required, ~7% fee on winnings\n\n"
+        "ONBOARDING: If a [Platform Setup Reference] block is in the prompt, use it verbatim "
+        "to answer setup/deposit/fee questions. Do not guess — if it's in the docs, cite it.\n\n"
         "Be concise — Telegram users want short, direct answers. "
         "Reference live market data and knowledge base context when provided. "
         "Use session context to remember what was discussed earlier. "
-        "If asked about account setup or platform UI, give step-by-step guidance. "
         "Return plain text (no JSON). Keep replies under 300 words.\n\n"
         "INJURY DATA RULES — apply ONLY when the user's current message explicitly "
         "asks about injuries, player health, roster status, or a specific game matchup:\n"
@@ -1325,7 +1401,7 @@ async def handle_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None
             "[Bot acknowledged correction — performed expanded search]",
         )
 
-    prompt = user_msg + kb_context + session_context + market_context + scan_context + injury_context + search_context
+    prompt = user_msg + kb_context + platform_doc_context + session_context + market_context + scan_context + injury_context + search_context
     reply = get_chat_response(prompt, task_type="creative", system_prompt=system_prompt) or "Sorry, I couldn't generate a response right now."
 
     # Save to session memory
