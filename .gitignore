@@ -14,3 +14,6 @@ kalshi_private_key.pem
 .cache/
 *.db
 edge_agent/memory/data/*.db
+
+# Third-party repos cloned for reference — not tracked as submodules
+third_party/

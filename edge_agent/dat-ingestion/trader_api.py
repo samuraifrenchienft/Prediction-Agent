@@ -130,6 +130,12 @@ class TraderScore:
     fade_score:            float = 0.0
     # sizing discipline — bets bigger on wins than losses (0–1)
     sizing_discipline:     float = 0.0
+    # on-chain wallet signals (from Polygon RPC via wallet_chain.py)
+    wallet_nonce:          int   = -1   # total Polygon tx count (-1 = unknown)
+    is_fresh_wallet:       int   = 0    # 1 = new/throwaway wallet flag
+    # on-chain trade history (from Goldsky subgraph via goldsky_history.py)
+    onchain_trade_count:   int   = 0    # total fills found on-chain
+    onchain_burst_flag:    int   = 0    # 1 = >20 fills in a 1-hour window
     # meta
     fetched_at:  float = field(default_factory=time.time)
     expires_at:  float = field(default_factory=lambda: time.time() + _SCORE_TTL)
@@ -698,7 +704,23 @@ class TraderAPIClient:
         realized_pnl     = perf["pos_pnl"] or perf["alltime"]["pnl"]
         rel_sc, adj_pnl  = self._reliability_score(unsettled, realized_pnl)
 
+        # ── On-chain wallet signals (Polygon RPC — no key required) ──────
+        from edge_agent.vetting.wallet_chain import wallet_chain_signals
+        chain = wallet_chain_signals(address)
+
+        # ── On-chain trade history (Goldsky subgraph — no key required) ──
+        from edge_agent.vetting.goldsky_history import goldsky_summary
+        goldsky = goldsky_summary(address)
+
+        # Goldsky burst flag → tighten anti-bot score
+        if goldsky["burst_flag"]:
+            bot_sc = max(0.0, bot_sc - 0.20)
+            log.debug("Goldsky burst flag applied for %s…", address[:10])
+
         final = (bot_sc * 0.25 + perf["perf_score"] * 0.50 + rel_sc * 0.25)
+
+        # Fresh-wallet penalty: new throwaway wallets get trust deducted
+        final = max(0.0, final - chain["fresh_penalty"])
 
         ts = TraderScore(
             wallet_address    = address,
@@ -727,6 +749,12 @@ class TraderAPIClient:
             consistency_score      = perf["consistency_score"],
             fade_score             = perf["fade_score"],
             sizing_discipline      = perf["sizing_discipline"],
+            # on-chain wallet signals
+            wallet_nonce           = chain["nonce"],
+            is_fresh_wallet        = int(chain["is_fresh"]),
+            # on-chain trade history
+            onchain_trade_count    = goldsky["onchain_count"],
+            onchain_burst_flag     = int(goldsky["burst_flag"]),
         )
 
         # Cache confirmed bots so we skip them for 24 h

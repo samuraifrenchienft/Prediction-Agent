@@ -67,6 +67,11 @@ def _init_db(conn: sqlite3.Connection) -> None:
             consistency_score      REAL NOT NULL DEFAULT 0,
             fade_score             REAL NOT NULL DEFAULT 0,
             sizing_discipline      REAL NOT NULL DEFAULT 0,
+            -- on-chain wallet signals (Polygon RPC + Goldsky subgraph)
+            wallet_nonce           INTEGER NOT NULL DEFAULT -1,
+            is_fresh_wallet        INTEGER NOT NULL DEFAULT 0,
+            onchain_trade_count    INTEGER NOT NULL DEFAULT 0,
+            onchain_burst_flag     INTEGER NOT NULL DEFAULT 0,
             -- meta
             fetched_at         REAL NOT NULL,
             expires_at         REAL NOT NULL
@@ -74,11 +79,16 @@ def _init_db(conn: sqlite3.Connection) -> None:
     """)
     # Migrations: add columns to existing DBs that predate them
     for _col, _ddl in [
-        ("top_categories",    "TEXT NOT NULL DEFAULT ''"),
-        ("timing_score",      "REAL NOT NULL DEFAULT 0"),
-        ("consistency_score", "REAL NOT NULL DEFAULT 0"),
-        ("fade_score",        "REAL NOT NULL DEFAULT 0"),
-        ("sizing_discipline", "REAL NOT NULL DEFAULT 0"),
+        ("top_categories",      "TEXT NOT NULL DEFAULT ''"),
+        ("timing_score",        "REAL NOT NULL DEFAULT 0"),
+        ("consistency_score",   "REAL NOT NULL DEFAULT 0"),
+        ("fade_score",          "REAL NOT NULL DEFAULT 0"),
+        ("sizing_discipline",   "REAL NOT NULL DEFAULT 0"),
+        # on-chain vetting signals (added with Goldsky + Polygon RPC integration)
+        ("wallet_nonce",        "INTEGER NOT NULL DEFAULT -1"),
+        ("is_fresh_wallet",     "INTEGER NOT NULL DEFAULT 0"),
+        ("onchain_trade_count", "INTEGER NOT NULL DEFAULT 0"),
+        ("onchain_burst_flag",  "INTEGER NOT NULL DEFAULT 0"),
     ]:
         try:
             conn.execute(f"ALTER TABLE trader_profiles ADD COLUMN {_col} {_ddl}")
