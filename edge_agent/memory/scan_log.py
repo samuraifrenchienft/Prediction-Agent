@@ -104,10 +104,11 @@ class ScanLog:
         confidence: float,
         action: str | None,
         market_prob: float | None,
-    ) -> None:
-        """Insert a scan_signals row for a qualified recommendation."""
+        target_side: str | None = None,
+    ) -> int:
+        """Insert a scan_signals row for a qualified recommendation. Returns signal_id."""
         with self._conn:
-            self._conn.execute(
+            cur = self._conn.execute(
                 """
                 INSERT INTO scan_signals
                     (scan_run_id, ts, market_id, venue, signal_type,
@@ -126,6 +127,7 @@ class ScanLog:
                     market_prob or 0.0,
                 ),
             )
+        return cur.lastrowid
 
     # ------------------------------------------------------------------
     # Reads

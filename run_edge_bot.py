@@ -281,6 +281,10 @@ _alerted_keys: set[str] = set()
 # Empty set means "alert on all" (bootstrapping mode until user approves something).
 _approved_signals: set[str] = _load_approved_signals()
 
+# Outcome tracker — resolution engine + paper trading DB
+from edge_agent.memory.outcome_tracker import OutcomeTracker as _OutcomeTracker
+_ot = _OutcomeTracker()
+
 # Per-user conversation history for multi-turn AI chat {user_id: [messages]}
 _chat_history: dict[int, list[dict]] = {}
 
@@ -484,11 +488,18 @@ async def _run_scan(bot, notify: bool = True) -> str:
             if notify and bot:
                 slot = _store_rec(rec)
                 # callback_data max = 64 bytes — use short slot key, not raw market_id
-                keyboard = InlineKeyboardMarkup([[
-                    InlineKeyboardButton("✅ Approve", callback_data=f"a:{slot}"),
-                    InlineKeyboardButton("❌ Skip",    callback_data=f"s:{slot}"),
-                    InlineKeyboardButton("ℹ️ Details", callback_data=f"d:{slot}"),
-                ]])
+                # Row 1: paper trade picks  |  Row 2: signal management
+                keyboard = InlineKeyboardMarkup([
+                    [
+                        InlineKeyboardButton("📈 YES",     callback_data=f"pt:YES:{slot}"),
+                        InlineKeyboardButton("📉 NO",      callback_data=f"pt:NO:{slot}"),
+                    ],
+                    [
+                        InlineKeyboardButton("✅ Approve", callback_data=f"a:{slot}"),
+                        InlineKeyboardButton("❌ Skip",    callback_data=f"s:{slot}"),
+                        InlineKeyboardButton("ℹ️ Details", callback_data=f"d:{slot}"),
+                    ],
+                ])
                 await bot.send_message(
                     chat_id=CHAT_ID,
                     text=_fmt_alert(rec),
@@ -545,7 +556,7 @@ async def _run_scan(bot, notify: bool = True) -> str:
             )
             for _rec in recs:
                 if _rec.qualification_state.value == "qualified":
-                    _sl.log_signal(
+                    _sig_id = _sl.log_signal(
                         scan_run_id=_run_id,
                         market_id=_rec.market_id,
                         venue=_rec.venue.value,
@@ -555,6 +566,18 @@ async def _run_scan(bot, notify: bool = True) -> str:
                         action=_rec.action,
                         market_prob=_rec.market_prob,
                     )
+                    # Register with outcome tracker so resolution is checked later
+                    if _sig_id:
+                        import re as _re
+                        _side_match = _re.search(r"\b(YES|NO)\b", (_rec.action or "").upper())
+                        _target_side = _side_match.group(1) if _side_match else "YES"
+                        _ot.register_signal(
+                            signal_id=_sig_id,
+                            market_id=_rec.market_id,
+                            venue=_rec.venue.value,
+                            target_side=_target_side,
+                            entry_prob=_rec.market_prob or 0.5,
+                        )
         except Exception as _log_exc:
             log.debug("scan_log write failed: %s", _log_exc)
 
@@ -958,7 +981,67 @@ async def cmd_performance(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> Non
     except Exception:
         pass
 
+    # ── EDGE Accuracy (actual resolution outcomes) ────────────────────────
+    try:
+        acc = _ot.edge_accuracy(days=days)
+        settled = acc.get("settled", 0)
+        pending = acc.get("pending", 0)
+        if settled or pending:
+            lines.append("\n<b>🎯 EDGE Accuracy (actual outcomes):</b>")
+            if settled:
+                wr = acc.get("win_rate")
+                wr_str = f"{wr:.0%}" if wr is not None else "n/a"
+                lines.append(
+                    f"  Win rate: <b>{wr_str}</b> "
+                    f"({acc['wins']}W / {acc['losses']}L / {acc.get('voids',0)} void)"
+                )
+            if pending:
+                lines.append(f"  ⏳ {pending} signals still pending resolution")
+    except Exception as _acc_exc:
+        log.debug("accuracy block failed: %s", _acc_exc)
+
+    # ── User paper P&L ────────────────────────────────────────────────────
+    try:
+        user_id = update.effective_user.id
+        pnl = _ot.user_pnl(user_id=user_id, days=days)
+        if pnl.get("total_picks", 0):
+            settled_u = pnl.get("settled", 0)
+            pnl_val   = pnl.get("total_pnl", 0.0)
+            roi       = pnl.get("roi")
+            wr_u      = pnl.get("win_rate")
+            lines.append("\n<b>📊 Your Paper Trading:</b>")
+            lines.append(
+                f"  Picks: {pnl['total_picks']} | "
+                f"Settled: {settled_u} | "
+                f"Pending: {pnl.get('pending', 0)}"
+            )
+            if settled_u:
+                wr_str = f"{wr_u:.0%}" if wr_u is not None else "n/a"
+                roi_str = f"{roi:+.1%}" if roi is not None else "n/a"
+                pnl_sign = "+" if pnl_val >= 0 else ""
+                lines.append(
+                    f"  Win rate: <b>{wr_str}</b> | "
+                    f"Paper P&L: <b>{pnl_sign}${pnl_val:.2f}</b> | "
+                    f"ROI: {roi_str}"
+                )
+    except Exception as _pnl_exc:
+        log.debug("user pnl block failed: %s", _pnl_exc)
+
     await _send_chunked(update.message.reply_text, "\n".join(lines), parse_mode=ParseMode.HTML)
+
+
+async def outcome_resolution_job(ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    """Every 2h — check pending signals against Polymarket/Kalshi APIs and resolve."""
+    log.info("Outcome resolution job triggered.")
+    try:
+        loop = asyncio.get_event_loop()
+        result = await loop.run_in_executor(None, lambda: _ot.resolve_pending(limit=50))
+        log.info(
+            "Outcome resolution: %d resolved, %d still pending, %d errors.",
+            result["resolved"], result["still_pending"], result["errors"],
+        )
+    except Exception as exc:
+        log.warning("Outcome resolution job failed: %s", exc)
 
 
 async def trader_refresh_job(ctx: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1063,6 +1146,60 @@ async def handle_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> Non
                 f"⚠️ Details expired (slot <code>{_e(slot)}</code> no longer cached).",
                 parse_mode=ParseMode.HTML,
             )
+
+    elif data.startswith("pt:"):
+        # Paper trade pick — "pt:YES:{slot}" or "pt:NO:{slot}"
+        parts = data.split(":", 2)
+        if len(parts) != 3:
+            return
+        _, side, slot = parts
+        rec = _rec_store.get(slot)
+        user_id = update.effective_user.id
+
+        if not rec:
+            await query.answer("⚠️ Signal expired — can't record pick.", show_alert=True)
+            return
+
+        # Find the signal_id from outcome tracker by market_id
+        # We store it keyed by market_id; outcome tracker has it registered
+        try:
+            # Look up signal_id — outcome tracker stores market_id → signal_id
+            sig_row = _ot._conn.execute(
+                "SELECT signal_id, entry_prob FROM signal_outcomes WHERE market_id = ? ORDER BY created_at DESC LIMIT 1",
+                (rec.market_id,),
+            ).fetchone()
+
+            if not sig_row:
+                await query.answer("⚠️ Signal not registered yet — try again in a moment.", show_alert=True)
+                return
+
+            signal_id  = sig_row["signal_id"]
+            entry_prob = sig_row["entry_prob"]
+
+            recorded = _ot.record_user_pick(
+                signal_id=signal_id,
+                market_id=rec.market_id,
+                user_id=user_id,
+                side=side,
+            )
+
+            if not recorded:
+                await query.answer("You already picked this one.", show_alert=True)
+                return
+
+            # Show confirmation with implied payout
+            prob = entry_prob or rec.market_prob or 0.5
+            payout = round(10 * (1 / max(prob, 0.01) - 1), 2) if side.upper() == "YES" else round(10 * (1 / max(1 - prob, 0.01) - 1), 2)
+            side_emoji = "📈" if side.upper() == "YES" else "📉"
+            await query.answer(
+                f"{side_emoji} Picked {side.upper()} — paper $10 @ {prob:.0%}\n"
+                f"Win = +${payout:.2f} | Loss = -$10.00\n"
+                "EDGE will track resolution automatically.",
+                show_alert=True,
+            )
+        except Exception as exc:
+            log.warning("Paper trade pick failed: %s", exc)
+            await query.answer("⚠️ Could not save pick — try again.", show_alert=True)
 
 
 # ---------------------------------------------------------------------------
@@ -2002,6 +2139,9 @@ def main() -> None:
     # Trader leaderboard — refresh daily at 8am PT, warm cache 2 min after boot
     app.job_queue.run_daily(trader_refresh_job, time=dt_time(8, 0, tzinfo=_PACIFIC))
     app.job_queue.run_once(trader_refresh_job, when=120)
+
+    # Outcome resolution — check pending signals every 2h, first run 5 min after boot
+    app.job_queue.run_repeating(outcome_resolution_job, interval=7200, first=300)
 
     # Background market scan loop — reads from injury cache, no live injury API calls
     app.job_queue.run_repeating(
