@@ -61,6 +61,7 @@ def _init_db(conn: sqlite3.Connection) -> None:
             venue        TEXT    NOT NULL,          -- KALSHI | POLYMARKET
             target_side  TEXT    NOT NULL,          -- YES | NO (EDGE recommendation)
             entry_prob   REAL    NOT NULL,          -- market prob at signal time
+            question     TEXT,                      -- human-readable market title
             outcome      TEXT    NOT NULL DEFAULT 'PENDING',
             resolved_at  REAL,
             check_count  INTEGER NOT NULL DEFAULT 0,
@@ -81,6 +82,11 @@ def _init_db(conn: sqlite3.Connection) -> None:
             resolved_at  REAL
         )
     """)
+    # Migrate: add question column if missing (safe on existing DBs)
+    try:
+        conn.execute("ALTER TABLE signal_outcomes ADD COLUMN question TEXT")
+    except Exception:
+        pass
     conn.execute("CREATE INDEX IF NOT EXISTS idx_so_pending   ON signal_outcomes(outcome) WHERE outcome = 'PENDING'")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_so_market    ON signal_outcomes(market_id)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_up_signal    ON user_picks(signal_id)")
@@ -207,6 +213,7 @@ class OutcomeTracker:
         venue: str,
         target_side: str,
         entry_prob: float,
+        question: str | None = None,
     ) -> None:
         """
         Register a scan signal for outcome tracking.
@@ -217,11 +224,11 @@ class OutcomeTracker:
                 self._conn.execute(
                     """
                     INSERT OR IGNORE INTO signal_outcomes
-                        (signal_id, market_id, venue, target_side, entry_prob, created_at)
-                    VALUES (?, ?, ?, ?, ?, ?)
+                        (signal_id, market_id, venue, target_side, entry_prob, question, created_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?)
                     """,
                     (signal_id, market_id, venue.upper(), target_side.upper(),
-                     entry_prob, time.time()),
+                     entry_prob, question, time.time()),
                 )
         except Exception as exc:
             log.warning("register_signal failed: %s", exc)
@@ -424,5 +431,52 @@ class OutcomeTracker:
             LIMIT ?
             """,
             (cutoff, limit),
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+    def get_user_picks(
+        self,
+        user_id: int,
+        outcome_filter: str | None = None,   # 'PENDING' | 'WIN' | 'LOSS' | None = all
+        limit: int = 50,
+    ) -> list[dict]:
+        """
+        Return a user's paper picks joined with signal info (question, entry_prob, venue).
+        Sorted: open picks first (newest), then settled (newest).
+        outcome_filter=None returns all; 'PENDING' returns only open picks.
+        """
+        where = "up.user_id = ?"
+        params: list = [user_id]
+
+        if outcome_filter:
+            where += " AND up.outcome = ?"
+            params.append(outcome_filter)
+
+        rows = self._conn.execute(
+            f"""
+            SELECT
+                up.id           AS pick_id,
+                up.signal_id,
+                up.market_id,
+                up.side,
+                up.paper_stake,
+                up.outcome      AS pick_outcome,
+                up.paper_pnl,
+                up.ts           AS picked_at,
+                up.resolved_at  AS pick_resolved_at,
+                so.venue,
+                so.target_side  AS edge_side,
+                so.entry_prob,
+                so.question,
+                so.outcome      AS signal_outcome
+            FROM user_picks up
+            LEFT JOIN signal_outcomes so ON up.signal_id = so.signal_id
+            WHERE {where}
+            ORDER BY
+                CASE WHEN up.outcome = 'PENDING' THEN 0 ELSE 1 END ASC,
+                up.ts DESC
+            LIMIT ?
+            """,
+            (*params, limit),
         ).fetchall()
         return [dict(r) for r in rows]

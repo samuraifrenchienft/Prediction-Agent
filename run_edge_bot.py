@@ -591,6 +591,7 @@ async def _run_scan(bot, notify: bool = True) -> str:
                             venue=_rec.venue.value,
                             target_side=_target_side,
                             entry_prob=_rec.market_prob or 0.5,
+                            question=getattr(_rec, "question", None) or _rec.market_id,
                         )
         except Exception as _log_exc:
             log.debug("scan_log write failed: %s", _log_exc)
@@ -632,7 +633,10 @@ async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         "/scan — run live market scan for edge opportunities\n"
         "/top — top 3 highest-EV opportunities right now\n"
         "/status — last scan summary\n"
-        "/performance — signal history and accuracy stats\n\n"
+        "/performance — signal history, EDGE win rate + your paper P&amp;L\n\n"
+        "<b>📊 Paper Trading</b>\n"
+        "/mytrades — your open picks + settled history + P&amp;L\n"
+        "<i>Tap 📈 YES / 📉 NO on any alert to paper trade it</i>\n\n"
         "<b>👛 Trader Intel</b>\n"
         "/traders — top smart money traders (auto-cached)\n"
         "/traders politics — filter by category (sports/crypto/politics)\n"
@@ -1074,6 +1078,87 @@ async def trader_refresh_job(ctx: ContextTypes.DEFAULT_TYPE) -> None:
 
 async def cmd_status(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     await _send_chunked(update.message.reply_text, _last_status)
+
+
+async def cmd_mytrades(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    """
+    /mytrades — show the user's paper trade picks (open + recent settled).
+    """
+    user_id = update.effective_user.id
+    picks   = _ot.get_user_picks(user_id=user_id, limit=30)
+
+    if not picks:
+        await update.message.reply_text(
+            "📋 <b>No paper trades yet.</b>\n\n"
+            "When EDGE fires a signal alert, tap <b>📈 YES</b> or <b>📉 NO</b> "
+            "to paper trade it. Your picks and P&amp;L will appear here.",
+            parse_mode=ParseMode.HTML,
+        )
+        return
+
+    open_picks     = [p for p in picks if p["pick_outcome"] == "PENDING"]
+    settled_picks  = [p for p in picks if p["pick_outcome"] != "PENDING"]
+
+    lines: list[str] = ["<b>📊 My Paper Trades</b>"]
+
+    # ── Open positions ────────────────────────────────────────────────────────
+    if open_picks:
+        lines.append(f"\n<b>🟡 Open ({len(open_picks)})</b>")
+        for p in open_picks:
+            side_em = "📈" if p["side"] == "YES" else "📉"
+            prob    = p["entry_prob"] or 0.5
+            # Potential payout if this side wins
+            payout  = round(p["paper_stake"] * (1 / max(prob, 0.01) - 1), 2)
+            venue   = (p["venue"] or "").upper()
+            venue_tag = f"[{venue[:4]}]" if venue else ""
+
+            # Market title — truncate to keep it readable
+            q = p["question"] or p["market_id"] or "Unknown market"
+            q_short = (q[:55] + "…") if len(q) > 55 else q
+
+            lines.append(
+                f"{side_em} <b>{p['side']}</b>  @{prob:.0%}  "
+                f"·  win +${payout:.2f} / lose -${p['paper_stake']:.0f}\n"
+                f"   <i>{_e(q_short)}</i>  <code>{venue_tag}</code>"
+            )
+    else:
+        lines.append("\n<i>No open picks right now.</i>")
+
+    # ── Settled history ───────────────────────────────────────────────────────
+    if settled_picks:
+        total_pnl  = sum(p["paper_pnl"] or 0 for p in settled_picks)
+        wins       = sum(1 for p in settled_picks if p["pick_outcome"] == "WIN")
+        losses     = sum(1 for p in settled_picks if p["pick_outcome"] == "LOSS")
+        voids      = sum(1 for p in settled_picks if p["pick_outcome"] == "VOID")
+        settled_ct = wins + losses
+        wr_str     = f"{wins/settled_ct:.0%}" if settled_ct else "n/a"
+        pnl_sign   = "+" if total_pnl >= 0 else ""
+        pnl_em     = "🟢" if total_pnl >= 0 else "🔴"
+
+        lines.append(
+            f"\n<b>📁 Settled ({len(settled_picks)})</b>  "
+            f"{pnl_em} <b>{pnl_sign}${total_pnl:.2f}</b>  ·  "
+            f"Win rate: <b>{wr_str}</b>  ({wins}W / {losses}L"
+            + (f" / {voids} void" if voids else "")
+            + ")"
+        )
+
+        # Show last 5 settled picks detail
+        for p in settled_picks[:5]:
+            outcome_em = {"WIN": "✅", "LOSS": "❌", "VOID": "⬜"}.get(p["pick_outcome"], "⬜")
+            pnl_val    = p["paper_pnl"] or 0
+            pnl_str    = f"+${pnl_val:.2f}" if pnl_val >= 0 else f"-${abs(pnl_val):.2f}"
+            q = p["question"] or p["market_id"] or "Unknown market"
+            q_short = (q[:50] + "…") if len(q) > 50 else q
+            lines.append(
+                f"{outcome_em} {p['side']}  <b>{pnl_str}</b>  "
+                f"<i>{_e(q_short)}</i>"
+            )
+        if len(settled_picks) > 5:
+            lines.append(f"<i>… and {len(settled_picks) - 5} more. See /performance for full stats.</i>")
+
+    lines.append("\n<i>Run /performance for full win rate + ROI breakdown.</i>")
+    await _send_chunked(update.message.reply_text, "\n".join(lines), parse_mode=ParseMode.HTML)
 
 
 async def cmd_approvals(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
@@ -2143,6 +2228,7 @@ def main() -> None:
     app.add_handler(CommandHandler("traders",   cmd_traders,   filters=_auth_filter))
     app.add_handler(CommandHandler("wallet",      cmd_wallet,      filters=_auth_filter))
     app.add_handler(CommandHandler("performance", cmd_performance, filters=_auth_filter))
+    app.add_handler(CommandHandler("mytrades",    cmd_mytrades,    filters=_auth_filter))
     app.add_handler(CommandHandler("status",      cmd_status,      filters=_auth_filter))
     app.add_handler(CommandHandler("approvals",   cmd_approvals,   filters=_auth_filter))
 
