@@ -809,14 +809,25 @@ async def cmd_traders(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
 
     lines = [f"<b>🏆 Smart Money — Polymarket {category} (Top {len(scores)})</b>"]
     for i, ts in enumerate(scores, 1):
-        name   = _e(ts.display_name or ts.wallet_address[:10] + "…")
-        badge  = " ✅" if ts.verified else ""
-        score  = int(ts.final_score * 100)
-        wr7    = f"{ts.win_rate_7d:.0%}"
-        pnl30  = f"+${ts.pnl_30d:,.0f}" if ts.pnl_30d >= 0 else f"-${abs(ts.pnl_30d):,.0f}"
-        pnl7   = f"+${ts.pnl_7d:,.0f}"  if ts.pnl_7d  >= 0 else f"-${abs(ts.pnl_7d):,.0f}"
-        streak = f"🔥{ts.current_streak}W" if ts.current_streak >= 2 else f"{ts.current_streak}W"
-        risk   = (f" ⚠️{ts.unsettled_count} open" if ts.unsettled_count else "")
+        name  = _e(ts.display_name or ts.wallet_address[:10] + "…")
+        badge = " ✅" if ts.verified else ""
+        score = int(ts.final_score * 100)
+
+        # Alltime PnL from leaderboard (authoritative)
+        pnl_all = (f"+${ts.pnl_alltime:,.0f}" if ts.pnl_alltime >= 0
+                   else f"-${abs(ts.pnl_alltime):,.0f}")
+        # Alltime volume — format as $Xk or $XM
+        vol = ts.volume_alltime
+        if vol >= 1_000_000:
+            vol_str = f"${vol/1_000_000:.1f}M"
+        elif vol >= 1_000:
+            vol_str = f"${vol/1_000:.0f}k"
+        else:
+            vol_str = f"${vol:.0f}"
+
+        # Win rate from positions (best available source)
+        wr_all = f"{ts.win_rate_alltime:.0%}" if ts.win_rate_alltime > 0 else "—"
+        risk   = f" ⚠️{ts.unsettled_count} open" if ts.unsettled_count else ""
 
         if score >= 75:
             verdict = "✅"
@@ -829,7 +840,7 @@ async def cmd_traders(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         lines.append(
             f"\n{verdict} <b>#{i} {name}</b>{badge}  <code>{score}/100</code>\n"
             f"{specialty}"
-            f"   7d {wr7} {pnl7}  ·  30d {pnl30}  ·  {streak}{risk}"
+            f"   PnL: {pnl_all}  ·  Vol: {vol_str}  ·  WR: {wr_all}{risk}"
         )
 
     lines.append(f"\n{source_note}")
