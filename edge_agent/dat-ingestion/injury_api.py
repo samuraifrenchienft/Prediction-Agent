@@ -73,11 +73,13 @@ _HEADERS = {
     "Accept": "application/json",
 }
 
-_ESPN_NBA = "https://site.api.espn.com/apis/site/v2/sports/basketball/nba/injuries"
-_ESPN_NFL = "https://site.api.espn.com/apis/site/v2/sports/football/nfl/injuries"
-_ESPN_NHL = "https://site.api.espn.com/apis/site/v2/sports/hockey/nhl/injuries"
-_ESPN_CFB = "https://site.api.espn.com/apis/site/v2/sports/football/college-football/injuries"
-_ESPN_CBB = "https://site.api.espn.com/apis/site/v2/sports/basketball/mens-college-basketball/injuries"
+_ESPN_NBA   = "https://site.api.espn.com/apis/site/v2/sports/basketball/nba/injuries"
+_ESPN_NFL   = "https://site.api.espn.com/apis/site/v2/sports/football/nfl/injuries"
+_ESPN_NHL   = "https://site.api.espn.com/apis/site/v2/sports/hockey/nhl/injuries"
+_ESPN_CFB   = "https://site.api.espn.com/apis/site/v2/sports/football/college-football/injuries"
+_ESPN_CBB   = "https://site.api.espn.com/apis/site/v2/sports/basketball/mens-college-basketball/injuries"
+_ESPN_WNBA  = "https://site.api.espn.com/apis/site/v2/sports/basketball/wnba/injuries"
+_ESPN_NCAAW = "https://site.api.espn.com/apis/site/v2/sports/basketball/womens-college-basketball/injuries"
 
 _NBA_CDN = (
     "https://ak-static.cms.nba.com/referee/injury/"
@@ -433,7 +435,7 @@ class InjuryAPIClient:
     # ── Source 1: ESPN ───────────────────────────────────────────────────────
 
     def _fetch_espn(self, sport: str) -> list[dict]:
-        """ESPN unofficial injury API. NBA, NFL, NHL, CFB, and CBB supported."""
+        """ESPN unofficial injury API. NBA, NFL, NHL, CFB, CBB, WNBA, NCAAW supported."""
         sport_lower = sport.lower()
         if sport_lower == "nba":
             url = _ESPN_NBA
@@ -443,6 +445,10 @@ class InjuryAPIClient:
             url = _ESPN_CFB
         elif sport_lower == "cbb":
             url = _ESPN_CBB
+        elif sport_lower == "wnba":
+            url = _ESPN_WNBA
+        elif sport_lower == "ncaaw":
+            url = _ESPN_NCAAW
         else:
             url = _ESPN_NFL
 
@@ -701,7 +707,7 @@ class InjuryAPIClient:
     def fetch_and_store(self, sport: str) -> int:
         """
         Fetch fresh injury data from all sources for *sport* and persist to
-        SQLite. Supports 'nba', 'nfl', 'nhl', 'cfb', 'cbb'.
+        SQLite. Supports 'nba', 'nfl', 'nhl', 'cfb', 'cbb', 'wnba', 'ncaaw'.
 
         Change detection: if any player's status worsens vs previous snapshot,
         the change is stored as a pending alert for Telegram dispatch.

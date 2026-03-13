@@ -129,9 +129,56 @@ _SOCCER_CLUBS = (
     "psg|paris saint.germain|ajax|porto|benfica|celtic fc"
 )
 
+# ── WNBA teams ────────────────────────────────────────────────────────────────
+_WNBA_TEAMS = (
+    "las vegas aces|aces|indiana fever|fever|new york liberty|liberty|"
+    "chicago sky|sky|seattle storm|storm|connecticut sun|sun|"
+    "minnesota lynx|lynx|washington mystics|mystics|los angeles sparks|sparks|"
+    "phoenix mercury|mercury|dallas wings|wings|atlanta dream|dream|"
+    "golden state valkyries|valkyries"
+)
+
+# ── Women's College Basketball (NCAAW) ────────────────────────────────────────
+_NCAAW_TEAMS = (
+    "uconn women|south carolina gamecocks women|iowa hawkeyes women|"
+    "lsu tigers women|stanford cardinal|notre dame women|"
+    "texas longhorns women|duke women|nc state women|ohio state women|"
+    "baylor women|virginia tech women|utah women|indiana women|"
+    "tennessee lady vols|lady vols|kansas women|louisville women|"
+    "kentucky women|oregon women|caitlin clark"  # Clark as she's a brand
+)
+
+# ── F1 constructor teams ──────────────────────────────────────────────────────
+_F1_TEAMS = (
+    "red bull racing|red bull f1|mercedes amg f1|mercedes f1|ferrari f1|scuderia ferrari|"
+    "mclaren f1|aston martin f1|alpine f1|williams f1|racing bulls|alphatauri|"
+    "kick sauber|sauber f1|haas f1"
+)
+
+# ── F1 drivers ────────────────────────────────────────────────────────────────
+_F1_DRIVERS = (
+    "verstappen|lewis hamilton|hamilton f1|charles leclerc|leclerc|"
+    "lando norris|norris|carlos sainz|sainz|fernando alonso|alonso|"
+    "george russell|russell f1|oscar piastri|piastri|sergio perez|checo perez|"
+    "lance stroll|pierre gasly|gasly|esteban ocon|valtteri bottas|"
+    "nico hulkenberg|kevin magnussen|yuki tsunoda|alexander albon|"
+    "franco colapinto|liam lawson|oliver bearman"
+)
+
+# ── PGA Tour golfers ──────────────────────────────────────────────────────────
+_PGA_GOLFERS = (
+    "scottie scheffler|rory mcilroy|jon rahm|viktor hovland|"
+    "xander schauffele|collin morikawa|patrick cantlay|brooks koepka|"
+    "justin thomas|jordan spieth|dustin johnson|tony finau|"
+    "hideki matsuyama|matt fitzpatrick|tommy fleetwood|tyrrell hatton|"
+    "shane lowry|will zalatoris|sam burns|cameron smith|"
+    "bryson dechambeau|tiger woods|tiger|phil mickelson|ryder cup"
+)
+
 _ALL_TEAMS = (
     f"{_NBA_TEAMS}|{_NFL_TEAMS}|{_MLB_TEAMS}|{_NHL_TEAMS}|"
-    f"{_CFB_TEAMS}|{_CBB_TEAMS}|{_MLS_TEAMS}|{_SOCCER_CLUBS}"
+    f"{_CFB_TEAMS}|{_CBB_TEAMS}|{_MLS_TEAMS}|{_SOCCER_CLUBS}|"
+    f"{_WNBA_TEAMS}|{_NCAAW_TEAMS}|{_F1_TEAMS}|{_F1_DRIVERS}|{_PGA_GOLFERS}"
 )
 
 # ── City → timezone mapping ────────────────────────────────────────────────────
@@ -248,6 +295,42 @@ _FACT_PATTERNS: list[tuple[str, str, Any]] = [
         lambda m: m.group(1).title(),
     ),
 
+    # ── Favorite WNBA teams ───────────────────────────────────────────────────
+    (
+        r"\b(?:my (?:team|squad|girls?)|i(?:'m| am) (?:a |an )?|love the?|follow the?|"
+        r"root(?:ing)? for(?: the)?|fan of(?: the)?|go )\s*"
+        rf"({_WNBA_TEAMS})\b",
+        "fav_wnba_teams",
+        lambda m: m.group(1).title(),
+    ),
+
+    # ── Favorite NCAAW teams ──────────────────────────────────────────────────
+    (
+        r"\b(?:my (?:team|squad|girls?)|i(?:'m| am) (?:a |an )?|love the?|follow the?|"
+        r"root(?:ing)? for(?: the)?|fan of(?: the)?|go )\s*"
+        rf"({_NCAAW_TEAMS})\b",
+        "fav_ncaaw_teams",
+        lambda m: m.group(1).title(),
+    ),
+
+    # ── Favorite F1 team/driver ───────────────────────────────────────────────
+    (
+        r"\b(?:my (?:team|driver|guy)|i(?:'m| am) (?:a |an )?|love|follow|"
+        r"root(?:ing)? for|fan of|support(?:s|ing)? )\s*"
+        rf"({_F1_TEAMS}|{_F1_DRIVERS})\b",
+        "fav_f1",
+        lambda m: m.group(1).title(),
+    ),
+
+    # ── Favorite PGA golfer ───────────────────────────────────────────────────
+    (
+        r"\b(?:my (?:guy|golfer|player|favorite)|love (?:watching|following)|"
+        r"big fan of|rooting for)\s*"
+        rf"({_PGA_GOLFERS})\b",
+        "fav_golfers",
+        lambda m: m.group(1).title(),
+    ),
+
     # ── Passively mentioned teams (less strong signal, still track) ───────────
     (rf"\b({_NBA_TEAMS})\b",     "nba_teams",     lambda m: m.group(1).title()),
     (rf"\b({_NFL_TEAMS})\b",     "nfl_teams",     lambda m: m.group(1).title()),
@@ -257,6 +340,10 @@ _FACT_PATTERNS: list[tuple[str, str, Any]] = [
     (rf"\b({_CBB_TEAMS})\b",     "cbb_teams",     lambda m: m.group(1).title()),
     (rf"\b({_MLS_TEAMS})\b",     "mls_teams",     lambda m: m.group(1).title()),
     (rf"\b({_SOCCER_CLUBS})\b",  "soccer_clubs",  lambda m: m.group(1).title()),
+    (rf"\b({_WNBA_TEAMS})\b",    "wnba_teams",    lambda m: m.group(1).title()),
+    (rf"\b({_NCAAW_TEAMS})\b",   "ncaaw_teams",   lambda m: m.group(1).title()),
+    (rf"\b({_F1_TEAMS}|{_F1_DRIVERS})\b", "f1_teams", lambda m: m.group(1).title()),
+    (rf"\b({_PGA_GOLFERS})\b",   "pga_golfers",   lambda m: m.group(1).title()),
 
     # ── Rival / hated teams ───────────────────────────────────────────────────
     (
@@ -318,16 +405,20 @@ _FACT_PATTERNS: list[tuple[str, str, Any]] = [
     (r"\b(swing|long.?term)\b",           "risk_style",    "long-term"),
 
     # ── Sports interests ──────────────────────────────────────────────────────
-    (r"\b(nba|basketball)\b",                            "sports", lambda m: "NBA"),
-    (r"\b(nfl|football)\b",                              "sports", lambda m: "NFL"),
-    (r"\b(mlb|baseball)\b",                              "sports", lambda m: "MLB"),
-    (r"\b(nhl|hockey)\b",                                "sports", lambda m: "NHL"),
-    (r"\b(college football|cfb|ncaaf)\b",                "sports", lambda m: "CFB"),
-    (r"\b(college basketball|cbb|ncaab|march madness)\b","sports", lambda m: "CBB"),
-    (r"\b(soccer|mls|premier league|epl|futbol)\b",      "sports", lambda m: "Soccer"),
-    (r"\b(champions league|ucl|europa league)\b",        "sports", lambda m: "Soccer"),
-    (r"\b(politics|election)\b",                         "interests", lambda m: "Politics"),
-    (r"\b(crypto|bitcoin|ethereum|btc)\b",               "interests", lambda m: "Crypto"),
+    (r"\b(nba|basketball)\b",                                       "sports", lambda m: "NBA"),
+    (r"\b(nfl|football)\b",                                         "sports", lambda m: "NFL"),
+    (r"\b(mlb|baseball)\b",                                         "sports", lambda m: "MLB"),
+    (r"\b(nhl|hockey)\b",                                           "sports", lambda m: "NHL"),
+    (r"\b(college football|cfb|ncaaf)\b",                           "sports", lambda m: "CFB"),
+    (r"\b(college basketball|cbb|ncaab|march madness)\b",           "sports", lambda m: "CBB"),
+    (r"\b(wnba|women(?:'s)? basketball|women(?:'s)? nba)\b",        "sports", lambda m: "WNBA"),
+    (r"\b(ncaaw|women(?:'s)? college basketball|womens march madness)\b", "sports", lambda m: "NCAAW"),
+    (r"\b(soccer|mls|premier league|epl|futbol)\b",                 "sports", lambda m: "Soccer"),
+    (r"\b(champions league|ucl|europa league|la liga|bundesliga|serie a)\b", "sports", lambda m: "Soccer"),
+    (r"\b(formula.?1|f1|formula one|grand prix|gp racing)\b",       "sports", lambda m: "F1"),
+    (r"\b(pga|golf|masters|us open golf|the open championship|ryder cup)\b", "sports", lambda m: "Golf"),
+    (r"\b(politics|election)\b",                                     "interests", lambda m: "Politics"),
+    (r"\b(crypto|bitcoin|ethereum|btc)\b",                           "interests", lambda m: "Crypto"),
 
     # ── Experience level ──────────────────────────────────────────────────────
     (
@@ -454,9 +545,11 @@ def needs_onboarding(profile: dict) -> bool:
         or facts.get("fav_mlb_teams") or facts.get("fav_nhl_teams")
         or facts.get("fav_cfb_teams") or facts.get("fav_cbb_teams")
         or facts.get("fav_mls_teams") or facts.get("fav_soccer_clubs")
+        or facts.get("fav_wnba_teams") or facts.get("fav_ncaaw_teams")
+        or facts.get("fav_f1") or facts.get("fav_golfers")
         or facts.get("nba_teams") or facts.get("nfl_teams")
     )
-    has_player = bool(facts.get("fav_players"))
+    has_player = bool(facts.get("fav_players") or facts.get("fav_f1") or facts.get("fav_golfers"))
     has_city   = bool(facts.get("city"))
     return not (has_sport and has_player and has_city)
 
@@ -646,14 +739,39 @@ class UserProfileStore:
             if teams:
                 lines.append(f"❤️ Favorite {label}: {', '.join(teams)}")
 
+        # Favorite teams — WNBA / NCAAW
+        for key, label in [
+            ("fav_wnba_teams", "WNBA"), ("fav_ncaaw_teams", "Women's CBB"),
+        ]:
+            teams = facts.get(key, [])
+            if teams:
+                lines.append(f"❤️ Favorite {label} team(s): {', '.join(teams)}")
+
+        # Favorite F1 / Golf
+        fav_f1 = facts.get("fav_f1", [])
+        if fav_f1:
+            lines.append(f"🏎️ Favorite F1 team/driver: {', '.join(fav_f1)}")
+        fav_golfers = facts.get("fav_golfers", [])
+        if fav_golfers:
+            lines.append(f"⛳ Favorite golfer(s): {', '.join(fav_golfers)}")
+
         # Passively mentioned teams (weaker signal)
         for key, label in [
             ("nba_teams", "NBA"), ("nfl_teams", "NFL"),
             ("mlb_teams", "MLB"), ("nhl_teams", "NHL"),
             ("cfb_teams", "CFB"), ("cbb_teams", "CBB"),
             ("mls_teams", "MLS"), ("soccer_clubs", "Soccer"),
+            ("wnba_teams", "WNBA"), ("ncaaw_teams", "NCAAW"),
+            ("f1_teams", "F1"), ("pga_golfers", "PGA"),
         ]:
-            fav_key = f"fav_{key}" if not key.endswith("_clubs") else "fav_soccer_clubs"
+            fav_key_map = {
+                "soccer_clubs": "fav_soccer_clubs",
+                "f1_teams":     "fav_f1",
+                "pga_golfers":  "fav_golfers",
+                "wnba_teams":   "fav_wnba_teams",
+                "ncaaw_teams":  "fav_ncaaw_teams",
+            }
+            fav_key = fav_key_map.get(key, f"fav_{key}")
             if not facts.get(fav_key) and facts.get(key):
                 lines.append(f"Follows {label}: {', '.join(facts[key])}")
 
@@ -923,7 +1041,9 @@ class UserProfileStore:
                 facts.get("fav_nba_teams", []) + facts.get("fav_nfl_teams", []) +
                 facts.get("fav_mlb_teams", []) + facts.get("fav_nhl_teams", []) +
                 facts.get("fav_cfb_teams", []) + facts.get("fav_cbb_teams", []) +
-                facts.get("fav_mls_teams", []) + facts.get("fav_soccer_clubs", [])
+                facts.get("fav_mls_teams", []) + facts.get("fav_soccer_clubs", []) +
+                facts.get("fav_wnba_teams", []) + facts.get("fav_ncaaw_teams", []) +
+                facts.get("fav_f1", []) + facts.get("fav_golfers", [])
             )
         ]
         rival_teams = [t.lower() for t in facts.get("rival_teams", [])]
@@ -995,7 +1115,9 @@ class UserProfileStore:
                     facts.get("fav_nba_teams", []) + facts.get("fav_nfl_teams", []) +
                     facts.get("fav_mlb_teams", []) + facts.get("fav_nhl_teams", []) +
                     facts.get("fav_cfb_teams", []) + facts.get("fav_cbb_teams", []) +
-                    facts.get("fav_mls_teams", []) + facts.get("fav_soccer_clubs", [])
+                    facts.get("fav_mls_teams", []) + facts.get("fav_soccer_clubs", []) +
+                    facts.get("fav_wnba_teams", []) + facts.get("fav_ncaaw_teams", []) +
+                    facts.get("fav_f1", []) + facts.get("fav_golfers", [])
                 )
             ]
             if any(t in ft or ft in t for ft in fav_teams):

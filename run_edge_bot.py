@@ -36,6 +36,10 @@ Commands in Telegram:
   /injuries nba      — full NBA player list sorted by severity
   /injuries nfl      — full NFL player list sorted by severity
   /injuries nhl      — full NHL player list sorted by severity
+  /injuries cfb      — College Football injury list
+  /injuries cbb      — College Basketball (men's) injury list
+  /injuries wnba     — WNBA injury list
+  /injuries ncaaw    — Women's College Basketball injury list
   /injuries nba lakers — filter NBA to Lakers only
   /injuries nhl oilers — filter NHL to Oilers only
   /tracking          — show the injury game tracking list
@@ -646,12 +650,15 @@ async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         "/wallet 0x… — deep vet any Polymarket wallet address\n\n"
         "<b>🏥 Injury Tracking</b>\n"
         "/injuries — injury cache summary\n"
-        "/injuries nba|nfl|nhl|cfb|cbb — full league injury list\n"
+        "/injuries nba|nfl|nhl|cfb|cbb|wnba|ncaaw — full league injury list\n"
         "/injuries nfl chiefs — filter by team\n"
         "/tracking — injury game tracking list\n\n"
         "<b>📊 Standings &amp; Odds</b>\n"
         "/standings — championship favorites (all sports, Polymarket odds)\n"
-        "/standings nba|nfl|mlb|nhl|cfb|cbb|mls|epl — full table + odds\n\n"
+        "/standings nba|nfl|mlb|nhl|wnba|cfb|cbb|ncaaw — full table + odds\n"
+        "/standings mls|epl|laliga|bundesliga|seriea|ligue1|ucl — soccer tables\n"
+        "/standings f1 — F1 driver + constructor standings\n"
+        "/standings pga — PGA Tour current leaderboard\n\n"
         "<b>⚙️ Settings</b>\n"
         "/approvals — manage alert signal filters\n"
         "/help — show this message\n\n"
@@ -1951,7 +1958,7 @@ async def cmd_injuries(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     sport_filter = args[0].lower() if args else None
     team_filter  = " ".join(args[1:]).lower() if len(args) > 1 else None
 
-    _VALID_SPORTS = ("nba", "nfl", "nhl", "cfb", "cbb")
+    _VALID_SPORTS = ("nba", "nfl", "nhl", "cfb", "cbb", "wnba", "ncaaw")
 
     try:
         from edge_agent.memory.injury_cache import InjuryCache
@@ -2104,7 +2111,7 @@ async def injury_refresh_job(ctx: ContextTypes.DEFAULT_TYPE) -> None:
     log.info("Injury refresh triggered.")
     client = _InjuryClient()
     results = {}
-    for sport in ("nba", "nfl", "nhl", "cfb", "cbb"):
+    for sport in ("nba", "nfl", "nhl", "cfb", "cbb", "wnba", "ncaaw"):
         try:
             count = client.fetch_and_store(sport)
             results[sport.upper()] = count
@@ -2131,7 +2138,11 @@ async def injury_refresh_job(ctx: ContextTypes.DEFAULT_TYPE) -> None:
             direction = alert.get("direction", "worsening")
 
             pos_str     = f" ({_e(pos)})" if pos else ""
-            sport_emoji = "🏀" if sport == "NBA" else ("🏒" if sport == "NHL" else "🏈")
+            sport_emoji = {
+                "NBA": "🏀", "WNBA": "🏀♀️", "NCAAW": "🎓🏀♀️",
+                "NFL": "🏈", "CFB": "🎓🏈",
+                "NHL": "🏒", "MLB": "⚾",
+            }.get(sport, "🏅")
 
             # ── Worsening alert (existing behavior) ───────────────────────────
             if direction == "worsening":
@@ -2224,20 +2235,34 @@ async def cmd_standings(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     Show current standings + Polymarket championship odds for any sport.
 
     Usage:
-      /standings           — championship favorites across all major sports
-      /standings nba       — NBA standings + championship odds
-      /standings nfl       — NFL standings + Super Bowl odds
-      /standings mlb       — MLB standings + World Series odds
-      /standings nhl       — NHL standings + Stanley Cup odds
-      /standings cfb       — College Football top-25 + playoff odds
-      /standings cbb       — College Basketball top-25 + March Madness odds
-      /standings mls       — MLS standings + MLS Cup odds
-      /standings epl       — Premier League table + champions odds
+      /standings              — championship favorites across all major sports
+      /standings nba          — NBA standings + championship odds
+      /standings nfl          — NFL standings + Super Bowl odds
+      /standings mlb          — MLB standings + World Series odds
+      /standings nhl          — NHL standings + Stanley Cup odds
+      /standings wnba         — WNBA standings + championship odds
+      /standings cfb          — College Football top-25 + playoff odds
+      /standings cbb          — College Basketball top-25 + March Madness odds
+      /standings ncaaw        — Women's CBB top-25 + championship odds
+      /standings mls          — MLS standings + MLS Cup odds
+      /standings epl          — Premier League table + champions odds
+      /standings laliga       — La Liga table + championship odds
+      /standings bundesliga   — Bundesliga table + championship odds
+      /standings seriea       — Serie A table + championship odds
+      /standings ligue1       — Ligue 1 table + championship odds
+      /standings ucl          — Champions League table + winner odds
+      /standings f1           — F1 driver + constructor standings
+      /standings pga          — PGA Tour current leaderboard
     """
     args = ctx.args or []
     sport = args[0].lower() if args else None
 
-    _VALID = ("nfl", "nba", "mlb", "nhl", "cfb", "cbb", "mls", "epl")
+    _VALID = (
+        "nfl", "nba", "mlb", "nhl", "wnba",
+        "cfb", "cbb", "ncaaw",
+        "mls", "epl", "laliga", "bundesliga", "seriea", "ligue1", "ucl",
+        "f1", "pga",
+    )
 
     await update.message.reply_text("🔍 Fetching standings…")
 
@@ -2252,10 +2277,19 @@ async def cmd_standings(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
             # No arg: championship favorites summary across all sports
             lines = ["🏆 <b>Championship Favorites (Polymarket)</b>\n"]
             sport_labels = {
-                "nfl": "🏈 Super Bowl",   "nba": "🏀 NBA Champion",
-                "mlb": "⚾ World Series",  "nhl": "🏒 Stanley Cup",
-                "cfb": "🎓🏈 CFB Playoff", "cbb": "🎓🏀 March Madness",
-                "mls": "⚽ MLS Cup",       "epl": "🏴󠁧󠁢󠁥󠁮󠁧󠁿 Premier League",
+                "nfl":        "🏈 Super Bowl",
+                "nba":        "🏀 NBA Champion",
+                "mlb":        "⚾ World Series",
+                "nhl":        "🏒 Stanley Cup",
+                "wnba":       "🏀♀️ WNBA Champion",
+                "cfb":        "🎓🏈 CFB Playoff",
+                "cbb":        "🎓🏀 March Madness",
+                "ncaaw":      "🎓🏀♀️ Women's March Madness",
+                "mls":        "⚽ MLS Cup",
+                "epl":        "🏴󠁧󠁢󠁥󠁮󠁧󠁿 Premier League",
+                "ucl":        "🌟⚽ Champions League",
+                "f1":         "🏎️ F1 World Champion",
+                "pga":        "⛳ Masters Winner",
             }
             for s, label in sport_labels.items():
                 try:
@@ -2267,7 +2301,11 @@ async def cmd_standings(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
                         lines.append(f"<b>{label}</b>\n  {top3}")
                 except Exception:
                     pass
-            lines.append("\n<i>Use /standings nba, /standings nfl, etc. for full tables.</i>")
+            lines.append(
+                "\n<i>Use /standings nba, /standings f1, /standings pga, etc. for full tables.\n"
+                "Soccer: /standings laliga, /standings bundesliga, /standings seriea, "
+                "/standings ligue1, /standings ucl</i>"
+            )
             await update.message.reply_text("\n".join(lines), parse_mode=ParseMode.HTML)
 
     except Exception as exc:
