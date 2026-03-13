@@ -150,6 +150,9 @@ class StandingsClient:
             log.warning("[Standings] ESPN %s fetch failed: %s", sport.upper(), exc)
             return []
 
+        _SOCCER_SPORTS = {"mls", "epl", "laliga", "bundesliga", "seriea", "ligue1", "ucl"}
+        is_soccer = sport in _SOCCER_SPORTS
+
         result: list[dict] = []
         for group in raw.get("standings", []):
             group_name = group.get("name", "")
@@ -157,9 +160,24 @@ class StandingsClient:
                 team_info = entry.get("team", {})
                 team_name = team_info.get("displayName", team_info.get("name", "?"))
                 stats = {s["name"]: s.get("displayValue", s.get("value", "")) for s in entry.get("stats", [])}
-                record   = stats.get("overall",    stats.get("playoffSeed", ""))
-                pct      = stats.get("winPercent", stats.get("pointsFor",   ""))
-                gb       = stats.get("gamesBack",  "")
+
+                if is_soccer:
+                    # Soccer metrics: table points, W-D-L, goal difference
+                    pts = stats.get("points", stats.get("pts", ""))
+                    gp  = stats.get("gamesPlayed", stats.get("gp", ""))
+                    w   = stats.get("wins",   stats.get("w", ""))
+                    d   = stats.get("ties",   stats.get("d", stats.get("draws", "")))
+                    l   = stats.get("losses", stats.get("l", ""))
+                    gd  = stats.get("pointDifferential", stats.get("goalDifference", stats.get("gd", "")))
+                    wdl = f"{w}-{d}-{l}" if all([w, d, l]) else stats.get("overall", "")
+                    record = f"{pts}pts  {wdl}" if pts else wdl
+                    pct = f"GD:{gd}" if gd else ""
+                    gb  = f"GP:{gp}" if gp else ""
+                else:
+                    record = stats.get("overall",    stats.get("playoffSeed", ""))
+                    pct    = stats.get("winPercent", stats.get("pointsFor",   ""))
+                    gb     = stats.get("gamesBack",  "")
+
                 result.append({
                     "group":  group_name,
                     "rank":   idx,
@@ -461,6 +479,9 @@ class StandingsClient:
         for e in entries:
             groups.setdefault(e["group"], []).append(e)
 
+        _SOCCER_SPORTS = {"mls", "epl", "laliga", "bundesliga", "seriea", "ligue1", "ucl"}
+        is_soccer = sport in _SOCCER_SPORTS
+
         sport_label = {
             "nfl": "NFL", "nba": "NBA", "mlb": "MLB", "nhl": "NHL",
             "wnba": "WNBA", "mls": "MLS", "epl": "Premier League",
@@ -469,11 +490,23 @@ class StandingsClient:
         }.get(sport, sport.upper())
 
         lines = [f"{emoji} <b>{sport_label} Standings</b>\n"]
+
+        if is_soccer:
+            # Soccer-specific header (no "games back" concept; show GD instead)
+            lines.append("<code>Pos  Team                Pts   W-D-L   GD  GP</code>")
+
         for group_name, group_entries in list(groups.items())[:6]:   # max 6 groups
-            lines.append(f"<b>{group_name}</b>")
+            if group_name:
+                lines.append(f"<b>{group_name}</b>")
             for e in group_entries[:8]:  # top 8 per group
-                gb_str = f"  GB: {e['gb']}" if e.get("gb") and e["gb"] not in ("", "0", "0.0") else ""
-                lines.append(f"  {e['rank']:>2}. {e['team']}  {e['record']}{gb_str}")
+                if is_soccer:
+                    # record = "67pts  10-7-1", pct = "GD:+23", gb = "GP:38"
+                    gd_str = f"  {e['pct']}" if e.get("pct") and e["pct"] not in ("", "GD:") else ""
+                    gp_str = f"  {e['gb']}"  if e.get("gb")  and e["gb"]  not in ("", "GP:") else ""
+                    lines.append(f"  {e['rank']:>2}. {e['team']:<22} {e['record']}{gd_str}{gp_str}")
+                else:
+                    gb_str = f"  GB: {e['gb']}" if e.get("gb") and e["gb"] not in ("", "0", "0.0") else ""
+                    lines.append(f"  {e['rank']:>2}. {e['team']}  {e['record']}{gb_str}")
             lines.append("")
 
         # Championship odds
