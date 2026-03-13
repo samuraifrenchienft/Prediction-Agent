@@ -285,6 +285,20 @@ _approved_signals: set[str] = _load_approved_signals()
 from edge_agent.memory.outcome_tracker import OutcomeTracker as _OutcomeTracker
 _ot = _OutcomeTracker()
 
+# Long-term per-user profile store (facts, moments, trading prefs)
+from edge_agent.memory.user_profile import UserProfileStore as _UserProfileStore
+_profiles = _UserProfileStore()
+
+# Per-user SessionMemory instances — keyed by Telegram user_id
+# Initialized on first message from each user, reused within the process lifetime
+_user_sessions: dict[int, "SessionMemory"] = {}
+
+def _get_session(user_id: int) -> "SessionMemory":
+    """Return (or create) a per-user SessionMemory instance."""
+    if user_id not in _user_sessions:
+        _user_sessions[user_id] = SessionMemory(user_id=user_id)
+    return _user_sessions[user_id]
+
 # Per-user conversation history for multi-turn AI chat {user_id: [messages]}
 _chat_history: dict[int, list[dict]] = {}
 
@@ -1356,18 +1370,34 @@ def _build_injury_context(query: str) -> str:
 # ---------------------------------------------------------------------------
 
 async def handle_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
-    user_id = update.effective_user.id
-    user_msg = update.message.text
+    user_id    = update.effective_user.id
+    first_name = update.effective_user.first_name or None
+    username   = update.effective_user.username or None
+    user_msg   = update.message.text
 
     if not user_msg:
         return
 
     await update.message.chat.send_action("typing")
 
+    # ── Per-user session + profile ────────────────────────────────────────────
+    _mem_user = _get_session(user_id)
+
+    # Passively extract personal facts from every message and store long-term
+    try:
+        _profiles.ingest_message(
+            user_id=user_id,
+            message=user_msg,
+            first_name=first_name,
+            username=username,
+        )
+    except Exception:
+        pass  # never let profile writes crash the bot
+
+    # Long-term profile context (what EDGE knows about this person across all sessions)
+    profile_context = _profiles.get_profile_context(user_id)
+
     # ── Correction detection ──────────────────────────────────────────────────
-    # If the user signals the previous answer was wrong, we expand the search
-    # query and inject a CORRECTION MODE instruction into the system prompt so
-    # the AI knows NOT to repeat its prior response.
     _CORRECTION_TRIGGERS = {
         "wrong", "try again", "retry", "that's not", "thats not",
         "incorrect", "not right", "different answer", "try harder",
@@ -1383,8 +1413,8 @@ async def handle_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None
     # 1b. Platform docs context — injected for onboarding/setup questions
     platform_doc_context = _get_platform_doc_context(user_msg)
 
-    # 2. Session memory context
-    session_context = _mem.get_session_context(max_exchanges=4)
+    # 2. Session memory context (today's conversation, per user)
+    session_context = _mem_user.get_session_context(max_exchanges=4)
 
     # 3. Live market context (on-demand, only for market questions)
     _SERIES_MAP = [
@@ -1533,17 +1563,27 @@ async def handle_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None
     # Save correction event to session memory so the AI's next response
     # has full context that a correction happened
     if _is_correction:
-        _mem.add_exchange(
+        _mem_user.add_exchange(
             "[USER CORRECTION]",
             "[Bot acknowledged correction — performed expanded search]",
         )
 
-    prompt = user_msg + kb_context + platform_doc_context + session_context + market_context + scan_context + injury_context + search_context
+    prompt = (
+        user_msg
+        + kb_context
+        + platform_doc_context
+        + profile_context        # long-term personal facts about this user
+        + session_context        # today's conversation history (per user)
+        + market_context
+        + scan_context
+        + injury_context
+        + search_context
+    )
     reply = get_chat_response(prompt, task_type="creative", system_prompt=system_prompt) or "Sorry, I couldn't generate a response right now."
 
-    # Save to session memory
+    # Save to per-user session memory
     if reply:
-        _mem.add_exchange(user_msg, reply)
+        _mem_user.add_exchange(user_msg, reply)
 
     # Telegram max message length is 4096 chars
     if len(reply) > 4000:

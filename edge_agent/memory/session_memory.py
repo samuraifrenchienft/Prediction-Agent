@@ -1,12 +1,14 @@
 """
-Edge Session Memory — daily short-term memory stored in SQLite.
+Edge Session Memory — daily short-term memory stored in SQLite, per user.
 
 Tracks conversation history, markets discussed, and user preferences
 within the current day. Gives Edge continuity across a session so it
 can reference earlier parts of the conversation.
 
-Data resets context after 24 hours but history is kept permanently
-for the outcome tracker (future Tier 3).
+Each user gets their own session row keyed by (user_id, session_date).
+user_id=0 is the legacy single-user fallback.
+
+Data resets context after 24 hours but history is kept permanently.
 """
 
 from __future__ import annotations
@@ -22,66 +24,73 @@ _DB_PATH = Path(__file__).parent / "data" / "sessions.db"
 
 class SessionMemory:
     """
-    Daily session memory for Edge.
+    Daily per-user session memory for Edge.
 
     Usage:
-        mem = SessionMemory()
+        mem = SessionMemory(user_id=12345678)
         mem.add_exchange("What is a prediction market?", "A prediction market is...")
         ctx = mem.get_session_context()   # inject into AI prompt
         mem.set_preference("risk_level", "conservative")
     """
 
-    def __init__(self, db_path: Path = _DB_PATH) -> None:
+    def __init__(self, db_path: Path = _DB_PATH, user_id: int = 0) -> None:
         self.db_path = db_path
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self._conn = sqlite3.connect(str(self.db_path))
+        self._user_id = user_id
         self._session_date = date.today().isoformat()
         self._setup()
         self._ensure_today_session()
 
     def _setup(self) -> None:
         c = self._conn
-        c.executescript("""
+        # Create with user_id from the start
+        c.execute("""
             CREATE TABLE IF NOT EXISTS sessions (
                 id            INTEGER PRIMARY KEY,
-                session_date  TEXT NOT NULL UNIQUE,
+                user_id       INTEGER NOT NULL DEFAULT 0,
+                session_date  TEXT NOT NULL,
                 exchanges     TEXT NOT NULL DEFAULT '[]',
                 markets       TEXT NOT NULL DEFAULT '[]',
-                preferences   TEXT NOT NULL DEFAULT '{}'
-            );
+                preferences   TEXT NOT NULL DEFAULT '{}',
+                UNIQUE(user_id, session_date)
+            )
         """)
+        # Migrate legacy schema that had UNIQUE on session_date alone
+        try:
+            c.execute("ALTER TABLE sessions ADD COLUMN user_id INTEGER NOT NULL DEFAULT 0")
+        except Exception:
+            pass  # column already exists — fine
         c.commit()
 
     def _ensure_today_session(self) -> None:
-        exists = self._conn.execute(
-            "SELECT id FROM sessions WHERE session_date = ?", (self._session_date,)
-        ).fetchone()
-        if not exists:
-            self._conn.execute(
-                "INSERT INTO sessions (session_date) VALUES (?)",
-                (self._session_date,),
-            )
-            self._conn.commit()
+        self._conn.execute(
+            "INSERT OR IGNORE INTO sessions (user_id, session_date) VALUES (?, ?)",
+            (self._user_id, self._session_date),
+        )
+        self._conn.commit()
 
     def _get_today(self) -> dict:
         row = self._conn.execute(
-            "SELECT exchanges, markets, preferences FROM sessions WHERE session_date = ?",
-            (self._session_date,),
+            "SELECT exchanges, markets, preferences FROM sessions "
+            "WHERE user_id = ? AND session_date = ?",
+            (self._user_id, self._session_date),
         ).fetchone()
         return {
-            "exchanges": json.loads(row[0]),
-            "markets": json.loads(row[1]),
+            "exchanges":  json.loads(row[0]),
+            "markets":    json.loads(row[1]),
             "preferences": json.loads(row[2]),
         }
 
     def _save_today(self, exchanges: list, markets: list, preferences: dict) -> None:
         self._conn.execute(
             """UPDATE sessions SET exchanges=?, markets=?, preferences=?
-               WHERE session_date=?""",
+               WHERE user_id = ? AND session_date=?""",
             (
                 json.dumps(exchanges),
                 json.dumps(markets),
                 json.dumps(preferences),
+                self._user_id,
                 self._session_date,
             ),
         )
@@ -147,7 +156,10 @@ class SessionMemory:
             parts.append("Earlier in this session:")
             for ex in exchanges:
                 parts.append(f"  [{ex['time']}] User: {ex['q']}")
-                parts.append(f"           Edge: {ex['a'][:200]}{'...' if len(ex['a']) > 200 else ''}")
+                parts.append(
+                    f"           Edge: {ex['a'][:200]}"
+                    f"{'...' if len(ex['a']) > 200 else ''}"
+                )
 
         if not parts:
             return ""
@@ -168,12 +180,13 @@ class SessionMemory:
             for row in self._conn.execute("SELECT exchanges FROM sessions").fetchall()
         )
         return {
-            "session_date": self._session_date,
-            "today_exchanges": len(today["exchanges"]),
-            "today_markets": len(today["markets"]),
-            "total_sessions": total_sessions,
+            "session_date":           self._session_date,
+            "user_id":                self._user_id,
+            "today_exchanges":        len(today["exchanges"]),
+            "today_markets":          len(today["markets"]),
+            "total_sessions":         total_sessions,
             "total_exchanges_all_time": total_exchanges,
-            "preferences": today["preferences"],
+            "preferences":            today["preferences"],
         }
 
     def close(self) -> None:
