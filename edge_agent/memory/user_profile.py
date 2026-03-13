@@ -58,7 +58,81 @@ _NHL_TEAMS = (
     "maple leafs|canucks|golden knights|capitals|jets|coyotes|kraken|ducks"
 )
 
-_ALL_TEAMS = f"{_NBA_TEAMS}|{_NFL_TEAMS}|{_MLB_TEAMS}|{_NHL_TEAMS}"
+# ── College Football (CFB) ─────────────────────────────────────────────────────
+_CFB_TEAMS = (
+    # SEC
+    "alabama|crimson tide|georgia bulldogs|georgia dawgs|lsu tigers|lsu|"
+    "tennessee vols|volunteers|auburn tigers|auburn|florida gators|gators|"
+    "ole miss|rebels|mississippi state|razorbacks|gamecocks|"
+    "commodores|texas a&m|aggies|texas longhorns|longhorns|"
+    "oklahoma sooners|sooners|"
+    # Big Ten
+    "ohio state|buckeyes|michigan wolverines|wolverines|penn state|nittany lions|"
+    "michigan state|iowa hawkeyes|hawkeyes|minnesota gophers|gophers|"
+    "wisconsin badgers|badgers|cornhuskers|northwestern wildcats|"
+    "boilermakers|fighting illini|rutgers|hoosiers|oregon ducks|"
+    "washington huskies|usc trojans|ucla bruins|"
+    # Big 12
+    "kansas state|jayhawks|horned frogs|baylor bears|oklahoma state cowboys|"
+    "mountaineers|cyclones|byu cougars|utah utes|utes|sun devils|colorado buffs|"
+    # ACC
+    "clemson tigers|clemson|seminoles|miami hurricanes|wolfpack|tar heels|hokies|"
+    "demon deacons|duke blue devils|georgia tech|notre dame|fighting irish|"
+    "louisville cardinals|pitt panthers|cavaliers|syracuse orange"
+)
+
+# ── College Basketball (CBB / NCAAB) ─────────────────────────────────────────
+_CBB_TEAMS = (
+    "duke blue devils|duke|kentucky wildcats|kansas jayhawks|north carolina tar heels|"
+    "unc tar heels|gonzaga bulldogs|gonzaga|villanova wildcats|"
+    "michigan state spartans|uconn huskies|uconn|connecticut huskies|"
+    "indiana hoosiers|iowa hawkeyes|louisville cardinals|memphis tigers|"
+    "arizona wildcats|ucla bruins|houston cougars|baylor bears|purdue boilermakers|"
+    "tennessee volunteers|auburn tigers|alabama crimson tide|"
+    "illinois fighting illini|ohio state buckeyes|michigan wolverines|"
+    "arkansas razorbacks|creighton bluejays|xavier musketeers|"
+    "marquette golden eagles|marquette|st johns|florida gators|"
+    "oregon ducks|texas tech red raiders|texas tech|san diego state aztecs|"
+    "saint mary|colorado state|drake bulldogs|dayton flyers"
+)
+
+# ── MLS (Major League Soccer) ─────────────────────────────────────────────────
+_MLS_TEAMS = (
+    "la galaxy|galaxy|lafc|seattle sounders|sounders|portland timbers|timbers|"
+    "atlanta united|new york city fc|nycfc|new york red bulls|red bulls|"
+    "philadelphia union|union|new england revolution|revolution|dc united|"
+    "toronto fc|cf montreal|orlando city|inter miami|miami fc|"
+    "colorado rapids|rapids|real salt lake|minnesota united|fc dallas|"
+    "houston dynamo|dynamo|sporting kansas city|sporting kc|chicago fire|"
+    "columbus crew|crew|nashville sc|austin fc|charlotte fc|"
+    "st louis city|san jose earthquakes|earthquakes|vancouver whitecaps|whitecaps|"
+    "cincinnati fc|fc cincinnati"
+)
+
+# ── Soccer clubs (EPL + top European + international) ────────────────────────
+_SOCCER_CLUBS = (
+    # EPL
+    "manchester city|man city|liverpool fc|arsenal fc|chelsea fc|"
+    "tottenham hotspur|spurs|manchester united|man united|man utd|"
+    "aston villa|newcastle united|newcastle|west ham united|west ham|"
+    "brighton|brentford|fulham fc|crystal palace|everton fc|"
+    "nottingham forest|bournemouth|wolverhampton|wolves|leicester city|"
+    # La Liga
+    "real madrid|barcelona|barca|atletico madrid|atletico|sevilla fc|"
+    "real sociedad|villarreal|athletic bilbao|real betis|betis|"
+    # Bundesliga
+    "bayern munich|bayern|borussia dortmund|dortmund|bvb|bayer leverkusen|leverkusen|"
+    "rb leipzig|eintracht frankfurt|"
+    # Serie A
+    "inter milan|ac milan|juventus|juve|napoli|lazio|roma|atalanta|"
+    # Ligue 1 / Other
+    "psg|paris saint.germain|ajax|porto|benfica|celtic fc"
+)
+
+_ALL_TEAMS = (
+    f"{_NBA_TEAMS}|{_NFL_TEAMS}|{_MLB_TEAMS}|{_NHL_TEAMS}|"
+    f"{_CFB_TEAMS}|{_CBB_TEAMS}|{_MLS_TEAMS}|{_SOCCER_CLUBS}"
+)
 
 # ── City → timezone mapping ────────────────────────────────────────────────────
 
@@ -138,11 +212,51 @@ _FACT_PATTERNS: list[tuple[str, str, Any]] = [
         lambda m: m.group(1).title(),
     ),
 
+    # ── Favorite CFB teams ────────────────────────────────────────────────────
+    (
+        r"\b(?:my (?:team|squad|guys?)|i(?:'m| am) (?:a |an )?|love the?|follow the?|"
+        r"root(?:ing)? for(?: the)?|fan of(?: the)?|go )\s*"
+        rf"({_CFB_TEAMS})\b",
+        "fav_cfb_teams",
+        lambda m: m.group(1).title(),
+    ),
+
+    # ── Favorite CBB teams ────────────────────────────────────────────────────
+    (
+        r"\b(?:my (?:team|squad|guys?)|i(?:'m| am) (?:a |an )?|love the?|follow the?|"
+        r"root(?:ing)? for(?: the)?|fan of(?: the)?|go )\s*"
+        rf"({_CBB_TEAMS})\b",
+        "fav_cbb_teams",
+        lambda m: m.group(1).title(),
+    ),
+
+    # ── Favorite MLS teams ────────────────────────────────────────────────────
+    (
+        r"\b(?:my (?:team|squad|guys?)|i(?:'m| am) (?:a |an )?|love the?|follow the?|"
+        r"root(?:ing)? for(?: the)?|fan of(?: the)?|go )\s*"
+        rf"({_MLS_TEAMS})\b",
+        "fav_mls_teams",
+        lambda m: m.group(1).title(),
+    ),
+
+    # ── Favorite soccer clubs (EPL / European / international) ───────────────
+    (
+        r"\b(?:my (?:team|squad|club|guys?)|i(?:'m| am) (?:a |an )?|love the?|"
+        r"follow the?|root(?:ing)? for(?: the)?|fan of(?: the)?|support(?:s|ing)? )\s*"
+        rf"({_SOCCER_CLUBS})\b",
+        "fav_soccer_clubs",
+        lambda m: m.group(1).title(),
+    ),
+
     # ── Passively mentioned teams (less strong signal, still track) ───────────
-    (rf"\b({_NBA_TEAMS})\b",  "nba_teams",  lambda m: m.group(1).title()),
-    (rf"\b({_NFL_TEAMS})\b",  "nfl_teams",  lambda m: m.group(1).title()),
-    (rf"\b({_MLB_TEAMS})\b",  "mlb_teams",  lambda m: m.group(1).title()),
-    (rf"\b({_NHL_TEAMS})\b",  "nhl_teams",  lambda m: m.group(1).title()),
+    (rf"\b({_NBA_TEAMS})\b",     "nba_teams",     lambda m: m.group(1).title()),
+    (rf"\b({_NFL_TEAMS})\b",     "nfl_teams",     lambda m: m.group(1).title()),
+    (rf"\b({_MLB_TEAMS})\b",     "mlb_teams",     lambda m: m.group(1).title()),
+    (rf"\b({_NHL_TEAMS})\b",     "nhl_teams",     lambda m: m.group(1).title()),
+    (rf"\b({_CFB_TEAMS})\b",     "cfb_teams",     lambda m: m.group(1).title()),
+    (rf"\b({_CBB_TEAMS})\b",     "cbb_teams",     lambda m: m.group(1).title()),
+    (rf"\b({_MLS_TEAMS})\b",     "mls_teams",     lambda m: m.group(1).title()),
+    (rf"\b({_SOCCER_CLUBS})\b",  "soccer_clubs",  lambda m: m.group(1).title()),
 
     # ── Rival / hated teams ───────────────────────────────────────────────────
     (
@@ -204,13 +318,16 @@ _FACT_PATTERNS: list[tuple[str, str, Any]] = [
     (r"\b(swing|long.?term)\b",           "risk_style",    "long-term"),
 
     # ── Sports interests ──────────────────────────────────────────────────────
-    (r"\b(nba|basketball)\b",             "sports",        lambda m: "NBA"),
-    (r"\b(nfl|football)\b",               "sports",        lambda m: "NFL"),
-    (r"\b(mlb|baseball)\b",               "sports",        lambda m: "MLB"),
-    (r"\b(nhl|hockey)\b",                 "sports",        lambda m: "NHL"),
-    (r"\b(soccer|mls|premier league)\b",  "sports",        lambda m: "Soccer"),
-    (r"\b(politics|election)\b",          "interests",     lambda m: "Politics"),
-    (r"\b(crypto|bitcoin|ethereum|btc)\b","interests",     lambda m: "Crypto"),
+    (r"\b(nba|basketball)\b",                            "sports", lambda m: "NBA"),
+    (r"\b(nfl|football)\b",                              "sports", lambda m: "NFL"),
+    (r"\b(mlb|baseball)\b",                              "sports", lambda m: "MLB"),
+    (r"\b(nhl|hockey)\b",                                "sports", lambda m: "NHL"),
+    (r"\b(college football|cfb|ncaaf)\b",                "sports", lambda m: "CFB"),
+    (r"\b(college basketball|cbb|ncaab|march madness)\b","sports", lambda m: "CBB"),
+    (r"\b(soccer|mls|premier league|epl|futbol)\b",      "sports", lambda m: "Soccer"),
+    (r"\b(champions league|ucl|europa league)\b",        "sports", lambda m: "Soccer"),
+    (r"\b(politics|election)\b",                         "interests", lambda m: "Politics"),
+    (r"\b(crypto|bitcoin|ethereum|btc)\b",               "interests", lambda m: "Crypto"),
 
     # ── Experience level ──────────────────────────────────────────────────────
     (
@@ -332,9 +449,13 @@ def is_new_user(profile: dict) -> bool:
 def needs_onboarding(profile: dict) -> bool:
     """True if key profile fields are still empty."""
     facts = profile.get("facts", {})
-    has_sport  = bool(facts.get("sports") or facts.get("fav_nba_teams")
-                      or facts.get("fav_nfl_teams") or facts.get("nba_teams")
-                      or facts.get("nfl_teams"))
+    has_sport  = bool(
+        facts.get("sports") or facts.get("fav_nba_teams") or facts.get("fav_nfl_teams")
+        or facts.get("fav_mlb_teams") or facts.get("fav_nhl_teams")
+        or facts.get("fav_cfb_teams") or facts.get("fav_cbb_teams")
+        or facts.get("fav_mls_teams") or facts.get("fav_soccer_clubs")
+        or facts.get("nba_teams") or facts.get("nfl_teams")
+    )
     has_player = bool(facts.get("fav_players"))
     has_city   = bool(facts.get("city"))
     return not (has_sport and has_player and has_city)
@@ -500,7 +621,7 @@ class UserProfileStore:
 
         lines: list[str] = []
 
-        # Favorite teams (strong signal)
+        # Favorite teams (strong signal) — pro sports
         for key, label in [
             ("fav_nba_teams", "NBA"), ("fav_nfl_teams", "NFL"),
             ("fav_mlb_teams", "MLB"), ("fav_nhl_teams", "NHL"),
@@ -509,13 +630,30 @@ class UserProfileStore:
             if teams:
                 lines.append(f"❤️ Favorite {label} team(s): {', '.join(teams)}")
 
+        # Favorite teams — college sports
+        for key, label in [
+            ("fav_cfb_teams", "College Football"), ("fav_cbb_teams", "College Basketball"),
+        ]:
+            teams = facts.get(key, [])
+            if teams:
+                lines.append(f"❤️ Favorite {label} team(s): {', '.join(teams)}")
+
+        # Favorite teams — soccer
+        for key, label in [
+            ("fav_mls_teams", "MLS"), ("fav_soccer_clubs", "Soccer Club"),
+        ]:
+            teams = facts.get(key, [])
+            if teams:
+                lines.append(f"❤️ Favorite {label}: {', '.join(teams)}")
+
         # Passively mentioned teams (weaker signal)
         for key, label in [
             ("nba_teams", "NBA"), ("nfl_teams", "NFL"),
             ("mlb_teams", "MLB"), ("nhl_teams", "NHL"),
+            ("cfb_teams", "CFB"), ("cbb_teams", "CBB"),
+            ("mls_teams", "MLS"), ("soccer_clubs", "Soccer"),
         ]:
-            # Only show if no strong fav already captured for that sport
-            fav_key = f"fav_{key}"
+            fav_key = f"fav_{key}" if not key.endswith("_clubs") else "fav_soccer_clubs"
             if not facts.get(fav_key) and facts.get(key):
                 lines.append(f"Follows {label}: {', '.join(facts[key])}")
 
@@ -668,8 +806,12 @@ class UserProfileStore:
             # 2. Favorite team
             (
                 "fav_team",
-                lambda f: bool(f.get("fav_nba_teams") or f.get("fav_nfl_teams") or
-                               f.get("fav_mlb_teams") or f.get("fav_nhl_teams")),
+                lambda f: bool(
+                    f.get("fav_nba_teams") or f.get("fav_nfl_teams") or
+                    f.get("fav_mlb_teams") or f.get("fav_nhl_teams") or
+                    f.get("fav_cfb_teams") or f.get("fav_cbb_teams") or
+                    f.get("fav_mls_teams") or f.get("fav_soccer_clubs")
+                ),
                 "Weave in a question about their favorite team — "
                 "'who are you rooting for?' or similar, context-appropriate.",
             ),
@@ -779,7 +921,9 @@ class UserProfileStore:
         fav_teams   = [
             t.lower() for t in (
                 facts.get("fav_nba_teams", []) + facts.get("fav_nfl_teams", []) +
-                facts.get("fav_mlb_teams", []) + facts.get("fav_nhl_teams", [])
+                facts.get("fav_mlb_teams", []) + facts.get("fav_nhl_teams", []) +
+                facts.get("fav_cfb_teams", []) + facts.get("fav_cbb_teams", []) +
+                facts.get("fav_mls_teams", []) + facts.get("fav_soccer_clubs", [])
             )
         ]
         rival_teams = [t.lower() for t in facts.get("rival_teams", [])]
@@ -849,7 +993,9 @@ class UserProfileStore:
             fav_teams = [
                 ft.lower() for ft in (
                     facts.get("fav_nba_teams", []) + facts.get("fav_nfl_teams", []) +
-                    facts.get("fav_mlb_teams", []) + facts.get("fav_nhl_teams", [])
+                    facts.get("fav_mlb_teams", []) + facts.get("fav_nhl_teams", []) +
+                    facts.get("fav_cfb_teams", []) + facts.get("fav_cbb_teams", []) +
+                    facts.get("fav_mls_teams", []) + facts.get("fav_soccer_clubs", [])
                 )
             ]
             if any(t in ft or ft in t for ft in fav_teams):

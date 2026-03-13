@@ -91,9 +91,12 @@ from edge_agent.memory import KnowledgeBase, SessionMemory
 from edge_agent.game_tracker import TrackedGame
 from edge_agent.models import Recommendation
 
-_kalshi_api   = importlib.import_module(".dat-ingestion.kalshi_api", "edge_agent")
-_injury_mod   = importlib.import_module(".dat-ingestion.injury_api", "edge_agent")
-_InjuryClient = _injury_mod.InjuryAPIClient
+_kalshi_api      = importlib.import_module(".dat-ingestion.kalshi_api",   "edge_agent")
+_injury_mod      = importlib.import_module(".dat-ingestion.injury_api",   "edge_agent")
+_InjuryClient    = _injury_mod.InjuryAPIClient
+_standings_mod   = importlib.import_module(".dat-ingestion.standings_api", "edge_agent")
+_StandingsClient = _standings_mod.StandingsClient
+_standings_client = _StandingsClient()   # singleton
 
 _trader_mod   = importlib.import_module(".dat-ingestion.trader_api", "edge_agent")
 _TraderClient = _trader_mod.TraderAPIClient
@@ -643,9 +646,12 @@ async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         "/wallet 0x… — deep vet any Polymarket wallet address\n\n"
         "<b>🏥 Injury Tracking</b>\n"
         "/injuries — injury cache summary\n"
-        "/injuries nba|nfl|nhl — full league injury list\n"
-        "/injuries nhl oilers — filter by team\n"
+        "/injuries nba|nfl|nhl|cfb|cbb — full league injury list\n"
+        "/injuries nfl chiefs — filter by team\n"
         "/tracking — injury game tracking list\n\n"
+        "<b>📊 Standings &amp; Odds</b>\n"
+        "/standings — championship favorites (all sports, Polymarket odds)\n"
+        "/standings nba|nfl|mlb|nhl|cfb|cbb|mls|epl — full table + odds\n\n"
         "<b>⚙️ Settings</b>\n"
         "/approvals — manage alert signal filters\n"
         "/help — show this message\n\n"
@@ -1936,20 +1942,23 @@ async def cmd_injuries(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
       /injuries nba        — full NBA player list sorted by severity
       /injuries nfl        — full NFL player list sorted by severity
       /injuries nhl        — full NHL player list sorted by severity
+      /injuries cfb        — College Football injury list
+      /injuries cbb        — College Basketball injury list
       /injuries nba lakers — NBA players for the Lakers only
       /injuries nfl chiefs — NFL players for the Chiefs only
-      /injuries nhl oilers — NHL players for the Oilers only
     """
     args = ctx.args or []
     sport_filter = args[0].lower() if args else None
     team_filter  = " ".join(args[1:]).lower() if len(args) > 1 else None
+
+    _VALID_SPORTS = ("nba", "nfl", "nhl", "cfb", "cbb")
 
     try:
         from edge_agent.memory.injury_cache import InjuryCache
         cache = InjuryCache()
 
         # ── No sport arg: show summary ────────────────────────────────────────
-        if not sport_filter or sport_filter not in ("nba", "nfl", "nhl"):
+        if not sport_filter or sport_filter not in _VALID_SPORTS:
             stats = cache.stats()
             if not stats:
                 await update.message.reply_text(
@@ -2095,7 +2104,7 @@ async def injury_refresh_job(ctx: ContextTypes.DEFAULT_TYPE) -> None:
     log.info("Injury refresh triggered.")
     client = _InjuryClient()
     results = {}
-    for sport in ("nba", "nfl", "nhl"):
+    for sport in ("nba", "nfl", "nhl", "cfb", "cbb"):
         try:
             count = client.fetch_and_store(sport)
             results[sport.upper()] = count
@@ -2207,6 +2216,69 @@ async def injury_refresh_job(ctx: ContextTypes.DEFAULT_TYPE) -> None:
 
 
 # ---------------------------------------------------------------------------
+# /standings command
+# ---------------------------------------------------------------------------
+
+async def cmd_standings(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    """
+    Show current standings + Polymarket championship odds for any sport.
+
+    Usage:
+      /standings           — championship favorites across all major sports
+      /standings nba       — NBA standings + championship odds
+      /standings nfl       — NFL standings + Super Bowl odds
+      /standings mlb       — MLB standings + World Series odds
+      /standings nhl       — NHL standings + Stanley Cup odds
+      /standings cfb       — College Football top-25 + playoff odds
+      /standings cbb       — College Basketball top-25 + March Madness odds
+      /standings mls       — MLS standings + MLS Cup odds
+      /standings epl       — Premier League table + champions odds
+    """
+    args = ctx.args or []
+    sport = args[0].lower() if args else None
+
+    _VALID = ("nfl", "nba", "mlb", "nhl", "cfb", "cbb", "mls", "epl")
+
+    await update.message.reply_text("🔍 Fetching standings…")
+
+    try:
+        if sport and sport in _VALID:
+            # Single sport detailed view
+            text = await asyncio.get_event_loop().run_in_executor(
+                None, lambda: _standings_client.format_standings(sport)
+            )
+            await update.message.reply_text(text, parse_mode=ParseMode.HTML)
+        else:
+            # No arg: championship favorites summary across all sports
+            lines = ["🏆 <b>Championship Favorites (Polymarket)</b>\n"]
+            sport_labels = {
+                "nfl": "🏈 Super Bowl",   "nba": "🏀 NBA Champion",
+                "mlb": "⚾ World Series",  "nhl": "🏒 Stanley Cup",
+                "cfb": "🎓🏈 CFB Playoff", "cbb": "🎓🏀 March Madness",
+                "mls": "⚽ MLS Cup",       "epl": "🏴󠁧󠁢󠁥󠁮󠁧󠁿 Premier League",
+            }
+            for s, label in sport_labels.items():
+                try:
+                    odds = await asyncio.get_event_loop().run_in_executor(
+                        None, lambda s=s: _standings_client.get_championship_odds(s)
+                    )
+                    if odds:
+                        top3 = "  |  ".join(f"{t}: {p:.0%}" for t, p in odds[:3])
+                        lines.append(f"<b>{label}</b>\n  {top3}")
+                except Exception:
+                    pass
+            lines.append("\n<i>Use /standings nba, /standings nfl, etc. for full tables.</i>")
+            await update.message.reply_text("\n".join(lines), parse_mode=ParseMode.HTML)
+
+    except Exception as exc:
+        log.warning("cmd_standings error: %s", exc)
+        await update.message.reply_text(
+            f"❌ Standings unavailable right now: {exc}\n"
+            "ESPN or Polymarket may be temporarily unreachable."
+        )
+
+
+# ---------------------------------------------------------------------------
 # Background scan job
 # ---------------------------------------------------------------------------
 
@@ -2297,6 +2369,7 @@ def main() -> None:
     app.add_handler(CommandHandler("mytrades",    cmd_mytrades,    filters=_auth_filter))
     app.add_handler(CommandHandler("status",      cmd_status,      filters=_auth_filter))
     app.add_handler(CommandHandler("approvals",   cmd_approvals,   filters=_auth_filter))
+    app.add_handler(CommandHandler("standings",   cmd_standings,   filters=_auth_filter))
 
     # Inline keyboard (callback queries are always scoped to the chat they came from)
     app.add_handler(CallbackQueryHandler(handle_callback))
