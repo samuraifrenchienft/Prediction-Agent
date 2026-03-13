@@ -44,7 +44,8 @@ class SessionMemory:
 
     def _setup(self) -> None:
         c = self._conn
-        # Create with user_id from the start
+
+        # ── Step 1: ensure the table exists (modern schema) ──────────────────
         c.execute("""
             CREATE TABLE IF NOT EXISTS sessions (
                 id            INTEGER PRIMARY KEY,
@@ -56,12 +57,53 @@ class SessionMemory:
                 UNIQUE(user_id, session_date)
             )
         """)
-        # Migrate legacy schema that had UNIQUE on session_date alone
+        c.commit()
+
+        # ── Step 2: add user_id column if this is a legacy table ─────────────
         try:
             c.execute("ALTER TABLE sessions ADD COLUMN user_id INTEGER NOT NULL DEFAULT 0")
+            c.commit()
         except Exception:
             pass  # column already exists — fine
-        c.commit()
+
+        # ── Step 3: if legacy UNIQUE index is only on session_date, rebuild ──
+        # Check existing unique indexes; if (user_id, session_date) index is
+        # missing we recreate the table with the correct composite key so the
+        # UPSERT in _save_today() works correctly for multi-user sessions.
+        try:
+            indexes = c.execute(
+                "SELECT name, sql FROM sqlite_master WHERE type='index' AND tbl_name='sessions'"
+            ).fetchall()
+            has_composite = any(
+                "user_id" in (row[1] or "") for row in indexes
+            )
+            if not has_composite:
+                # Rename old table, recreate with correct schema, copy data, drop old.
+                c.execute("ALTER TABLE sessions RENAME TO sessions_legacy")
+                c.execute("""
+                    CREATE TABLE sessions (
+                        id            INTEGER PRIMARY KEY,
+                        user_id       INTEGER NOT NULL DEFAULT 0,
+                        session_date  TEXT NOT NULL,
+                        exchanges     TEXT NOT NULL DEFAULT '[]',
+                        markets       TEXT NOT NULL DEFAULT '[]',
+                        preferences   TEXT NOT NULL DEFAULT '{}',
+                        UNIQUE(user_id, session_date)
+                    )
+                """)
+                c.execute("""
+                    INSERT OR IGNORE INTO sessions
+                        (user_id, session_date, exchanges, markets, preferences)
+                    SELECT COALESCE(user_id, 0), session_date,
+                           COALESCE(exchanges, '[]'),
+                           COALESCE(markets, '[]'),
+                           COALESCE(preferences, '{}')
+                    FROM sessions_legacy
+                """)
+                c.execute("DROP TABLE sessions_legacy")
+                c.commit()
+        except Exception:
+            pass  # migration best-effort — never crash on startup
 
     def _ensure_today_session(self) -> None:
         self._conn.execute(
@@ -76,22 +118,32 @@ class SessionMemory:
             "WHERE user_id = ? AND session_date = ?",
             (self._user_id, self._session_date),
         ).fetchone()
+        if row is None:
+            # Row missing — legacy schema UNIQUE(session_date) conflict silently
+            # blocked the INSERT OR IGNORE for this user_id. Return safe defaults.
+            return {"exchanges": [], "markets": [], "preferences": {}}
         return {
-            "exchanges":  json.loads(row[0]),
-            "markets":    json.loads(row[1]),
-            "preferences": json.loads(row[2]),
+            "exchanges":   json.loads(row[0] or "[]"),
+            "markets":     json.loads(row[1] or "[]"),
+            "preferences": json.loads(row[2] or "{}"),
         }
 
     def _save_today(self, exchanges: list, markets: list, preferences: dict) -> None:
+        # UPSERT — handles both the normal UPDATE path and the legacy schema
+        # edge case where INSERT OR IGNORE was silently skipped (no row exists yet).
         self._conn.execute(
-            """UPDATE sessions SET exchanges=?, markets=?, preferences=?
-               WHERE user_id = ? AND session_date=?""",
+            """INSERT INTO sessions (user_id, session_date, exchanges, markets, preferences)
+               VALUES (?, ?, ?, ?, ?)
+               ON CONFLICT(user_id, session_date) DO UPDATE SET
+                   exchanges=excluded.exchanges,
+                   markets=excluded.markets,
+                   preferences=excluded.preferences""",
             (
+                self._user_id,
+                self._session_date,
                 json.dumps(exchanges),
                 json.dumps(markets),
                 json.dumps(preferences),
-                self._user_id,
-                self._session_date,
             ),
         )
         self._conn.commit()
