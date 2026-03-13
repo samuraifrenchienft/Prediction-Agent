@@ -211,6 +211,69 @@ _FACT_PATTERNS: list[tuple[str, str, Any]] = [
     (r"\b(soccer|mls|premier league)\b",  "sports",        lambda m: "Soccer"),
     (r"\b(politics|election)\b",          "interests",     lambda m: "Politics"),
     (r"\b(crypto|bitcoin|ethereum|btc)\b","interests",     lambda m: "Crypto"),
+
+    # ── Experience level ──────────────────────────────────────────────────────
+    (
+        r"\b(?:i(?:'m| am) (?:new|a newbie|just starting|a beginner)|"
+        r"never (?:used|tried|done) (?:prediction markets?|polymarket|kalshi)|"
+        r"just (?:signed up|joined|started))\b",
+        "experience_level", "beginner",
+    ),
+    (
+        r"\b(?:i(?:'ve| have) (?:been|traded|used).{0,30}(?:polymarket|kalshi|prediction markets?)|"
+        r"i(?:'m| am) (?:experienced|a trader|familiar with)|"
+        r"(?:traded|been trading).{0,20}(?:for|since))\b",
+        "experience_level", "experienced",
+    ),
+
+    # ── Market category preferences ───────────────────────────────────────────
+    (r"\b(?:prefer|like|into|mostly|mainly)\s+(?:sports|nba|nfl|mlb|nhl)\b",
+     "market_prefs", lambda m: "Sports"),
+    (r"\b(?:prefer|like|into|mostly|mainly)\s+politics\b",
+     "market_prefs", lambda m: "Politics"),
+    (r"\b(?:prefer|like|into|mostly|mainly)\s+crypto\b",
+     "market_prefs", lambda m: "Crypto"),
+    (r"\b(?:prefer|like|into|mostly|mainly)\s+economics?\b",
+     "market_prefs", lambda m: "Economics"),
+
+    # ── Alert threshold preference ─────────────────────────────────────────────
+    (
+        r"\b(?:only (?:send|show|alert|notify) (?:me )?(?:high.?confidence|strong|best|top)|"
+        r"(?:don(?:'t| not) (?:want|need)|skip) (?:weak|low.?confidence|marginal) alerts?)\b",
+        "alert_threshold", "high-confidence-only",
+    ),
+    (
+        r"\b(?:(?:send|show|give) (?:me )?(?:all|every|any)|"
+        r"i(?:'ll| will) (?:filter|decide)|don(?:'t| not) miss (?:any|anything))\b",
+        "alert_threshold", "all-signals",
+    ),
+
+    # ── Fantasy / DFS ─────────────────────────────────────────────────────────
+    (
+        r"\b(?:play(?:ing|s)?|do|into|love)\s+(?:fantasy|dfs|draftkings|fanduel|"
+        r"daily fantasy|fantasy (?:sports?|basketball|football|baseball|hockey))\b",
+        "plays_fantasy", "yes",
+    ),
+    (
+        r"\b(?:don(?:'t| not) (?:play|do)|not into|no) (?:fantasy|dfs)\b",
+        "plays_fantasy", "no",
+    ),
+
+    # ── Rival player (player they love to see lose) ───────────────────────────
+    (
+        r"(?:hate|can'?t stand|dislike|despise|love (?:to )?(?:see|watch).{0,10}(?:lose|fail)|"
+        r"biggest (?:villain|enemy)|least fav(?:orite)? player)\s+"
+        r"([A-Z][a-z]+(?:\s+[A-Z][a-z]+)?)",
+        "rival_players",
+        lambda m: m.group(1).strip(),
+    ),
+    (
+        r"([A-Z][a-z]+(?:\s+[A-Z][a-z]+)?)\s+(?:is|makes?)\s+(?:my )?(?:least fav|"
+        r"most hated|annoying|overrated|can'?t stand)",
+        "rival_players",
+        lambda m: m.group(1).strip(),
+    ),
+
 ]
 
 # ── Memorable moment patterns ─────────────────────────────────────────────────
@@ -289,17 +352,23 @@ def _connect() -> sqlite3.Connection:
 def _init_db(conn: sqlite3.Connection) -> None:
     conn.execute("""
         CREATE TABLE IF NOT EXISTS user_profiles (
-            user_id       INTEGER PRIMARY KEY,
-            first_name    TEXT,
-            username      TEXT,
-            facts         TEXT NOT NULL DEFAULT '{}',
-            moments       TEXT NOT NULL DEFAULT '[]',
-            trading_prefs TEXT NOT NULL DEFAULT '{}',
-            created_at    REAL NOT NULL,
-            last_seen     REAL NOT NULL,
-            message_count INTEGER NOT NULL DEFAULT 0
+            user_id          INTEGER PRIMARY KEY,
+            first_name       TEXT,
+            username         TEXT,
+            facts            TEXT NOT NULL DEFAULT '{}',
+            moments          TEXT NOT NULL DEFAULT '[]',
+            trading_prefs    TEXT NOT NULL DEFAULT '{}',
+            onboarding_asked TEXT NOT NULL DEFAULT '[]',
+            created_at       REAL NOT NULL,
+            last_seen        REAL NOT NULL,
+            message_count    INTEGER NOT NULL DEFAULT 0
         )
     """)
+    # Migrate existing DBs that predate the onboarding_asked column
+    try:
+        conn.execute("ALTER TABLE user_profiles ADD COLUMN onboarding_asked TEXT NOT NULL DEFAULT '[]'")
+    except Exception:
+        pass  # column already exists — fine
     conn.commit()
 
 
@@ -481,10 +550,35 @@ class UserProfileStore:
             tz_note = f" (timezone: {tz})" if tz else ""
             lines.append(f"Location: {city}{tz_note}")
 
+        # Rival players
+        rival_players = facts.get("rival_players", [])
+        if rival_players:
+            lines.append(f"😠 Rival player(s) (loves to see lose): {', '.join(rival_players)}")
+
+        # Market category preferences
+        mkt_prefs = facts.get("market_prefs", [])
+        if mkt_prefs:
+            lines.append(f"Preferred market types: {', '.join(mkt_prefs)}")
+
         # Platforms
         platforms = facts.get("platforms", [])
         if platforms:
             lines.append(f"Uses: {', '.join(platforms)}")
+
+        # Experience level
+        exp = facts.get("experience_level", [])
+        if exp:
+            lines.append(f"Prediction market experience: {exp[-1]}")
+
+        # Fantasy / DFS
+        fantasy = facts.get("plays_fantasy", [])
+        if fantasy and fantasy[-1] == "yes":
+            lines.append("Plays fantasy/DFS: yes — injury alerts are extra important")
+
+        # Alert threshold preference
+        thresh = facts.get("alert_threshold", [])
+        if thresh:
+            lines.append(f"Alert preference: {thresh[-1]}")
 
         # Risk style + bankroll
         risk = facts.get("risk_style", [])
@@ -502,20 +596,23 @@ class UserProfileStore:
         if not lines:
             return ""
 
-        # Onboarding hint for AI
+        # Onboarding hint for AI (only show fields not yet captured AND not yet asked)
         onboard_hint = ""
         if needs_onboarding(profile) and profile.get("message_count", 0) <= 10:
+            asked   = set(profile.get("onboarding_asked", []))
             missing = []
-            if not players:
+            if not players and "fav_player" not in asked:
                 missing.append("favorite player")
-            if not cities:
+            if not cities and "city" not in asked:
                 missing.append("their city/location")
-            if not (facts.get("fav_nba_teams") or facts.get("fav_nfl_teams")):
+            if not (facts.get("fav_nba_teams") or facts.get("fav_nfl_teams")) \
+               and "fav_team" not in asked:
                 missing.append("favorite team")
             if missing:
                 onboard_hint = (
-                    f"\nSTILL UNKNOWN: {', '.join(missing)}. "
-                    "Work these into conversation naturally — one at a time, not all at once."
+                    f"\nSTILL UNKNOWN (not yet asked): {', '.join(missing)}. "
+                    "get_onboarding_prompt() will surface these one at a time — "
+                    "do not ask them all at once."
                 )
 
         return (
@@ -529,8 +626,15 @@ class UserProfileStore:
 
     def get_onboarding_prompt(self, user_id: int) -> str:
         """
-        Return an AI instruction string to gather missing profile info
-        for new users. Empty string if profile is complete or user is not new.
+        Return an AI instruction string to gather the NEXT missing profile field
+        for new users — one question at a time, never repeating a question already asked.
+
+        Each call marks the returned question key as asked so the same question
+        is never surfaced again (even if the user doesn't answer).
+
+        Returns empty string if:
+          - User is not new (message_count > 5)
+          - All 11 questions have been asked or answered
         """
         row = self._conn.execute(
             "SELECT * FROM user_profiles WHERE user_id = ?", (user_id,)
@@ -543,29 +647,113 @@ class UserProfileStore:
             return ""
 
         facts   = profile["facts"]
-        missing = []
+        asked   = set(profile.get("onboarding_asked", []))  # keys already surfaced
 
-        if not (facts.get("sports") or facts.get("fav_nba_teams") or facts.get("fav_nfl_teams")):
-            missing.append("what sports they follow")
-        if not (facts.get("fav_nba_teams") or facts.get("fav_nfl_teams")
-                or facts.get("fav_mlb_teams") or facts.get("fav_nhl_teams")):
-            missing.append("their favorite team")
-        if not facts.get("fav_players"):
-            missing.append("a favorite player")
-        if not facts.get("city"):
-            missing.append("their location (city) for timezone-accurate alerts")
+        # ── Ordered list of 11 onboarding questions ──────────────────────────
+        # Each entry: (key, check_fn, ai_instruction)
+        #   key          — unique identifier; stored in onboarding_asked once surfaced
+        #   check_fn     — returns True if fact already captured (skip question)
+        #   ai_instruction — what to tell the AI to work into conversation naturally
 
-        if not missing:
-            return ""
+        questions: list[tuple[str, Any, str]] = [
+            # 1. Sport interests (highest priority — gates everything else)
+            (
+                "sports",
+                lambda f: bool(f.get("sports") or f.get("fav_nba_teams") or
+                               f.get("fav_nfl_teams") or f.get("fav_mlb_teams") or
+                               f.get("fav_nhl_teams")),
+                "Casually ask which sports they follow or care about — "
+                "make it feel like natural curiosity, not a form field.",
+            ),
+            # 2. Favorite team
+            (
+                "fav_team",
+                lambda f: bool(f.get("fav_nba_teams") or f.get("fav_nfl_teams") or
+                               f.get("fav_mlb_teams") or f.get("fav_nhl_teams")),
+                "Weave in a question about their favorite team — "
+                "'who are you rooting for?' or similar, context-appropriate.",
+            ),
+            # 3. Favorite player
+            (
+                "fav_player",
+                lambda f: bool(f.get("fav_players")),
+                "Find a natural moment to ask who their favorite player is — "
+                "maybe after mentioning a team or a current game.",
+            ),
+            # 4. City / location (for timezone-accurate alerts)
+            (
+                "city",
+                lambda f: bool(f.get("city")),
+                "Casually ask where they're based or what city they're in — "
+                "frame it around giving them time-accurate game alerts.",
+            ),
+            # 5. Experience level with prediction markets
+            (
+                "experience",
+                lambda f: bool(f.get("experience_level")),
+                "Gauge their familiarity with prediction markets — are they new "
+                "to Polymarket/Kalshi or already experienced? Keep it casual.",
+            ),
+            # 6. Rival / hated team
+            (
+                "rival_team",
+                lambda f: bool(f.get("rival_teams")),
+                "In a playful way, ask if there's a team they can't stand or love "
+                "to see lose — helps personalize rivalry alerts.",
+            ),
+            # 7. Plays fantasy / DFS
+            (
+                "fantasy",
+                lambda f: bool(f.get("plays_fantasy")),
+                "Ask if they play fantasy sports or DFS — injury alerts become "
+                "much more urgent if so. Keep it conversational.",
+            ),
+            # 8. Market category preferences
+            (
+                "market_prefs",
+                lambda f: bool(f.get("market_prefs")),
+                "Ask what types of markets they're most interested in — sports, "
+                "politics, crypto, economics — to tailor signal alerts.",
+            ),
+            # 9. Alert preference (all signals vs. high-confidence only)
+            (
+                "alert_threshold",
+                lambda f: bool(f.get("alert_threshold")),
+                "Ask whether they want every signal EDGE finds, or only the "
+                "highest-confidence ones — frame it as a filter preference.",
+            ),
+            # 10. Rival player (player they love to see lose)
+            (
+                "rival_player",
+                lambda f: bool(f.get("rival_players")),
+                "Ask if there's a player they love to see lose or find overrated — "
+                "keeps injury/return alerts personalized on both sides.",
+            ),
+        ]
 
-        return (
-            "\nNEW USER ONBOARDING: This is an early interaction. "
-            "Casually work into the conversation — one question at a time — "
-            f"to learn: {', '.join(missing)}. "
-            "Do it naturally, not like a form. If they mention a sport, ask about their team. "
-            "If they mention a team, ask who their favorite player is. "
-            "If they mention a city event, note their location."
-        )
+        # Find the first question not yet answered AND not yet asked
+        for key, check_fn, instruction in questions:
+            if check_fn(facts):
+                continue   # already answered — skip silently
+            if key in asked:
+                continue   # already asked but not answered — move on, don't repeat
+
+            # Mark this question as asked NOW so it won't repeat even if user ignores it
+            asked.add(key)
+            with self._conn:
+                self._conn.execute(
+                    "UPDATE user_profiles SET onboarding_asked = ? WHERE user_id = ?",
+                    (json.dumps(sorted(asked)), user_id),
+                )
+
+            return (
+                "\nNEW USER ONBOARDING: "
+                + instruction
+                + " One question only — do NOT ask multiple things at once. "
+                "If the conversation doesn't have a natural opening, wait for the next message."
+            )
+
+        return ""  # all questions asked or answered
 
     # ── Alert personalization ─────────────────────────────────────────────────
 
@@ -672,7 +860,8 @@ class UserProfileStore:
 
     def _row_to_dict(self, row: sqlite3.Row) -> dict[str, Any]:
         d = dict(row)
-        d["facts"]         = json.loads(d.get("facts", "{}") or "{}")
-        d["moments"]       = json.loads(d.get("moments", "[]") or "[]")
-        d["trading_prefs"] = json.loads(d.get("trading_prefs", "{}") or "{}")
+        d["facts"]            = json.loads(d.get("facts", "{}") or "{}")
+        d["moments"]          = json.loads(d.get("moments", "[]") or "[]")
+        d["trading_prefs"]    = json.loads(d.get("trading_prefs", "{}") or "{}")
+        d["onboarding_asked"] = json.loads(d.get("onboarding_asked", "[]") or "[]")
         return d
