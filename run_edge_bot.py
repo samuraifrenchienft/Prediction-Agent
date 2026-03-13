@@ -1529,6 +1529,106 @@ async def handle_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None
     session_context = _mem_user.get_session_context(max_exchanges=4)
 
     # 3. Live market context (on-demand, only for market questions)
+    # ── Team name → canonical search tokens (Polymarket uses full city names) ──
+    _TEAM_ALIASES: dict[str, str] = {
+        # NBA
+        "warriors": "Warriors", "golden state": "Warriors",
+        "timberwolves": "Timberwolves", "wolves": "Timberwolves",
+        "lakers": "Lakers", "celtics": "Celtics", "bucks": "Bucks",
+        "heat": "Heat", "nets": "Nets", "knicks": "Knicks",
+        "nuggets": "Nuggets", "suns": "Suns", "sixers": "76ers",
+        "raptors": "Raptors", "mavericks": "Mavericks", "mavs": "Mavericks",
+        "spurs": "Spurs", "thunder": "Thunder", "grizzlies": "Grizzlies",
+        "pelicans": "Pelicans", "kings": "Kings", "bulls": "Bulls",
+        "rockets": "Rockets", "jazz": "Jazz", "clippers": "Clippers",
+        "pistons": "Pistons", "hornets": "Hornets", "magic": "Magic",
+        "hawks": "Hawks", "pacers": "Pacers", "cavaliers": "Cavaliers",
+        "cavs": "Cavaliers", "wizards": "Wizards", "blazers": "Trail Blazers",
+        # NFL
+        "chiefs": "Chiefs", "eagles": "Eagles", "cowboys": "Cowboys",
+        "ravens": "Ravens", "bills": "Bills", "bengals": "Bengals",
+        "dolphins": "Dolphins", "steelers": "Steelers", "49ers": "49ers",
+        "niners": "49ers", "rams": "Rams", "seahawks": "Seahawks",
+        "packers": "Packers", "lions": "Lions", "bears": "Bears",
+        "vikings": "Vikings", "giants": "Giants", "commanders": "Commanders",
+        "saints": "Saints", "falcons": "Falcons", "panthers": "Panthers",
+        "buccaneers": "Buccaneers", "bucs": "Buccaneers", "texans": "Texans",
+        "colts": "Colts", "jaguars": "Jaguars", "titans": "Titans",
+        "broncos": "Broncos", "raiders": "Raiders", "chargers": "Chargers",
+        # NHL
+        "bruins": "Bruins", "maple leafs": "Maple Leafs", "leafs": "Maple Leafs",
+        "canadiens": "Canadiens", "habs": "Canadiens", "lightning": "Lightning",
+        "panthers": "Panthers", "capitals": "Capitals", "rangers": "Rangers",
+        "flyers": "Flyers", "penguins": "Penguins", "red wings": "Red Wings",
+        "blackhawks": "Blackhawks", "blues": "Blues", "avalanche": "Avalanche",
+        "golden knights": "Golden Knights", "oilers": "Oilers",
+        "flames": "Flames", "canucks": "Canucks",
+        # MLB
+        "yankees": "Yankees", "red sox": "Red Sox", "dodgers": "Dodgers",
+        "cubs": "Cubs", "cardinals": "Cardinals", "braves": "Braves",
+        "mets": "Mets", "astros": "Astros", "phillies": "Phillies",
+        "padres": "Padres", "giants": "Giants", "mariners": "Mariners",
+        "blue jays": "Blue Jays", "rays": "Rays", "orioles": "Orioles",
+    }
+
+    def _find_team_mentions(text: str) -> list[str]:
+        """Return up to 2 canonical team names found in the message."""
+        found, seen = [], set()
+        tl = text.lower()
+        # Sort by length descending so "red sox" matches before "sox"
+        for alias, canonical in sorted(_TEAM_ALIASES.items(), key=lambda x: -len(x[0])):
+            if alias in tl and canonical not in seen:
+                found.append(canonical)
+                seen.add(canonical)
+            if len(found) == 2:
+                break
+        return found
+
+    def _search_polymarket_game(teams: list[str]) -> str:
+        """
+        Search Polymarket Gamma for a specific game market given 1-2 team names.
+        Returns a formatted context string, or "" on failure/no result.
+        """
+        import requests as _req
+        query = " ".join(teams)
+        try:
+            resp = _req.get(
+                "https://gamma-api.polymarket.com/markets",
+                params={"q": query, "active": "true", "closed": "false", "limit": 5},
+                timeout=8,
+            )
+            resp.raise_for_status()
+            markets = resp.json()
+        except Exception:
+            return ""
+        if not markets:
+            return ""
+        # Filter to markets whose question contains at least one of the team names
+        def _relevance(m: dict) -> int:
+            title = (m.get("question") or m.get("groupItemTitle") or "").lower()
+            return sum(1 for t in teams if t.lower() in title)
+        markets = sorted(markets, key=_relevance, reverse=True)
+        best = [m for m in markets if _relevance(m) >= 1][:3]
+        if not best:
+            return ""
+        lines = ["\nLive Polymarket market data:"]
+        for m in best:
+            question = m.get("question") or m.get("groupItemTitle") or "?"
+            prices = m.get("outcomePrices") or []
+            if len(prices) >= 2:
+                yes_p = round(float(prices[0]) * 100)
+                no_p  = round(float(prices[1]) * 100)
+                prob_str = f"YES {yes_p}¢ / NO {no_p}¢"
+            else:
+                prob_str = "price unavailable"
+            vol = m.get("volume24hrClob") or m.get("volumeNum") or 0
+            try:
+                vol_str = f"${float(vol):,.0f} 24h vol"
+            except Exception:
+                vol_str = ""
+            lines.append(f"- {question[:80]}: {prob_str}" + (f" | {vol_str}" if vol_str else ""))
+        return "\n".join(lines)
+
     _SERIES_MAP = [
         (["fed", "fomc", "rate"], "KXFED"),
         (["inflation", "cpi"], "KXINFL"),
@@ -1539,20 +1639,31 @@ async def handle_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None
     ]
     q = user_msg.lower()
     market_context = ""
-    for keywords, series in _SERIES_MAP:
-        if any(kw in q for kw in keywords):
-            try:
-                markets = _kalshi_api.get_markets(limit=3, series_ticker=series, min_volume=1)
-                if markets:
-                    lines = [f"\nLive {series} markets:"]
-                    for m in markets:
-                        prob = _kalshi_api.parse_market_prob(m)
-                        vol = _kalshi_api.parse_volume(m)
-                        lines.append(f"- {m.get('title', m.get('ticker'))}: {prob:.0%} yes | ${vol:,.0f} vol")
-                    market_context = "\n".join(lines)
-            except Exception:
-                pass
-            break
+
+    # ── Priority 1: specific game matchup detected → search Polymarket directly ──
+    _mentioned_teams = _find_team_mentions(q)
+    if len(_mentioned_teams) >= 2 or (
+        len(_mentioned_teams) == 1
+        and any(kw in q for kw in ("vs", "versus", "game", "tonight", "match", "beat", "win", "cover", "price", "market"))
+    ):
+        market_context = _search_polymarket_game(_mentioned_teams)
+
+    # ── Priority 2: generic sport topic → Kalshi series (championship / season markets) ──
+    if not market_context:
+        for keywords, series in _SERIES_MAP:
+            if any(kw in q for kw in keywords):
+                try:
+                    markets = _kalshi_api.get_markets(limit=3, series_ticker=series, min_volume=1)
+                    if markets:
+                        lines = [f"\nLive {series} Kalshi markets (season/championship):"]
+                        for m in markets:
+                            prob = _kalshi_api.parse_market_prob(m)
+                            vol  = _kalshi_api.parse_volume(m)
+                            lines.append(f"- {m.get('title', m.get('ticker'))}: {prob:.0%} yes | ${vol:,.0f} vol")
+                        market_context = "\n".join(lines)
+                except Exception:
+                    pass
+                break
 
     # 4. Recent scan opportunities as context
     svc = _get_service()
@@ -1657,6 +1768,15 @@ async def handle_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None
         "Reference live market data and knowledge base context when provided. "
         "Use session context to remember what was discussed earlier. "
         "Return plain text (no JSON). Keep replies under 300 words.\n\n"
+        "LIVE MARKET DATA RULES:\n"
+        "• When a [Live Polymarket market data] block is in the prompt, use THOSE exact prices. "
+        "Never cite prices from training memory — they will be wrong.\n"
+        "• outcomePrices are in cents (0-100). YES 58¢ = 58% implied probability.\n"
+        "• When a [Live KXNBA Kalshi markets] block appears, those are season-long "
+        "championship / futures markets — NOT individual game win markets. "
+        "Do NOT present Kalshi series data as a specific game matchup price.\n"
+        "• If no live data is available for the game asked about, say so clearly: "
+        "'I don't have a live Polymarket market for that game right now.'\n\n"
         "INJURY DATA RULES — apply ONLY when the user's current message explicitly "
         "asks about injuries, player health, roster status, or a specific game matchup:\n"
         "• If injury data IS in [Live injury data] or [Live web search results]: cite it.\n"
