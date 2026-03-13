@@ -1482,6 +1482,9 @@ async def handle_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None
     # Long-term profile context (what EDGE knows about this person across all sessions)
     profile_context = _profiles.get_profile_context(user_id)
 
+    # New-user onboarding hint — tells AI to naturally ask missing profile questions
+    onboarding_hint = _profiles.get_onboarding_prompt(user_id)
+
     # ── Correction detection ──────────────────────────────────────────────────
     _CORRECTION_TRIGGERS = {
         "wrong", "try again", "retry", "that's not", "thats not",
@@ -1621,7 +1624,12 @@ async def handle_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None
         "• Kalshi — US-regulated (CFTC), USD via bank/card, KYC required, ~7% fee on winnings\n\n"
         "ONBOARDING: If a [Platform Setup Reference] block is in the prompt, use it verbatim "
         "to answer setup/deposit/fee questions. Do not guess — if it's in the docs, cite it.\n\n"
-        "Be concise — Telegram users want short, direct answers. "
+        "PERSONALIZATION: A [What you know about {name}] block may appear in the prompt. "
+        "Use it to be a knowledgeable friend — reference favorites, rivals, and past moments "
+        "naturally and with genuine emotion. Express concern for injuries to their fav players, "
+        "excitement for returns, empathy for their team's struggles. Never feel robotic or scripted.\n\n"
+        + onboarding_hint + ("\n\n" if onboarding_hint else "")
+        + "Be concise — Telegram users want short, direct answers. "
         "Reference live market data and knowledge base context when provided. "
         "Use session context to remember what was discussed earlier. "
         "Return plain text (no JSON). Keep replies under 300 words.\n\n"

@@ -8,17 +8,22 @@
 - Outcome resolution layer — bot checks if signals resolved WIN/LOSS every 2h
 - Paper trading system — users tap 📈 YES / 📉 NO on alerts, P&L tracked automatically
 - `/performance` shows EDGE actual win rate + user paper P&L + ROI
+- `/mytrades` — active paper picks + settled history + P&L per pick
+- Per-user long-term memory — favorite teams, rivals, players, family, city/timezone
+- New-user onboarding — AI naturally collects profile info across first few conversations
+- Personalized injury alerts — concern for fav players, rivalry-aware tone
 
-### 🔲 Next: Active Trades View
-Users need a way to see their currently open paper trades at any time.
+### 🔲 Up Next
 
-**Telegram command: `/mytrades`**
-- Shows all of the user's open (PENDING) paper picks
-- Each row: market question truncated, side picked, entry prob, implied payout if wins
-- Resolved picks collapsed into a summary line (X wins / Y losses / $Z P&L)
+**Player Return Game Announcement**
+- When a player transitions from Out/Doubtful → Active in the injury cache, flag as "return"
+- If any user has that player as a favorite, send a personalized return alert
+  *"🎉 Steph Curry is back tonight vs the Lakers — Warriors win prob up +8pp. Market: 64% → see /scan"*
+- Tone: excitement for the user's fav player, factual for all others
+- Also surfaces on the Polymarket market for that game if one exists
 
 **Discord: `/mytrades` slash command**
-- Same data, Discord embed format
+- Same data as Telegram, Discord embed format
 - Color coded: green = winning direction at current price, red = losing
 
 **Dashboard tab: "My Trades"**
