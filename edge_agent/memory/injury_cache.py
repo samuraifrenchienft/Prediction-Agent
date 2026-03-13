@@ -80,10 +80,18 @@ def _init_db(conn: sqlite3.Connection) -> None:
             position    TEXT NOT NULL DEFAULT '',
             old_status  TEXT NOT NULL,
             new_status  TEXT NOT NULL,
+            direction   TEXT NOT NULL DEFAULT 'worsening',
             created_at  REAL NOT NULL,
             sent        INTEGER NOT NULL DEFAULT 0
         )
     """)
+    # Migrate existing DBs that predate the direction column
+    try:
+        conn.execute(
+            "ALTER TABLE injury_change_alerts ADD COLUMN direction TEXT NOT NULL DEFAULT 'worsening'"
+        )
+    except Exception:
+        pass  # column already exists
     conn.commit()
 
 
@@ -242,11 +250,15 @@ class InjuryCache:
 
     # ── Change detection alerts ───────────────────────────────────────────────
 
-    def store_change_alerts(self, alerts: list[dict[str, Any]]) -> None:
+    def store_change_alerts(
+        self, alerts: list[dict[str, Any]], direction: str = "worsening"
+    ) -> None:
         """
-        Persist status-worsening alerts for proactive Telegram notification.
-        Called by fetch_and_store() in injury_api.py when a player's status
-        upgrades to a more severe category (e.g. Questionable → Out).
+        Persist status-change alerts for proactive Telegram notification.
+
+        direction: 'worsening' (e.g. Questionable → Out) or
+                   'return'    (e.g. Out → Questionable, or player cleared)
+        Called by fetch_and_store() in injury_api.py.
         """
         if not alerts:
             return
@@ -257,8 +269,8 @@ class InjuryCache:
                     """
                     INSERT INTO injury_change_alerts
                         (sport, player_name, team, position,
-                         old_status, new_status, created_at)
-                    VALUES (?, ?, ?, ?, ?, ?, ?)
+                         old_status, new_status, direction, created_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         a.get("sport", "").lower(),
@@ -267,25 +279,43 @@ class InjuryCache:
                         a.get("position", ""),
                         a.get("old_status", ""),
                         a.get("new_status", ""),
+                        a.get("direction", direction),
                         now,
                     ),
                 )
-        log.info("[InjuryCache] Stored %d change alert(s)", len(alerts))
+        log.info("[InjuryCache] Stored %d %s alert(s)", len(alerts), direction)
 
-    def get_pending_change_alerts(self) -> list[dict[str, Any]]:
+    def get_pending_change_alerts(
+        self, direction: str | None = None
+    ) -> list[dict[str, Any]]:
         """
         Return all unsent change alerts and mark them as sent in one transaction.
+
+        direction: if given, filter to 'worsening' or 'return' only.
+                   If None (default), returns ALL pending alerts (both directions).
         Called by injury_refresh_job() to dispatch proactive Telegram messages.
         """
-        rows = self._conn.execute(
-            """
-            SELECT id, sport, player_name, team, position,
-                   old_status, new_status, created_at
-            FROM   injury_change_alerts
-            WHERE  sent = 0
-            ORDER  BY created_at
-            """
-        ).fetchall()
+        if direction:
+            rows = self._conn.execute(
+                """
+                SELECT id, sport, player_name, team, position,
+                       old_status, new_status, direction, created_at
+                FROM   injury_change_alerts
+                WHERE  sent = 0 AND direction = ?
+                ORDER  BY created_at
+                """,
+                (direction,),
+            ).fetchall()
+        else:
+            rows = self._conn.execute(
+                """
+                SELECT id, sport, player_name, team, position,
+                       old_status, new_status, direction, created_at
+                FROM   injury_change_alerts
+                WHERE  sent = 0
+                ORDER  BY created_at
+                """
+            ).fetchall()
 
         if not rows:
             return []

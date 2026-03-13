@@ -2110,39 +2110,97 @@ async def injury_refresh_job(ctx: ContextTypes.DEFAULT_TYPE) -> None:
     try:
         from edge_agent.memory.injury_cache import InjuryCache
         cache = InjuryCache()
-        pending = cache.get_pending_change_alerts()
+        pending = cache.get_pending_change_alerts()  # all directions
 
         for alert in pending:
-            player   = alert.get("player_name", "")
-            team     = alert.get("team", "")
-            pos      = alert.get("position", "")
-            old_s    = alert.get("old_status", "")
-            new_s    = alert.get("new_status", "")
-            sport    = alert.get("sport", "").upper()
+            player    = alert.get("player_name", "")
+            team      = alert.get("team", "")
+            pos       = alert.get("position", "")
+            old_s     = alert.get("old_status", "")
+            new_s     = alert.get("new_status", "")
+            sport     = alert.get("sport", "").upper()
+            direction = alert.get("direction", "worsening")
 
-            old_em = _SEVERITY_EMOJI.get(old_s, "⚪")
-            new_em = _SEVERITY_EMOJI.get(new_s, "🔴")
-            pos_str = f" ({_e(pos)})" if pos else ""
+            pos_str     = f" ({_e(pos)})" if pos else ""
             sport_emoji = "🏀" if sport == "NBA" else ("🏒" if sport == "NHL" else "🏈")
 
-            msg = (
-                f"🚨 <b>INJURY STATUS WORSENED</b>\n\n"
-                f"{sport_emoji} <b>{_e(player)}</b>{pos_str}\n"
-                f"<i>{_e(team)}</i> [{sport}]\n\n"
-                f"{old_em} {_e(old_s)} → {new_em} <b>{_e(new_s)}</b>\n\n"
-                f"<i>This may affect win-probability markets. "
-                f"Run /scan for updated signals.</i>"
-            )
+            # ── Worsening alert (existing behavior) ───────────────────────────
+            if direction == "worsening":
+                old_em = _SEVERITY_EMOJI.get(old_s, "⚪")
+                new_em = _SEVERITY_EMOJI.get(new_s, "🔴")
+                msg = (
+                    f"🚨 <b>INJURY STATUS WORSENED</b>\n\n"
+                    f"{sport_emoji} <b>{_e(player)}</b>{pos_str}\n"
+                    f"<i>{_e(team)}</i> [{sport}]\n\n"
+                    f"{old_em} {_e(old_s)} → {new_em} <b>{_e(new_s)}</b>\n\n"
+                    f"<i>This may affect win-probability markets. "
+                    f"Run /scan for updated signals.</i>"
+                )
+                await ctx.bot.send_message(
+                    chat_id=CHAT_ID, text=msg, parse_mode=ParseMode.HTML,
+                )
+                log.info("Proactive injury alert sent: %s %s → %s", player, old_s, new_s)
 
-            await ctx.bot.send_message(
-                chat_id=CHAT_ID,
-                text=msg,
-                parse_mode=ParseMode.HTML,
-            )
-            log.info(
-                "Proactive injury alert sent: %s %s → %s",
-                player, old_s, new_s,
-            )
+            # ── Return / clearance alert ───────────────────────────────────────
+            elif direction == "return":
+                if new_s == "Active":
+                    status_line = f"🟢 <b>Cleared — off injury report</b> (was {_e(old_s)})"
+                    headline    = "🔓 <b>PLAYER CLEARED FOR RETURN</b>"
+                else:
+                    old_em = _SEVERITY_EMOJI.get(old_s, "⚪")
+                    status_line = f"{old_em} {_e(old_s)} → 🟡 <b>{_e(new_s)}</b>"
+                    headline    = "📈 <b>INJURY STATUS IMPROVING</b>"
+
+                # Broadcast to the main channel
+                channel_msg = (
+                    f"{headline}\n\n"
+                    f"{sport_emoji} <b>{_e(player)}</b>{pos_str}\n"
+                    f"<i>{_e(team)}</i> [{sport}]\n\n"
+                    f"{status_line}\n\n"
+                    f"<i>Market odds may not have adjusted yet — "
+                    f"run /scan for updated win-probability signals.</i>"
+                )
+                await ctx.bot.send_message(
+                    chat_id=CHAT_ID, text=channel_msg, parse_mode=ParseMode.HTML,
+                )
+
+                # ── Personalized DMs to fans of this player / team ────────────
+                try:
+                    fan_ids: set[int] = set(
+                        _profiles.get_users_for_player(player)
+                    ) | set(
+                        _profiles.get_users_for_team(team)
+                    )
+                    for fan_id in fan_ids:
+                        tone = _profiles.get_alert_tone(
+                            fan_id, player_name=player, team_name=team, event="return"
+                        )
+                        if not tone:
+                            continue  # shouldn't happen, but guard anyway
+                        dm = (
+                            f"{headline}\n\n"
+                            f"{sport_emoji} <b>{_e(player)}</b>{pos_str} "
+                            f"— <i>{_e(team)}</i>\n\n"
+                            f"{status_line}\n\n"
+                            f"🎯 <i>This player is on your watchlist. "
+                            f"EDGE will scan for market opportunities "
+                            f"on their next game automatically.</i>"
+                        )
+                        try:
+                            await ctx.bot.send_message(
+                                chat_id=fan_id, text=dm, parse_mode=ParseMode.HTML,
+                            )
+                            log.info(
+                                "Personalized return alert → user %d for %s", fan_id, player,
+                            )
+                        except Exception as dm_exc:
+                            log.warning(
+                                "Could not send return DM to user %d: %s", fan_id, dm_exc,
+                            )
+                except Exception as fan_exc:
+                    log.warning("Fan lookup failed for return alert (%s): %s", player, fan_exc)
+
+                log.info("Return alert sent: %s %s → %s", player, old_s, new_s)
 
     except Exception as exc:
         log.warning("Could not dispatch proactive injury alerts: %s", exc)

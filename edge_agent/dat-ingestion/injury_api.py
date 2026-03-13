@@ -779,16 +779,29 @@ class InjuryAPIClient:
         db = self._get_db()
 
         # ── Change detection ──────────────────────────────────────────────────
+        # Statuses that represent a significant absence (return from these = news)
+        _SERIOUS_STATUSES = {"Out", "Injured Reserve", "Doubtful"}
+
         change_alerts: list[dict] = []
+        return_alerts: list[dict] = []
+
         if db is not None and records:
             prev_records = db.get(sport)
             if prev_records:
                 prev_statuses: dict[str, str] = {
                     r["player_name"]: r["status"] for r in prev_records
                 }
+                prev_teams: dict[str, str] = {
+                    r["player_name"]: r.get("team", "") for r in prev_records
+                }
+                prev_positions: dict[str, str] = {
+                    r["player_name"]: r.get("position", "") for r in prev_records
+                }
                 new_by_name: dict[str, dict] = {
                     r["player_name"]: r for r in records
                 }
+
+                # ── Worsening: status moved to a more severe index ────────────
                 for player, new_rec in new_by_name.items():
                     old_status = prev_statuses.get(player)
                     new_status = new_rec["status"]
@@ -804,6 +817,7 @@ class InjuryAPIClient:
                                     "position":    new_rec.get("position", ""),
                                     "old_status":  old_status,
                                     "new_status":  new_status,
+                                    "direction":   "worsening",
                                 })
                                 log.info(
                                     "[InjuryAPI] Status worsened: %s %s → %s",
@@ -812,13 +826,58 @@ class InjuryAPIClient:
                         except ValueError:
                             pass
 
+                # ── Return: previously serious player now improved or cleared ─
+                for player, old_status in prev_statuses.items():
+                    if old_status not in _SERIOUS_STATUSES:
+                        continue  # only watch previously serious statuses
+                    new_rec = new_by_name.get(player)
+                    if new_rec is None:
+                        # Player has disappeared from injury report = cleared/active
+                        return_alerts.append({
+                            "sport":       sport,
+                            "player_name": player,
+                            "team":        prev_teams.get(player, ""),
+                            "position":    prev_positions.get(player, ""),
+                            "old_status":  old_status,
+                            "new_status":  "Active",
+                            "direction":   "return",
+                        })
+                        log.info(
+                            "[InjuryAPI] Player cleared (off injury report): %s was %s",
+                            player, old_status,
+                        )
+                    else:
+                        new_status = new_rec["status"]
+                        if new_status != old_status:
+                            try:
+                                old_idx = _SEVERITY_ORDER.index(old_status)
+                                new_idx = _SEVERITY_ORDER.index(new_status)
+                                if new_idx > old_idx:  # higher index = less severe
+                                    return_alerts.append({
+                                        "sport":       sport,
+                                        "player_name": player,
+                                        "team":        new_rec.get("team", ""),
+                                        "position":    new_rec.get("position", ""),
+                                        "old_status":  old_status,
+                                        "new_status":  new_status,
+                                        "direction":   "return",
+                                    })
+                                    log.info(
+                                        "[InjuryAPI] Status improved: %s %s → %s",
+                                        player, old_status, new_status,
+                                    )
+                            except ValueError:
+                                pass
+
         if db is not None:
             # Tag each record with its sport so cross-sport filtering is possible downstream
             for _r in records:
                 _r["sport"] = sport
             db.store(sport, records)
             if change_alerts:
-                db.store_change_alerts(change_alerts)
+                db.store_change_alerts(change_alerts, direction="worsening")
+            if return_alerts:
+                db.store_change_alerts(return_alerts, direction="return")
         else:
             log.warning("[InjuryAPI] DB unavailable — using hot cache only")
 

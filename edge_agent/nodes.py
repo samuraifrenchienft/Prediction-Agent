@@ -192,7 +192,10 @@ def probability_node(snapshot: MarketSnapshot, catalysts: list[Catalyst]) -> Pro
 
 def edge_ev_node(snapshot: MarketSnapshot, p_true: float) -> EvOutput:
     edge = p_true - snapshot.market_prob
-    ev_gross = edge
+    # Use abs(edge) for ev_gross so that NO bets (edge < 0) are evaluated correctly.
+    # A negative edge means we believe the market is over-priced → we BUY_NO.
+    # The gross EV of the bet is the magnitude of our disagreement with the market.
+    ev_gross = abs(edge)
 
     fees = _base_fee_for_venue(snapshot.venue)
     slippage_cost = min(0.025, snapshot.spread_bps / 10000)
