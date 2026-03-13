@@ -196,11 +196,8 @@ log = logging.getLogger("edge_bot")
 # ---------------------------------------------------------------------------
 
 BOT_TOKEN          = os.environ.get("TELEGRAM_BOT_TOKEN", "")
-CHAT_ID            = os.environ.get("TELEGRAM_CHAT_ID", "")          # legacy single-channel (still supported)
-OWNER_ID           = os.environ.get("TELEGRAM_OWNER_ID", "")         # your personal user ID (from @userinfobot)
-# Comma-separated user IDs allowed to use the bot, e.g. "123456,789012"
-# The owner is always implicitly included if TELEGRAM_OWNER_ID is set.
-_RAW_ALLOWED       = os.environ.get("ALLOWED_USER_IDS", "")
+CHAT_ID            = os.environ.get("TELEGRAM_CHAT_ID", "")
+OWNER_ID           = os.environ.get("TELEGRAM_OWNER_ID", "")   # your personal user ID (from @userinfobot)
 SCAN_INTERVAL_MIN    = int(os.environ.get("SCAN_INTERVAL_MINUTES", "180"))  # default 3 hours
 INJURY_REFRESH_MIN   = int(os.environ.get("INJURY_REFRESH_MINUTES", "240"))  # default 4 hours
 BANKROLL_USD         = float(os.environ.get("BANKROLL_USD", "10000"))
@@ -301,28 +298,6 @@ _ot = _OutcomeTracker()
 # Long-term per-user profile store (facts, moments, trading prefs)
 from edge_agent.memory.user_profile import UserProfileStore as _UserProfileStore
 _profiles = _UserProfileStore()
-
-# Multi-channel registry — tracks which users are allowed + their private chat_ids
-from edge_agent.memory.channel_registry import ChannelRegistry as _ChannelRegistry
-_registry = _ChannelRegistry()
-
-# Seed the whitelist from env on startup:
-#   TELEGRAM_OWNER_ID  → always allowed
-#   ALLOWED_USER_IDS   → comma-separated additional user IDs
-def _seed_whitelist() -> None:
-    seeded = 0
-    for raw in [OWNER_ID] + [x.strip() for x in _RAW_ALLOWED.split(",") if x.strip()]:
-        try:
-            uid = int(raw)
-            if not _registry.is_allowed(uid):
-                _registry.add_user(uid, added_by=0)
-                seeded += 1
-        except (ValueError, TypeError):
-            pass
-    if seeded:
-        log.info("ChannelRegistry: seeded %d user(s) from env", seeded)
-
-_seed_whitelist()
 
 # Per-user SessionMemory instances — keyed by Telegram user_id
 # Initialized on first message from each user, reused within the process lifetime
@@ -498,34 +473,18 @@ def _fmt_game(g: TrackedGame) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Broadcast helper — fans out to every registered user's private chat
+# Broadcast helper — sends to the single dev/testing channel
 # ---------------------------------------------------------------------------
 
 async def _broadcast(bot, text: str, **kwargs) -> None:
-    """
-    Send a message to every registered user's private chat.
-
-    Falls back to the legacy TELEGRAM_CHAT_ID group if no users are
-    registered yet (useful during initial setup).
-    """
-    chat_ids = _registry.get_all_chat_ids()
-
-    # Legacy fallback: if nobody has registered via /start yet, use CHAT_ID
-    if not chat_ids and CHAT_ID:
-        try:
-            chat_ids = [int(CHAT_ID)]
-        except (ValueError, TypeError):
-            pass
-
-    sent = 0
-    for cid in chat_ids:
-        try:
-            await bot.send_message(chat_id=cid, text=text, **kwargs)
-            sent += 1
-        except Exception as exc:
-            log.warning("_broadcast: failed to send to chat_id=%d — %s", cid, exc)
-    if sent == 0:
-        log.warning("_broadcast: no recipients — register users with /adduser or /start")
+    """Send a message to the configured Telegram dev channel."""
+    if not CHAT_ID:
+        log.warning("_broadcast: TELEGRAM_CHAT_ID not set")
+        return
+    try:
+        await bot.send_message(chat_id=CHAT_ID, text=text, **kwargs)
+    except Exception as exc:
+        log.warning("_broadcast: send failed — %s", exc)
 
 
 # ---------------------------------------------------------------------------
@@ -681,110 +640,10 @@ async def _run_scan(bot, notify: bool = True) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Admin channel management commands (owner only)
-# ---------------------------------------------------------------------------
-
-async def cmd_adduser(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
-    """
-    /adduser <user_id> [username]
-    Add a user to the whitelist so they can DM the bot.
-    They still need to send /start to register their chat_id for broadcasts.
-    """
-    parts = (update.message.text or "").split()
-    if len(parts) < 2:
-        await update.message.reply_text(
-            "Usage: /adduser <user_id> [username]\n"
-            "Get user_id by asking them to message @userinfobot"
-        )
-        return
-    try:
-        new_uid  = int(parts[1])
-        username = parts[2].lstrip("@") if len(parts) > 2 else ""
-    except ValueError:
-        await update.message.reply_text("❌ user_id must be a number")
-        return
-
-    added = _registry.add_user(
-        new_uid,
-        username=username,
-        added_by=update.effective_user.id if update.effective_user else 0,
-    )
-    label = f"@{username}" if username else str(new_uid)
-    if added:
-        await update.message.reply_text(
-            f"✅ Added {label} (user_id: {new_uid}) to the whitelist.\n"
-            f"Tell them to open a DM with this bot and send /start to activate their channel."
-        )
-    else:
-        await update.message.reply_text(f"ℹ️ {label} is already in the whitelist.")
-
-
-async def cmd_removeuser(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
-    """
-    /removeuser <user_id>
-    Remove a user from the whitelist and unregister their channel.
-    """
-    parts = (update.message.text or "").split()
-    if len(parts) < 2:
-        await update.message.reply_text("Usage: /removeuser <user_id>")
-        return
-    try:
-        uid = int(parts[1])
-    except ValueError:
-        await update.message.reply_text("❌ user_id must be a number")
-        return
-
-    _registry.remove_user(uid)
-    await update.message.reply_text(
-        f"🗑 Removed user_id {uid} from whitelist and unregistered their channel.\n"
-        f"They will no longer receive broadcasts or be able to use the bot."
-    )
-
-
-async def cmd_listusers(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
-    """
-    /listusers
-    Show all whitelisted users and their registration status.
-    """
-    allowed  = _registry.list_allowed()
-    registered = {u["user_id"]: u for u in _registry.get_registered_users()}
-
-    if not allowed:
-        await update.message.reply_text("No users in whitelist yet. Use /adduser to add someone.")
-        return
-
-    lines = ["<b>👥 EDGE User Roster</b>\n"]
-    for u in allowed:
-        uid  = u["user_id"]
-        name = f"@{u['username']}" if u.get("username") else str(uid)
-        reg  = registered.get(uid)
-        if reg:
-            last = (reg.get("last_seen") or "")[:10]
-            status = f"✅ registered · last seen {last}"
-        else:
-            status = "⏳ not started yet (needs to send /start)"
-        lines.append(f"• {name} ({uid}) — {status}")
-
-    await update.message.reply_text("\n".join(lines), parse_mode=ParseMode.HTML)
-
-
-# ---------------------------------------------------------------------------
 # Command handlers
 # ---------------------------------------------------------------------------
 
 async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
-    # ── Auto-register this user's private chat_id on every /start ──────────
-    user  = update.effective_user
-    if user:
-        _registry.register(
-            user_id    = user.id,
-            chat_id    = update.effective_chat.id,
-            username   = user.username or "",
-            first_name = user.first_name or "",
-        )
-        log.info("Registered chat for user %d (@%s) chat_id=%d",
-                 user.id, user.username or "?", update.effective_chat.id)
-
     approved_count = len(_approved_signals)
     filter_note = (
         f"🔒 Alerting on {approved_count} approved signal type(s)."
@@ -2636,10 +2495,10 @@ def main() -> None:
             "TELEGRAM_BOT_TOKEN not set in .env\n"
             "Create a bot at @BotFather and add the token to .env"
         )
-    if not CHAT_ID and not _RAW_ALLOWED and not OWNER_ID:
-        log.warning(
-            "No TELEGRAM_CHAT_ID, ALLOWED_USER_IDS, or TELEGRAM_OWNER_ID set in .env — "
-            "bot will respond to ALL users until a whitelist is configured."
+    if not CHAT_ID:
+        raise SystemExit(
+            "TELEGRAM_CHAT_ID not set in .env\n"
+            "See the setup instructions at the top of this file."
         )
 
     log.info(
@@ -2655,43 +2514,31 @@ def main() -> None:
     )
 
     # ---------------------------------------------------------------------------
-    # Access control — user-whitelist model (multi-channel):
-    #
-    #   Every user in the ALLOWED_USER_IDS env var (plus TELEGRAM_OWNER_ID) can
-    #   DM the bot directly and get their own private 1-on-1 channel.
-    #
-    #   The registry is seeded from env on startup and can be updated at runtime
-    #   via /adduser and /removeuser (owner only).
-    #
-    #   Legacy TELEGRAM_CHAT_ID group is still supported as a broadcast target
-    #   until users register via /start.
+    # Access control — single dev/testing channel (Telegram is internal only)
+    #   Layer 1: filters.Chat — only TELEGRAM_CHAT_ID group
+    #   Layer 2: filters.User — only TELEGRAM_OWNER_ID within that chat
     # ---------------------------------------------------------------------------
-    _allowed_ids = _registry.get_all_user_ids()
-    if _allowed_ids:
-        _auth_filter = filters.User(_allowed_ids)
-        log.info(
-            "Multi-channel auth: %d allowed user(s): %s",
-            len(_allowed_ids),
-            _allowed_ids,
-        )
-    else:
-        # No whitelist at all — fall back to legacy chat filter so the bot
-        # stays usable during initial setup
-        try:
-            _auth_filter = filters.Chat(int(CHAT_ID))
-            log.warning(
-                "No users in whitelist — falling back to legacy CHAT_ID filter. "
-                "Add ALLOWED_USER_IDS or TELEGRAM_OWNER_ID to .env."
-            )
-        except (ValueError, TypeError):
-            _auth_filter = filters.ALL
-            log.warning("No whitelist and no valid CHAT_ID — bot open to ALL users!")
-
-    # Owner-only filter for admin commands (/adduser, /removeuser)
     try:
-        _owner_filter = filters.User(int(OWNER_ID)) if OWNER_ID else _auth_filter
+        _chat_filter = filters.Chat(int(CHAT_ID))
+        log.info("Chat filter active: only responding to chat_id=%s", CHAT_ID)
     except (ValueError, TypeError):
-        _owner_filter = _auth_filter
+        _chat_filter = filters.ALL
+        log.warning("CHAT_ID=%r is not a valid integer — no chat filter applied", CHAT_ID)
+
+    try:
+        _user_filter = filters.User(int(OWNER_ID)) if OWNER_ID else filters.ALL
+        if OWNER_ID:
+            log.info("User filter active: only responding to user_id=%s", OWNER_ID)
+        else:
+            log.warning(
+                "TELEGRAM_OWNER_ID not set — bot will respond to ALL users in the chat. "
+                "Set TELEGRAM_OWNER_ID in .env to restrict to just your account."
+            )
+    except (ValueError, TypeError):
+        _user_filter = filters.ALL
+        log.warning("OWNER_ID=%r is not a valid integer — no user filter applied", OWNER_ID)
+
+    _auth_filter = _chat_filter & _user_filter
 
     # Command handlers
     app.add_handler(CommandHandler("start",     cmd_start,     filters=_auth_filter))
@@ -2708,10 +2555,6 @@ def main() -> None:
     app.add_handler(CommandHandler("status",      cmd_status,      filters=_auth_filter))
     app.add_handler(CommandHandler("approvals",   cmd_approvals,   filters=_auth_filter))
     app.add_handler(CommandHandler("standings",   cmd_standings,   filters=_auth_filter))
-    # Admin-only channel management
-    app.add_handler(CommandHandler("adduser",    cmd_adduser,    filters=_owner_filter))
-    app.add_handler(CommandHandler("removeuser", cmd_removeuser, filters=_owner_filter))
-    app.add_handler(CommandHandler("listusers",  cmd_listusers,  filters=_owner_filter))
 
     # Inline keyboard (callback queries are always scoped to the chat they came from)
     app.add_handler(CallbackQueryHandler(handle_callback))
