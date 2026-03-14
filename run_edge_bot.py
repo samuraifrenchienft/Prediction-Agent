@@ -307,6 +307,39 @@ _approved_signals: set[str] = _load_approved_signals()
 from edge_agent.memory.outcome_tracker import OutcomeTracker as _OutcomeTracker
 _ot = _OutcomeTracker()
 
+# ── ML overlay singletons ─────────────────────────────────────────────────────
+# All ML modules are lazy-loaded and fail-safe: if xgboost/sklearn are not
+# installed the system degrades gracefully to pure rule-based mode.
+from edge_agent.ml.ml_store            import MLStore            as _MLStore
+from edge_agent.ml.confidence_calibrator import ConfidenceCalibrator as _ConfidenceCalibrator
+from edge_agent.ml.signal_scorer       import SignalScorer        as _SignalScorer
+from edge_agent.ml.trader_features     import TraderFeatureExtractor as _TraderFeatureExtractor
+from edge_agent.ml.regime_detector     import RegimeDetector      as _RegimeDetector
+import edge_agent.nodes as _nodes_mod
+
+_ml_store    = _MLStore()
+_calibrator  = _ConfidenceCalibrator(_ml_store)
+_scorer      = _SignalScorer()
+_regime      = _RegimeDetector(_ml_store)
+
+# Load saved calibration + model from disk (no-ops if not yet trained)
+_calibrator.load()
+_scorer.load()
+_nodes_mod.set_calibrator(_calibrator)   # inject into probability_node
+
+# ── Decision log + Prompt registry ───────────────────────────────────────────
+# decision_log audits every AI call: model used, prompt version, latency, context blocks
+# prompt_registry provides versioned templates so we can trace why the AI said what it said
+from edge_agent.memory.decision_log  import DecisionLog   as _DecisionLog
+from edge_agent.prompt_registry      import get_registry   as _get_prompt_registry
+import edge_agent.ai_service as _ai_svc_mod
+
+_decision_log   = _DecisionLog()
+_prompt_registry = _get_prompt_registry()
+
+# Wire DecisionLog into ai_service so every call is automatically audited
+_ai_svc_mod.set_decision_log(_decision_log)
+
 # TraderCache singleton — shared connection across all commands to avoid
 # spawning a new DB connection on every /traders, /wallet, /watch invocation
 from edge_agent.memory.trader_cache import TraderCache as _TraderCache
@@ -644,6 +677,56 @@ async def _run_scan(bot, notify: bool = True) -> str:
                             entry_prob=_rec.market_prob or 0.5,
                             question=getattr(_rec, "question", None) or _rec.market_id,
                         )
+
+                        # ── ML Shadow Mode: log prediction features ────────────────
+                        # Runs in shadow mode — prediction is logged but NEVER affects
+                        # qualification state or alert delivery in Phase 1.
+                        try:
+                            _tf_extractor = _TraderFeatureExtractor(_get_trader_cache())
+                            _tf = _tf_extractor.get_features(
+                                _rec.market_id, signal_direction=_target_side
+                            )
+                            _raw_conf = getattr(_rec, "raw_confidence", _rec.confidence)
+                            _cat_str  = getattr(_rec, "catalyst_strength", 0.0)
+                            _xgb_prob  = None
+                            _cal_conf  = None
+                            if _regime.is_ml_safe:
+                                _xgb_prob = _scorer.predict({
+                                    "raw_confidence":   _raw_conf,
+                                    "ev_net":           _rec.ev_net,
+                                    "market_prob":      _rec.market_prob or 0.5,
+                                    "depth_usd":        getattr(_rec, "depth_usd", 0),
+                                    "spread_bps":       getattr(_rec, "spread_bps", 0),
+                                    "ttr_hours":        _rec.metadata.get("time_to_resolution_hours", 0),
+                                    "catalyst_strength": _cat_str,
+                                    "smart_money_score": _tf.get("smart_money_score", 0),
+                                    "n_hot_longs":      _tf.get("n_hot_longs", 0),
+                                    "n_hot_shorts":     _tf.get("n_hot_shorts", 0),
+                                    "signal_type":      _rec.metadata.get("signal", "UNKNOWN"),
+                                })
+                                _cal_conf = _calibrator.calibrate(_raw_conf) if _calibrator._active else None
+
+                            _ml_store.log_prediction(
+                                signal_id=_sig_id,
+                                market_id=_rec.market_id,
+                                venue=_rec.venue.value,
+                                signal_type=_rec.metadata.get("signal", "UNKNOWN"),
+                                raw_confidence=_raw_conf,
+                                ev_net=_rec.ev_net,
+                                market_prob=_rec.market_prob or 0.5,
+                                depth_usd=getattr(_rec, "depth_usd", 0),
+                                spread_bps=getattr(_rec, "spread_bps", 0),
+                                ttr_hours=_rec.metadata.get("time_to_resolution_hours", 0),
+                                catalyst_strength=_cat_str,
+                                smart_money_score=_tf.get("smart_money_score", 0),
+                                n_hot_longs=_tf.get("n_hot_longs", 0),
+                                n_hot_shorts=_tf.get("n_hot_shorts", 0),
+                                xgb_win_prob=_xgb_prob,
+                                calibrated_conf=_cal_conf,
+                            )
+                        except Exception as _ml_exc:
+                            log.debug("[ML shadow] logging failed: %s", _ml_exc)
+
         except Exception as _log_exc:
             log.debug("scan_log write failed: %s", _log_exc)
 
@@ -1128,8 +1211,75 @@ async def outcome_resolution_job(ctx: ContextTypes.DEFAULT_TYPE) -> None:
         )
         # Periodic 180-day cleanup of old resolved signals
         await loop.run_in_executor(None, lambda: _ot.cleanup(resolved_max_age_days=180))
+
+        # Propagate resolved outcomes → ML store shadow predictions
+        try:
+            _recent = _ot.recent_resolved(days=3, limit=200)
+            for _res in _recent:
+                _ml_store.update_prediction_outcome(
+                    signal_id=_res.get("signal_id", 0) or 0,
+                    outcome=_res.get("outcome", "VOID"),
+                )
+        except Exception as _ml_prop_exc:
+            log.debug("[ML] outcome propagation failed: %s", _ml_prop_exc)
+
     except Exception as exc:
         log.warning("Outcome resolution job failed: %s", exc)
+
+
+async def ml_calibration_job(ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    """
+    Weekly — retrain confidence calibrator and XGBoost shadow scorer on
+    the latest labeled outcome data.  Runs drift check after training.
+    Safe no-op if insufficient data (< 150 labeled signals).
+    """
+    log.info("[ml_calibration_job] Starting ML calibration refresh.")
+    try:
+        loop = asyncio.get_event_loop()
+
+        def _run_calibration():
+            labeled = _ml_store.get_labeled_features(min_samples=0, days=180)
+            n = len(labeled)
+            log.info("[ml_calibration_job] Found %d labeled signals.", n)
+
+            # 1. Retrain confidence calibrator
+            cal_ok = _calibrator.train(labeled)
+            if cal_ok:
+                _nodes_mod.set_calibrator(_calibrator)
+                log.info("[ml_calibration_job] Confidence calibrator updated.")
+
+            # 2. Retrain XGBoost scorer (Phase 2 threshold: 400 samples)
+            score_ok = _scorer.train(labeled)
+            if score_ok:
+                log.info("[ml_calibration_job] XGBoost scorer updated (phase=%d).", _scorer._phase)
+
+            # 3. Update regime detector baseline if training succeeded
+            if cal_ok or score_ok:
+                _regime.set_baseline(labeled)
+
+            # 4. Run drift check on recent 14-day window
+            recent = _ml_store.get_labeled_features(min_samples=0, days=14)
+            drifted = _regime.check(recent)
+            if drifted:
+                log.warning("[ml_calibration_job] Regime drift detected — ML overlay disabled.")
+
+            # 5. Cleanup old ML store rows
+            _ml_store.cleanup(max_age_days=180)
+
+            return {
+                "n_labeled": n,
+                "cal_ok": cal_ok,
+                "score_ok": score_ok,
+                "drifted": drifted,
+            }
+
+        result = await loop.run_in_executor(None, _run_calibration)
+        log.info(
+            "[ml_calibration_job] Complete — n=%d cal=%s xgb=%s drift=%s",
+            result["n_labeled"], result["cal_ok"], result["score_ok"], result["drifted"],
+        )
+    except Exception as exc:
+        log.warning("[ml_calibration_job] Failed: %s", exc)
 
 
 async def maintenance_job(ctx: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1189,7 +1339,14 @@ async def maintenance_job(ctx: ContextTypes.DEFAULT_TYPE) -> None:
         removed, errors,
     )
 
-    # ── 4. Prune in-memory alerted_keys (already time-keyed, just force prune) ─
+    # ── 4. Purge old decision log entries (>30 days) ──────────────────────
+    try:
+        deleted = _decision_log.cleanup(retain_days=30)
+        log.info("[maintenance_job] decision_log: %d old entries purged.", deleted)
+    except Exception as exc:
+        log.warning("[maintenance_job] decision_log cleanup failed: %s", exc)
+
+    # ── 5. Prune in-memory alerted_keys (already time-keyed, just force prune) ─
     _prune_alerted_keys()
 
     log.info("[maintenance_job] Weekly maintenance complete.")
@@ -2330,7 +2487,28 @@ async def handle_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None
         + injury_context
         + search_context
     )
-    reply = get_chat_response(prompt, task_type="creative", system_prompt=system_prompt) or "Sorry, I couldn't generate a response right now."
+
+    # Build context block list for decision_log (which blocks were non-empty)
+    _active_ctx_blocks: list[str] = []
+    if kb_context:            _active_ctx_blocks.append("knowledge_base")
+    if platform_doc_context:  _active_ctx_blocks.append("platform_docs")
+    if profile_context:       _active_ctx_blocks.append("user_profile")
+    if session_context:       _active_ctx_blocks.append("session_history")
+    if market_context:        _active_ctx_blocks.append("market_data")
+    if scan_context:          _active_ctx_blocks.append("scan_results")
+    if injury_context:        _active_ctx_blocks.append("injuries")
+    if search_context:        _active_ctx_blocks.append("web_search")
+
+    reply = get_chat_response(
+        prompt,
+        task_type       = "creative",
+        system_prompt   = system_prompt,
+        prompt_version  = "chat_system@2.3",
+        context_blocks  = _active_ctx_blocks,
+        correction_mode = _is_correction,
+        regime_safe     = _regime.is_ml_safe,
+        user_id         = str(update.effective_user.id),
+    ) or "Sorry, I couldn't generate a response right now."
 
     # Save to per-user session memory
     if reply:
@@ -2978,6 +3156,221 @@ async def cmd_standings(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
 
 
 # ---------------------------------------------------------------------------
+# /mlstatus — ML layer health, calibration state, regime, predictions
+# ---------------------------------------------------------------------------
+
+async def cmd_mlstatus(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    """
+    Show the current state of every ML component:
+      • Confidence Calibrator (Platt scaling logistic regression)
+      • XGBoost Signal Scorer (shadow mode → soft gate → full)
+      • Feature Regime Detector (drift monitor)
+      • Smart Money (trader feature extractor)
+      • Prediction counts (total / resolved / pending)
+      • Prompt Registry (all active prompt versions)
+    """
+    lines: list[str] = ["🤖 <b>ML &amp; AI System Status</b>\n"]
+
+    # ── 1. Confidence Calibrator ──────────────────────────────────────────
+    cal = _calibrator.status()
+    lines.append("<b>📐 Confidence Calibrator (Platt Scaling)</b>")
+    lines.append(f"  Status:   {'✅ Active' if cal['active'] else '⏳ Collecting data (passthrough)'}")
+    lines.append(f"  Samples:  {cal['n_samples']} / {cal['min_samples_needed']} needed")
+    if cal["active"]:
+        lines.append(f"  β₀={cal['intercept']}  β₁={cal['slope']}")
+        lines.append(f"  Brier score: {cal['brier_score']} (threshold 0.25)")
+        lines.append(f"  Trained: {cal['trained_at']}")
+    lines.append("")
+
+    # ── 2. XGBoost Signal Scorer ──────────────────────────────────────────
+    sc = _scorer.status()
+    phase_emoji = {1: "🔵", 2: "🟡", 3: "🟢"}.get(sc["phase"], "🔵")
+    lines.append("<b>🌲 XGBoost Signal Scorer</b>")
+    lines.append(f"  Phase: {phase_emoji} {sc['phase_label']} (Phase {sc['phase']}/3)")
+    lines.append(f"  Samples: {sc['n_samples']} / {sc['min_train_samples']} needed")
+    if sc["model_version"] != "untrained":
+        lines.append(f"  Model v{sc['model_version']}")
+        lines.append(f"  Val accuracy: {sc['val_accuracy']:.1%}  |  Logloss: {sc['val_logloss']}")
+        lines.append(f"  Trained: {sc['trained_at']}")
+        if sc.get("feature_importance"):
+            top3 = sorted(sc["feature_importance"].items(), key=lambda x: -x[1])[:3]
+            imp_str = "  |  ".join(f"{k}={v:.3f}" for k, v in top3)
+            lines.append(f"  Top features: {imp_str}")
+        lines.append(f"  Promote threshold: {sc['promote_threshold']:.0%}  |  Demote: {sc['demote_threshold']:.0%}")
+    lines.append("")
+
+    # ── 3. Regime Detector ────────────────────────────────────────────────
+    reg = _regime.status()
+    safe_emoji = "✅" if reg["ml_safe"] else "🔴"
+    lines.append("<b>📊 Feature Regime Detector</b>")
+    lines.append(f"  ML safe: {safe_emoji} {'Yes — no drift detected' if reg['ml_safe'] else 'NO — ML DISABLED (drift detected)'}")
+    if not reg["ml_safe"] and reg.get("drift_reasons"):
+        for r in reg["drift_reasons"]:
+            lines.append(f"  ⚠️ {r}")
+        lines.append(f"  Recovery: {reg['recovery_needed']}")
+    if reg.get("baseline"):
+        b = reg["baseline"]
+        lines.append(f"  Baseline: conf={b.get('confidence', 0):.3f}  ev={b.get('ev_net', 0):.4f}  prob={b.get('market_prob', 0):.3f}")
+    lines.append(f"  Last checked: {reg['last_checked']}")
+    lines.append(f"  Thresholds: conf±{reg['thresholds']['confidence']}  ev±{reg['thresholds']['ev_net']}  prob±{reg['thresholds']['market_prob']}")
+    lines.append("")
+
+    # ── 4. Prediction counts ──────────────────────────────────────────────
+    pred = _ml_store.prediction_counts()
+    total = pred.get("total") or 0
+    wins  = pred.get("wins")  or 0
+    losses= pred.get("losses") or 0
+    pend  = pred.get("pending") or 0
+    resolved = wins + losses
+    win_rate_str = f"{wins/resolved:.1%}" if resolved > 0 else "n/a"
+    lines.append("<b>🎯 Shadow Predictions (all-time)</b>")
+    lines.append(f"  Total: {total}  |  Resolved: {resolved}  |  Pending: {pend}")
+    lines.append(f"  Wins: {wins}  |  Losses: {losses}  |  Win rate: {win_rate_str}")
+    lines.append("")
+
+    # ── 5. Smart money ────────────────────────────────────────────────────
+    try:
+        tf = _TraderFeatureExtractor(_get_trader_cache())
+        lines.append("<b>💰 Smart Money</b>")
+        lines.append(f"  {tf.summary()}")
+        lines.append("")
+    except Exception:
+        pass
+
+    # ── 6. Decision Log ───────────────────────────────────────────────────
+    try:
+        dec_summary = _decision_log.summary(days=7)
+        lines.append("<b>📋 AI Decision Log (last 7 days)</b>")
+        lines.append(f"  Total calls: {dec_summary['total_calls']}")
+        lines.append(f"  Avg latency: {dec_summary['avg_latency_ms']}ms")
+        lines.append(f"  Correction rate: {dec_summary['correction_rate']} ({dec_summary['correction_calls']} calls)")
+        lines.append(f"  User corrections: {dec_summary['user_corrections']}")
+        model_stats = _decision_log.model_stats(days=7)
+        if model_stats:
+            lines.append("  Top models:")
+            for ms in model_stats[:3]:
+                lines.append(
+                    f"    • {ms['model_used'].split('/')[-1]}: "
+                    f"{ms['calls']} calls  {int(ms['avg_latency_ms'] or 0)}ms avg"
+                )
+        lines.append("")
+    except Exception:
+        pass
+
+    # ── 7. Prompt Registry ────────────────────────────────────────────────
+    try:
+        prompts = _prompt_registry.list_prompts()
+        lines.append("<b>📝 Prompt Registry</b>")
+        for p in prompts:
+            lines.append(f"  • <code>{p['version_id']}</code>  ~{p['tokens_est']} tokens  [{p['hash']}]")
+        lines.append("")
+    except Exception:
+        pass
+
+    text = "\n".join(lines)
+    if len(text) > 4000:
+        text = text[:4000] + "\n\n(truncated)"
+    await update.message.reply_text(text, parse_mode=ParseMode.HTML)
+
+
+# ---------------------------------------------------------------------------
+# /decisions — last N AI decisions with model, prompt version, context blocks
+# ---------------------------------------------------------------------------
+
+async def cmd_decisions(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    """
+    Show the last 10 AI decisions so you can debug why the bot said what it said.
+
+    Each row shows:
+      • Timestamp + model that answered
+      • Prompt version used
+      • Which context blocks were active (market data? injuries? scan?)
+      • Latency
+      • Whether correction mode was on
+      • Whether the response was later corrected by the user
+
+    Usage:
+      /decisions          — last 10 decisions across all users
+      /decisions chat     — filter to chat-type calls only
+      /decisions me       — only my own decisions (your user_id)
+    """
+    args = ctx.args or []
+    call_type_filter = None
+    user_filter = None
+
+    for arg in args:
+        if arg.lower() == "chat":
+            call_type_filter = "chat"
+        elif arg.lower() == "structured":
+            call_type_filter = "structured"
+        elif arg.lower() == "me":
+            user_filter = str(update.effective_user.id)
+
+    try:
+        decisions = _decision_log.get_recent(
+            limit=10,
+            user_id=user_filter,
+            call_type=call_type_filter,
+        )
+    except Exception as exc:
+        await update.message.reply_text(f"❌ Decision log unavailable: {exc}")
+        return
+
+    if not decisions:
+        await update.message.reply_text(
+            "📋 No AI decisions logged yet.\n"
+            "Decisions are recorded after each chat message or catalyst score call."
+        )
+        return
+
+    lines = ["📋 <b>Recent AI Decisions</b>\n"]
+
+    for i, d in enumerate(decisions, 1):
+        ctx_blocks = d.get("context_blocks") or []
+        ctx_str = ", ".join(ctx_blocks) if ctx_blocks else "none"
+
+        # Correction / outcome indicators
+        flags = []
+        if d.get("correction_mode"):
+            flags.append("🔄 correction")
+        if not d.get("regime_safe", 1):
+            flags.append("⚠️ drift")
+        if d.get("outcome") == "corrected_by_user":
+            flags.append("❌ user corrected")
+        flag_str = "  " + " | ".join(flags) if flags else ""
+
+        model_short = (d.get("model_used") or "unknown").split("/")[-1].replace(":free", "")
+
+        lines.append(
+            f"<b>{i}. {d['ts_str']}</b>{flag_str}\n"
+            f"  Model: <code>{model_short}</code>  |  {d.get('latency_ms', 0)}ms\n"
+            f"  Prompt: <code>{d.get('prompt_version', 'unknown')}</code>\n"
+            f"  Context: {ctx_str}\n"
+            f"  Type: {d.get('call_type', '?')}"
+        )
+        if d.get("response_snippet"):
+            snip = d["response_snippet"][:120].replace("\n", " ")
+            lines.append(f"  Reply: <i>{snip}…</i>")
+        lines.append("")
+
+    # Summary stats at the bottom
+    try:
+        s = _decision_log.summary(days=7)
+        lines.append(
+            f"<i>7-day: {s['total_calls']} calls  |  "
+            f"avg {s['avg_latency_ms']}ms  |  "
+            f"correction rate {s['correction_rate']}</i>"
+        )
+    except Exception:
+        pass
+
+    text = "\n".join(lines)
+    if len(text) > 4000:
+        text = text[:4000] + "\n\n(truncated)"
+    await update.message.reply_text(text, parse_mode=ParseMode.HTML)
+
+
+# ---------------------------------------------------------------------------
 # Background scan job
 # ---------------------------------------------------------------------------
 
@@ -3063,6 +3456,8 @@ def main() -> None:
     app.add_handler(CommandHandler("status",      cmd_status,      filters=_auth_filter))
     app.add_handler(CommandHandler("approvals",   cmd_approvals,   filters=_auth_filter))
     app.add_handler(CommandHandler("standings",   cmd_standings,   filters=_auth_filter))
+    app.add_handler(CommandHandler("mlstatus",    cmd_mlstatus,    filters=_auth_filter))
+    app.add_handler(CommandHandler("decisions",   cmd_decisions,   filters=_auth_filter))
 
     # Inline keyboard (callback queries are always scoped to the chat they came from)
     app.add_handler(CallbackQueryHandler(handle_callback))
@@ -3114,6 +3509,17 @@ def main() -> None:
         time=dt_time(3, 0, tzinfo=_PACIFIC),
         days=(6,),  # Sunday only (0=Mon … 6=Sun)
     )
+
+    # ML calibration refresh — retrain confidence calibrator + XGBoost scorer weekly
+    # Runs every Saturday at 2:00 AM PT (day before maintenance VACUUM)
+    # No-op if < 150 labeled signals (safe passthrough maintained)
+    app.job_queue.run_daily(
+        ml_calibration_job,
+        time=dt_time(2, 0, tzinfo=_PACIFIC),
+        days=(5,),  # Saturday only
+    )
+    # Also run 15 min after boot to pick up any models saved before restart
+    app.job_queue.run_once(ml_calibration_job, when=900)
 
     # Background market scan loop — reads from injury cache, no live injury API calls
     app.job_queue.run_repeating(

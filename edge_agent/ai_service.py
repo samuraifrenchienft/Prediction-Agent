@@ -10,12 +10,19 @@ Model priority (tried in order per task type):
 API keys in .env:
   OPEN_ROUTER_API_KEY = sk-or-...
   GROQ_API_KEY        = gsk_...
+
+Decision logging:
+  Every successful AI call is written to decision_log.db so you can
+  always answer: which model answered, how long it took, what prompt
+  version was used, and what context blocks were active.
+  Inject the log via set_decision_log() at startup.
 """
 from __future__ import annotations
 
 import json
 import logging
 import os
+import time
 
 from dotenv import find_dotenv, load_dotenv
 from openai import OpenAI, APIStatusError, APIConnectionError
@@ -26,6 +33,19 @@ from .models import AIAnalysis  # noqa: F401 — re-exported for other modules
 load_dotenv(find_dotenv(usecwd=True) or find_dotenv())
 
 log = logging.getLogger(__name__)
+
+# ---------------------------------------------------------------------------
+# Optional decision log — injected at startup by run_edge_bot.py
+# When set, every successful AI call is written to decision_log.db
+# ---------------------------------------------------------------------------
+_decision_log = None   # type: ignore[assignment]  # DecisionLog | None
+
+
+def set_decision_log(dlog: object) -> None:
+    """Inject the DecisionLog instance. Call once at startup."""
+    global _decision_log
+    _decision_log = dlog
+    log.info("[AI] DecisionLog wired — all AI calls will be audited.")
 
 # ---------------------------------------------------------------------------
 # Free model rotation lists — tried left-to-right until one succeeds.
@@ -125,6 +145,9 @@ def get_ai_response(
     prompt: str,
     task_type: str = "simple",
     system_prompt: str | None = None,
+    prompt_version: str = "unknown",
+    context_blocks: list[str] | None = None,
+    user_id: str = "",
 ) -> dict | None:
     """
     Structured JSON response — rotates through free models until one succeeds.
@@ -132,6 +155,11 @@ def get_ai_response(
     Use this for catalyst scoring and structured data extraction.
     Forces json_object response format so the result is always parseable.
     Returns None if all models fail.
+
+    Args:
+        prompt_version: the PromptRegistry version_id used (e.g. "catalyst_score@1.1")
+        context_blocks: list of active context block names (for decision_log)
+        user_id:        Telegram user_id string (for decision_log filtering)
     """
     messages: list[dict] = []
     if system_prompt:
@@ -140,6 +168,7 @@ def get_ai_response(
 
     candidates = _get_candidates(task_type)
     for client, model in candidates:
+        t0 = time.monotonic()
         try:
             response = client.chat.completions.create(
                 model=model,
@@ -147,7 +176,26 @@ def get_ai_response(
                 response_format={"type": "json_object"},
             )
             result = json.loads(response.choices[0].message.content)
-            log.debug("[AI] get_ai_response ✓ model=%s", model)
+            latency_ms = int((time.monotonic() - t0) * 1000)
+            log.debug("[AI] get_ai_response ✓ model=%s latency=%dms", model, latency_ms)
+
+            # Audit log — fire-and-forget, never raises
+            if _decision_log is not None:
+                try:
+                    _decision_log.log(
+                        call_type       = "structured",
+                        model_used      = model,
+                        prompt_version  = prompt_version,
+                        context_blocks  = context_blocks or [],
+                        system_prompt   = system_prompt or "",
+                        response        = json.dumps(result)[:500],
+                        latency_ms      = latency_ms,
+                        tokens_estimate = len((system_prompt or "") + prompt) // 4,
+                        user_id         = user_id,
+                    )
+                except Exception:
+                    pass
+
             return result
 
         except APIStatusError as exc:
@@ -176,6 +224,11 @@ def get_chat_response(
     prompt: str,
     task_type: str = "creative",
     system_prompt: str | None = None,
+    prompt_version: str = "unknown",
+    context_blocks: list[str] | None = None,
+    correction_mode: bool = False,
+    regime_safe: bool = True,
+    user_id: str = "",
 ) -> str | None:
     """
     Plain-text response — rotates through free models until one succeeds.
@@ -183,6 +236,13 @@ def get_chat_response(
     Use this for freeform Telegram chat replies.
     Does NOT enforce json_object format so the model can reply naturally.
     Returns None if all models fail.
+
+    Args:
+        prompt_version:  the PromptRegistry version_id used (e.g. "chat_system@2.3")
+        context_blocks:  list of active context block names (for decision_log)
+        correction_mode: True when user told us our previous answer was wrong
+        regime_safe:     False when feature drift was detected (ML disabled)
+        user_id:         Telegram user_id string (for decision_log filtering)
     """
     messages: list[dict] = []
     if system_prompt:
@@ -191,6 +251,7 @@ def get_chat_response(
 
     candidates = _get_candidates(task_type)
     for client, model in candidates:
+        t0 = time.monotonic()
         try:
             response = client.chat.completions.create(
                 model=model,
@@ -198,7 +259,28 @@ def get_chat_response(
                 # No response_format constraint — plain text allowed
             )
             result = response.choices[0].message.content
-            log.debug("[AI] get_chat_response ✓ model=%s", model)
+            latency_ms = int((time.monotonic() - t0) * 1000)
+            log.debug("[AI] get_chat_response ✓ model=%s latency=%dms", model, latency_ms)
+
+            # Audit log — fire-and-forget, never raises
+            if _decision_log is not None:
+                try:
+                    _decision_log.log(
+                        call_type       = "chat",
+                        model_used      = model,
+                        prompt_version  = prompt_version,
+                        context_blocks  = context_blocks or [],
+                        system_prompt   = system_prompt or "",
+                        response        = (result or "")[:500],
+                        latency_ms      = latency_ms,
+                        tokens_estimate = len((system_prompt or "") + prompt) // 4,
+                        correction_mode = correction_mode,
+                        regime_safe     = regime_safe,
+                        user_id         = user_id,
+                    )
+                except Exception:
+                    pass
+
             return result
 
         except APIStatusError as exc:

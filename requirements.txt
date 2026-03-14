@@ -1,0 +1,30 @@
+# EDGE Prediction Market Bot — Python Dependencies
+# =================================================
+# Install with: pip install -r requirements.txt
+
+# ── Telegram bot framework ──────────────────────────────────────────────────
+python-telegram-bot[job-queue]>=21.0
+
+# ── AI / LLM clients (OpenRouter, Groq, DeepSeek — all OpenAI-compatible) ──
+openai>=1.30.0
+
+# ── ML layer (confidence calibrator + XGBoost signal scorer) ────────────────
+scikit-learn>=1.4.0
+xgboost>=2.0.0
+
+# ── Data ingestion & HTTP ────────────────────────────────────────────────────
+requests>=2.31.0
+httpx>=0.27.0
+
+# ── Environment / config ────────────────────────────────────────────────────
+python-dotenv>=1.0.0
+
+# ── Date / time handling ────────────────────────────────────────────────────
+python-dateutil>=2.9.0
+
+# ── Async support ────────────────────────────────────────────────────────────
+aiohttp>=3.9.0
+
+# ── Utilities ────────────────────────────────────────────────────────────────
+# sqlite3 is in stdlib — no pip install needed
+# json, hashlib, pathlib, dataclasses — all stdlib
