@@ -248,24 +248,32 @@ class TraderAPIClient:
             log.warning("Leaderboard fetch failed: %s", exc)
             return []
 
-    def fetch_wallet_trades(self, address: str, limit: int = 200) -> list[dict]:
+    def fetch_wallet_trades(self, address: str, limit: int = 500) -> list[dict]:
         """
         Fetches wallet activity from /v1/activity (NOT /v1/trades).
         /v1/activity includes usdcSize (USD amount) vs /v1/trades which only
         has size in shares — critical for accurate volume and position-size scoring.
+        Fetches up to 2 pages (1000 records) to capture both BUYs and REDEEMs
+        needed for accurate win-rate calculation from cash flows.
         """
+        all_records: list[dict] = []
         try:
-            r = _SESS.get(
-                f"{_DATA_API}/v1/activity",
-                params={"user": address.lower(), "limit": limit},
-                timeout=12,
-            )
-            r.raise_for_status()
-            data = r.json()
-            return data if isinstance(data, list) else data.get("data", [])
+            for offset in (0, 500):
+                r = _SESS.get(
+                    f"{_DATA_API}/v1/activity",
+                    params={"user": address.lower(), "limit": limit, "offset": offset},
+                    timeout=15,
+                )
+                r.raise_for_status()
+                data = r.json()
+                page = data if isinstance(data, list) else data.get("data", [])
+                all_records.extend(page)
+                if len(page) < limit:
+                    break   # no more pages
+            return all_records
         except Exception as exc:
             log.debug("Activity fetch failed for %s: %s", address[:10], exc)
-            return []
+            return all_records  # return whatever we got before the error
 
     def fetch_wallet_positions(self, address: str) -> list[dict]:
         try:
@@ -490,12 +498,13 @@ class TraderAPIClient:
         """
         Compute performance stats for alltime / 30d / 7d windows.
 
-        Data source notes (Polymarket API reality):
-        - /v1/activity (trades) has: timestamp, price, usdcSize, side, outcome (name)
-          It does NOT have per-trade cashPnl/pnl or WIN/LOSS outcome.
-        - /v1/positions has: cashPnl, realizedPnl per settled position — used for win rate.
-        - Leaderboard profile has: pnl (alltime, authoritative), vol (alltime volume).
-          These are the ONLY reliable PnL source; we use them directly.
+        Data source reality (Polymarket public API):
+        - /v1/positions  → OPEN positions only. Settled positions are removed
+          once a market resolves, so this endpoint CANNOT be used for win rate.
+        - /v1/activity   → All TRADE (BUY/SELL) and REDEEM events.
+          Win rate is derived from per-market cash flows: total USD spent (BUYs)
+          vs. total USD received (SELLs + REDEEMs). Receipt > cost = win.
+        - Leaderboard profile → pnl, vol (authoritative, server-computed alltime).
         """
         profile   = profile or {}
         now_ts    = time.time()
@@ -503,97 +512,106 @@ class TraderAPIClient:
         day30     = now_ms - 30 * 86_400_000
         day7      = now_ms - 7  * 86_400_000
 
-        # ── Authoritative alltime stats from leaderboard profile ─────────────
-        # pnl and vol from the leaderboard are computed by Polymarket server-side
-        # and are always accurate — do not try to recompute from raw activity.
+        # ── Authoritative alltime stats from leaderboard ──────────────────────
         lb_pnl = float(profile.get("pnl", 0) or 0)
         lb_vol = float(profile.get("vol", profile.get("volume", 0)) or 0)
 
-        # ── Helpers for activity (trade log) ─────────────────────────────────
+        # ── Helpers ───────────────────────────────────────────────────────────
         def _ts(t: dict) -> float:
-            raw = t.get("timestamp") or t.get("createdAt") or 0
-            raw = float(raw)
+            raw = float(t.get("timestamp") or t.get("createdAt") or 0)
             return raw * 1000 if raw < 1e12 else raw   # normalise to ms
 
         def _size(t: dict) -> float:
-            """USD position size — usdcSize is present in /v1/activity."""
             return float(t.get("usdcSize", t.get("size", 0)) or 0)
 
         def _price(t: dict) -> float:
-            """Entry price of the trade (0.0–1.0)."""
             return float(
                 t.get("price", t.get("outcomePrice", t.get("avgPrice", 0.5))) or 0.5
             )
 
-        # ── Win rate from POSITIONS (only reliable source) ────────────────────
-        # Positions with redeemable=True or curPrice=0 are settled.
-        # cashPnl > 0 = win, < 0 = loss.
-        settled_pos = [
-            p for p in positions
-            if p.get("redeemable") or float(p.get("curPrice", 1) or 1) == 0
-        ]
-        pos_wins   = sum(1 for p in settled_pos if float(p.get("cashPnl", 0) or 0) > 0)
-        pos_losses = sum(1 for p in settled_pos if float(p.get("cashPnl", 0) or 0) < 0)
-        n_settled_pos = pos_wins + pos_losses
-        win_rate_from_pos = pos_wins / max(n_settled_pos, 1) if n_settled_pos > 0 else 0.0
+        # ── Win rate from activity cash flows (correct approach) ──────────────
+        # /v1/positions only shows OPEN positions — settled ones disappear when
+        # a market resolves.  Instead, reconstruct settled markets from activity:
+        #   BUY events  → money spent per market (conditionId)
+        #   SELL/REDEEM → money received per market
+        # A market where we received > we spent = WIN.
+        market_costs:    dict[str, float] = {}
+        market_receipts: dict[str, float] = {}
 
-        # Realized PnL from positions (secondary, leaderboard is primary)
-        pos_pnl = sum(float(p.get("cashPnl", p.get("realizedPnl", 0)) or 0)
-                      for p in settled_pos)
+        buy_trades: list[dict] = []
+        for t in trades:
+            cid   = t.get("conditionId", "")
+            ttype = t.get("type", "").upper()
+            side  = t.get("side", "").upper()
+            usd   = _size(t)
+
+            if ttype == "TRADE" and side == "BUY":
+                buy_trades.append(t)
+                if cid:
+                    market_costs[cid] = market_costs.get(cid, 0.0) + usd
+            elif ttype == "TRADE" and side == "SELL":
+                if cid:
+                    market_receipts[cid] = market_receipts.get(cid, 0.0) + usd
+            elif ttype == "REDEEM":
+                if cid:
+                    market_receipts[cid] = market_receipts.get(cid, 0.0) + usd
+
+        # Only count markets where we have both cost AND receipt data
+        settled_markets = {c for c in market_costs if c in market_receipts}
+        wins_act   = sum(1 for c in settled_markets
+                         if market_receipts[c] > market_costs[c])
+        losses_act = len(settled_markets) - wins_act
+        n_settled  = wins_act + losses_act
+        win_rate   = wins_act / n_settled if n_settled > 0 else 0.0
+
+        # Also gather open-position P&L for reliability scoring reference
+        pos_pnl = sum(
+            float(p.get("cashPnl", p.get("realizedPnl", 0)) or 0)
+            for p in positions
+            if p.get("redeemable") or float(p.get("curPrice", 1) or 1) == 0
+        )
 
         # ── Activity volume by time window ────────────────────────────────────
-        # Volume is computable from activity (usdcSize × BUY trades).
-        # PnL per window is NOT available without server-side data, so we report 0
-        # and surface alltime PnL (which IS accurate) in the display instead.
-        buy_trades = [t for t in trades if t.get("side", "").upper() == "BUY"]
-
         def _window_vol(bucket: list[dict]) -> float:
             return round(sum(_size(t) for t in bucket), 2)
 
         vol_30d = _window_vol([t for t in buy_trades if _ts(t) >= day30])
         vol_7d  = _window_vol([t for t in buy_trades if _ts(t) >= day7])
-        n_30d   = len([t for t in trades if _ts(t) >= day30])
-        n_7d    = len([t for t in trades if _ts(t) >= day7])
 
-        # ── Bot / timing signals — still valid from activity ──────────────────
-        # Near-certainty farming: trades at price > 0.90 or < 0.10 are farmed.
-        prices = [_price(t) for t in trades]
-        timing_prices_all = [p for p in prices if 0.10 <= p <= 0.80]
-        if timing_prices_all:
-            avg_entry = sum(timing_prices_all) / len(timing_prices_all)
+        # ── Timing / style signals ────────────────────────────────────────────
+        prices = [_price(t) for t in trades if t.get("type", "").upper() == "TRADE"]
+        genuine_prices = [p for p in prices if 0.10 <= p <= 0.80]
+        if genuine_prices:
+            avg_entry    = sum(genuine_prices) / len(genuine_prices)
             timing_score = round(1.0 - (avg_entry - 0.10) / 0.70, 4)
         else:
             timing_score = 0.0
 
-        # Contrarian (fade) score: proportion of genuine trades where entry < 0.45
-        contrarian = sum(1 for p in timing_prices_all if p < 0.45)
-        fade_score = round(contrarian / max(len(timing_prices_all), 1), 4)
+        contrarian = sum(1 for p in genuine_prices if p < 0.45)
+        fade_score = round(contrarian / max(len(genuine_prices), 1), 4)
 
-        # ── ROI and performance sub-score ────────────────────────────────────
-        # Use leaderboard alltime PnL + vol for ROI (the only reliable source).
-        # Fallback to positions PnL if leaderboard didn't provide it.
+        # ── ROI and performance sub-score ─────────────────────────────────────
         effective_pnl = lb_pnl if lb_pnl != 0 else pos_pnl
         effective_vol = lb_vol if lb_vol != 0 else _window_vol(buy_trades)
+        roi           = effective_pnl / max(effective_vol, 1)
 
-        roi = effective_pnl / max(effective_vol, 1)
-
-        # Avg position size — use leaderboard vol / trade count (more complete than activity alone)
-        n_activity = len(trades)
-        avg_pos    = effective_vol / max(n_activity, 1)
+        n_activity  = len(trades)
+        avg_pos     = effective_vol / max(n_activity, 1)
         size_factor = min(avg_pos / 20.0, 1.0)   # full credit at $20+ avg
 
-        # Low-settled-position penalty — less data = less reliable score
-        ltp = min(n_settled_pos / _LOW_TRADE_PENALTY_N, 1.0) if n_settled_pos > 0 else \
-              min(n_activity / (_LOW_TRADE_PENALTY_N * 5), 1.0)
+        # ── Low-trade penalty (ltp) — fixed floor so lb-verified traders ─────
+        # aren't crushed just because our 500-record activity sample is thin.
+        # Floor: lb_vol / $100k → a $100k+ leaderboard trader gets ltp ≥ 0.5
+        ltp_from_activity = min(n_settled / _LOW_TRADE_PENALTY_N, 1.0)
+        ltp_from_volume   = min(effective_vol / 100_000, 0.7)
+        ltp = max(ltp_from_activity, ltp_from_volume)
 
-        perf_raw = (win_rate_from_pos * 0.40
-                    + min(max(roi + 0.5, 0), 1) * 0.35
-                    + 0.0 * 0.15              # streak: not computable from activity, zeroed
-                    + size_factor * 0.10)
-        perf_score = perf_raw * ltp
+        perf_raw = (win_rate   * 0.40
+                    + min(max(roi + 0.5, 0), 1) * 0.40
+                    + size_factor              * 0.20)
+        perf_score = min(perf_raw * max(ltp, 0.15), 1.0)   # hard floor of 0.15 on ltp
 
-        # ── Category specialization — derive from slug/eventSlug ─────────────
-        # /v1/activity has no "category" field; classify by slug prefix instead.
+        # ── Category specialization ───────────────────────────────────────────
         def _cat_from_slug(slug: str) -> str:
             if not slug:
                 return ""
@@ -604,12 +622,12 @@ class TraderAPIClient:
                 ("btc", "Crypto"), ("eth", "Crypto"), ("sol-", "Crypto"),
                 ("election", "Politics"), ("president", "Politics"),
                 ("fed-", "Economics"), ("cpi-", "Economics"),
+                ("cs2-", "Esports"), ("esport", "Esports"),
             ):
                 if s.startswith(kw) or kw in s:
                     return label
             return ""
 
-        # Count trade volume by derived category for specialization
         cat_vol: dict[str, float] = {}
         for t in buy_trades:
             cat = _cat_from_slug(t.get("slug", t.get("eventSlug", "")))
@@ -617,40 +635,32 @@ class TraderAPIClient:
                 cat_vol[cat] = cat_vol.get(cat, 0.0) + _size(t)
         top_cats = [c for c, _ in sorted(cat_vol.items(), key=lambda x: x[1], reverse=True)[:2]]
 
-        # ── Assemble window stat dicts (consistent with original contract) ────
-        # PnL fields for 7d/30d windows are not available via public API;
-        # they are zeroed. Alltime PnL uses leaderboard value (accurate).
         all_stats = {
-            "wins": pos_wins, "losses": pos_losses,
-            "win_rate": round(win_rate_from_pos, 4),
+            "wins": wins_act, "losses": losses_act,
+            "win_rate": round(win_rate, 4),
             "pnl": round(effective_pnl, 2),
             "volume": round(effective_vol, 2),
         }
-        d30_stats = {
-            "wins": 0, "losses": 0, "win_rate": 0.0,
-            "pnl": 0.0, "volume": vol_30d,
-        }
-        d7_stats = {
-            "wins": 0, "losses": 0, "win_rate": 0.0,
-            "pnl": 0.0, "volume": vol_7d,
-        }
+        d30_stats = {"wins": 0, "losses": 0, "win_rate": 0.0, "pnl": 0.0, "volume": vol_30d}
+        d7_stats  = {"wins": 0, "losses": 0, "win_rate": 0.0, "pnl": 0.0, "volume": vol_7d}
 
         return {
-            "alltime":          all_stats,
-            "30d":              d30_stats,
-            "7d":               d7_stats,
-            "pos_pnl":          round(pos_pnl, 2),
-            "perf_score":       round(min(perf_score, 1.0), 4),
-            "cur_streak":       0,          # not computable from activity API
-            "max_streak":       0,
-            "n_trades":         n_activity,
-            "quality_win_rate": round(win_rate_from_pos, 4),
-            "avg_pos_size":     round(avg_pos, 2),
-            "top_categories":   top_cats,
-            "timing_score":     timing_score,
-            "consistency_score": 0.0,       # needs per-trade PnL, not available
-            "fade_score":       fade_score,
-            "sizing_discipline": 0.0,       # needs per-trade PnL, not available
+            "alltime":           all_stats,
+            "30d":               d30_stats,
+            "7d":                d7_stats,
+            "pos_pnl":           round(pos_pnl, 2),
+            "perf_score":        round(min(perf_score, 1.0), 4),
+            "cur_streak":        0,
+            "max_streak":        0,
+            "n_trades":          n_activity,
+            "n_settled_markets": n_settled,
+            "quality_win_rate":  round(win_rate, 4),
+            "avg_pos_size":      round(avg_pos, 2),
+            "top_categories":    top_cats,
+            "timing_score":      timing_score,
+            "consistency_score": 0.0,
+            "fade_score":        fade_score,
+            "sizing_discipline": 0.0,
         }
 
     def _reliability_score(

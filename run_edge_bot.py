@@ -1602,50 +1602,143 @@ async def handle_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None
                 break
         return found
 
+    # Team name → Polymarket slug abbreviation
+    _SLUG_ABBR: dict[str, str] = {
+        # NBA
+        "Warriors": "gsw", "Timberwolves": "min", "Lakers": "lal",
+        "Celtics": "bos", "Bucks": "mil", "Heat": "mia", "Nets": "bkn",
+        "Knicks": "nyk", "Nuggets": "den", "Suns": "phx", "76ers": "phi",
+        "Raptors": "tor", "Mavericks": "dal", "Spurs": "sas",
+        "Thunder": "okc", "Grizzlies": "mem", "Pelicans": "nop",
+        "Kings": "sac", "Bulls": "chi", "Rockets": "hou", "Jazz": "uta",
+        "Clippers": "lac", "Pistons": "det", "Hornets": "cha",
+        "Magic": "orl", "Hawks": "atl", "Pacers": "ind",
+        "Cavaliers": "cle", "Wizards": "was", "Trail Blazers": "por",
+        # NHL
+        "Bruins": "bos", "Maple Leafs": "tor", "Canadiens": "mtl",
+        "Lightning": "tbl", "Capitals": "wsh", "Rangers": "nyr",
+        "Flyers": "phi", "Penguins": "pit", "Red Wings": "det",
+        "Blackhawks": "chi", "Blues": "stl", "Avalanche": "col",
+        "Golden Knights": "vgk", "Oilers": "edm", "Flames": "cgy",
+        "Canucks": "van",
+        # NFL (off-season — slug lookup still useful for futures)
+        "Chiefs": "kc", "Eagles": "phi", "Cowboys": "dal", "Ravens": "bal",
+        "Bills": "buf", "Bengals": "cin", "Dolphins": "mia",
+        "Steelers": "pit", "49ers": "sf", "Rams": "lar",
+        "Seahawks": "sea", "Packers": "gb", "Lions": "det",
+        "Bears": "chi", "Vikings": "min", "Giants": "nyg",
+        "Commanders": "was", "Saints": "no", "Falcons": "atl",
+        "Panthers": "car", "Buccaneers": "tb", "Texans": "hou",
+        "Colts": "ind", "Jaguars": "jax", "Titans": "ten",
+        "Broncos": "den", "Raiders": "lv", "Chargers": "lac",
+    }
+
     def _search_polymarket_game(teams: list[str]) -> str:
         """
-        Search Polymarket Gamma for a specific game market given 1-2 team names.
-        Returns a formatted context string, or "" on failure/no result.
+        Slug-based Polymarket event lookup for a specific game.
+        Tries slug patterns (nba-{away}-{home}-{date}) for today ± 2 days.
+        Falls back to title-search within today's active NBA/NHL events.
+        Returns a formatted context string with real prices, or "" on failure.
         """
         import requests as _req
-        query = " ".join(teams)
+        from datetime import date, timedelta
+
+        GAMMA = "https://gamma-api.polymarket.com"
+
+        def _sport_prefix(t1: str, t2: str) -> str:
+            nba = {"Warriors","Timberwolves","Lakers","Celtics","Bucks","Heat",
+                   "Nets","Knicks","Nuggets","Suns","76ers","Raptors","Mavericks",
+                   "Spurs","Thunder","Grizzlies","Pelicans","Kings","Bulls",
+                   "Rockets","Jazz","Clippers","Pistons","Hornets","Magic",
+                   "Hawks","Pacers","Cavaliers","Wizards","Trail Blazers"}
+            nhl = {"Bruins","Maple Leafs","Canadiens","Lightning","Capitals",
+                   "Rangers","Flyers","Penguins","Red Wings","Blackhawks",
+                   "Blues","Avalanche","Golden Knights","Oilers","Flames","Canucks"}
+            nfl = {"Chiefs","Eagles","Cowboys","Ravens","Bills","Bengals",
+                   "Dolphins","Steelers","49ers","Rams","Seahawks","Packers",
+                   "Lions","Bears","Vikings","Giants","Commanders","Saints",
+                   "Falcons","Panthers","Buccaneers","Texans","Colts","Jaguars",
+                   "Titans","Broncos","Raiders","Chargers"}
+            for t in (t1, t2):
+                if t in nba: return "nba"
+                if t in nhl: return "nhl"
+                if t in nfl: return "nfl"
+            return "nba"
+
+        def _fmt_market(title: str, markets: list[dict]) -> str:
+            """Pick the moneyline (highest-volume non-total market) and format it."""
+            # Filter out totals (O/U) and prop bets; pick highest volume remainder
+            non_total = [
+                m for m in markets
+                if not any(kw in (m.get("question") or "").lower()
+                           for kw in ("o/u", "over/under", "total", "spread", "points", "rebounds",
+                                      "assists", "1h", "2h", "quarter", "period"))
+            ]
+            candidates = non_total if non_total else markets
+            best = max(candidates, key=lambda m: float(m.get("volumeNum", 0) or 0), default=None)
+            if not best:
+                return ""
+            prices = best.get("outcomePrices") or []
+            if len(prices) < 2:
+                return ""
+            try:
+                p0 = round(float(prices[0]) * 100, 1)
+                p1 = round(float(prices[1]) * 100, 1)
+            except Exception:
+                return ""
+            vol = float(best.get("volumeNum", 0) or 0)
+            vol_str = f"${vol/1000:.0f}k vol" if vol >= 1000 else f"${vol:.0f} vol"
+            accepting = best.get("acceptingOrders", False)
+            status = "LIVE" if accepting else "RESOLVED"
+            return (
+                f"\n[Polymarket — {status}] {title}\n"
+                f"  {teams[0]} YES: {p0}¢  |  {teams[1]} YES: {p1}¢  |  {vol_str}"
+            )
+
+        # ── Try slug-based lookup (most accurate) ─────────────────────────────
+        if len(teams) >= 2:
+            a1 = _SLUG_ABBR.get(teams[0], teams[0].lower().replace(" ", ""))
+            a2 = _SLUG_ABBR.get(teams[1], teams[1].lower().replace(" ", ""))
+            prefix = _sport_prefix(teams[0], teams[1])
+            today = date.today()
+            for delta in (0, 1, -1, 2):
+                d = (today + timedelta(days=delta)).isoformat()
+                for slug in (f"{prefix}-{a1}-{a2}-{d}", f"{prefix}-{a2}-{a1}-{d}"):
+                    try:
+                        resp = _req.get(f"{GAMMA}/events", params={"slug": slug}, timeout=8)
+                        items = resp.json() if resp.status_code == 200 else []
+                        if items:
+                            ev = items[0]
+                            result = _fmt_market(
+                                ev.get("title", " vs ".join(teams)),
+                                ev.get("markets", [])
+                            )
+                            if result:
+                                return result
+                    except Exception:
+                        continue
+
+        # ── Fallback: title filter within today's active events ───────────────
         try:
             resp = _req.get(
-                "https://gamma-api.polymarket.com/markets",
-                params={"q": query, "active": "true", "closed": "false", "limit": 5},
+                f"{GAMMA}/events",
+                params={"active": "true", "limit": 30, "order": "volume", "ascending": "false"},
                 timeout=8,
             )
-            resp.raise_for_status()
-            markets = resp.json()
+            events = resp.json() if resp.status_code == 200 else []
+            for ev in events:
+                title = (ev.get("title") or ev.get("name") or "").lower()
+                if all(t.lower() in title for t in teams):
+                    result = _fmt_market(
+                        ev.get("title", " vs ".join(teams)),
+                        ev.get("markets", [])
+                    )
+                    if result:
+                        return result
         except Exception:
-            return ""
-        if not markets:
-            return ""
-        # Filter to markets whose question contains at least one of the team names
-        def _relevance(m: dict) -> int:
-            title = (m.get("question") or m.get("groupItemTitle") or "").lower()
-            return sum(1 for t in teams if t.lower() in title)
-        markets = sorted(markets, key=_relevance, reverse=True)
-        best = [m for m in markets if _relevance(m) >= 1][:3]
-        if not best:
-            return ""
-        lines = ["\nLive Polymarket market data:"]
-        for m in best:
-            question = m.get("question") or m.get("groupItemTitle") or "?"
-            prices = m.get("outcomePrices") or []
-            if len(prices) >= 2:
-                yes_p = round(float(prices[0]) * 100)
-                no_p  = round(float(prices[1]) * 100)
-                prob_str = f"YES {yes_p}¢ / NO {no_p}¢"
-            else:
-                prob_str = "price unavailable"
-            vol = m.get("volume24hrClob") or m.get("volumeNum") or 0
-            try:
-                vol_str = f"${float(vol):,.0f} 24h vol"
-            except Exception:
-                vol_str = ""
-            lines.append(f"- {question[:80]}: {prob_str}" + (f" | {vol_str}" if vol_str else ""))
-        return "\n".join(lines)
+            pass
+
+        return ""
 
     _SERIES_MAP = [
         (["fed", "fomc", "rate"], "KXFED"),
@@ -1787,14 +1880,20 @@ async def handle_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None
         "Use session context to remember what was discussed earlier. "
         "Return plain text (no JSON). Keep replies under 300 words.\n\n"
         "LIVE MARKET DATA RULES:\n"
-        "• When a [Live Polymarket market data] block is in the prompt, use THOSE exact prices. "
-        "Never cite prices from training memory — they will be wrong.\n"
-        "• outcomePrices are in cents (0-100). YES 58¢ = 58% implied probability.\n"
-        "• When a [Live KXNBA Kalshi markets] block appears, those are season-long "
-        "championship / futures markets — NOT individual game win markets. "
-        "Do NOT present Kalshi series data as a specific game matchup price.\n"
-        "• If no live data is available for the game asked about, say so clearly: "
-        "'I don't have a live Polymarket market for that game right now.'\n\n"
+        "• When a [Polymarket] block is in the prompt, use THOSE exact prices — no exceptions. "
+        "outcomePrices[0] is Team A YES probability, outcomePrices[1] is Team B YES probability.\n"
+        "• NEVER cite prices from training memory. They are always stale and wrong.\n"
+        "• If the market block shows [RESOLVED], the game has already ended — say so.\n"
+        "• If no live data block is provided for the game asked about, say clearly: "
+        "'I don't have a live Polymarket feed for that matchup right now — "
+        "check polymarket.com directly for current prices.'\n"
+        "• Kalshi series data = season/championship futures — NOT individual game prices.\n\n"
+        f"IN-SEASON SPORTS (month {datetime.now(timezone.utc).month}):\n"
+        "• NBA, NHL: IN SEASON — provide game prices and injury analysis.\n"
+        "• NFL, CFB: OFF SEASON — do NOT show game lines or injury reports. "
+        "If asked about NFL, say 'NFL is in the off-season (season starts September).' "
+        "NFL futures/championship markets are still valid.\n"
+        "• NCAA March Madness (CBB): IN SEASON March–April.\n\n"
         "INJURY DATA RULES — apply ONLY when the user's current message explicitly "
         "asks about injuries, player health, roster status, or a specific game matchup:\n"
         "• If injury data IS in [Live injury data] or [Live web search results]: cite it.\n"
@@ -2271,7 +2370,27 @@ async def injury_refresh_job(ctx: ContextTypes.DEFAULT_TYPE) -> None:
     log.info("Injury refresh triggered.")
     client = _InjuryClient()
     results = {}
+
+    # ── In-season filter — only refresh sports currently in regular season ────
+    # Avoids pointless API calls + prevents the AI getting stale/wrong data
+    # for sports that aren't playing (e.g. NFL lines in March = preseason noise).
+    _now_month = datetime.now(timezone.utc).month
+    _SEASON_MONTHS: dict[str, tuple[int, ...]] = {
+        "nba":   (10, 11, 12, 1, 2, 3, 4, 5, 6),       # Oct–Jun (inc. playoffs)
+        "wnba":  (5, 6, 7, 8, 9, 10),                   # May–Oct
+        "nfl":   (9, 10, 11, 12, 1, 2),                 # Sep–Feb (inc. playoffs)
+        "cfb":   (8, 9, 10, 11, 12, 1),                 # Aug–Jan
+        "nhl":   (10, 11, 12, 1, 2, 3, 4, 5, 6),        # Oct–Jun
+        "cbb":   (11, 12, 1, 2, 3, 4),                  # Nov–Apr (March Madness)
+        "ncaaw": (11, 12, 1, 2, 3, 4),
+    }
+
     for sport in ("nba", "nfl", "nhl", "cfb", "cbb", "wnba", "ncaaw"):
+        active_months = _SEASON_MONTHS.get(sport, tuple(range(1, 13)))
+        if _now_month not in active_months:
+            results[sport.upper()] = "off-season (skipped)"
+            log.info("Injury refresh: %s is off-season (month=%d) — skipped", sport.upper(), _now_month)
+            continue
         try:
             count = client.fetch_and_store(sport)
             results[sport.upper()] = count
