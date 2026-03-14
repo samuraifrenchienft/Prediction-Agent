@@ -1529,11 +1529,23 @@ async def handle_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None
 
     # ── Correction detection ──────────────────────────────────────────────────
     _CORRECTION_TRIGGERS = {
-        "wrong", "try again", "retry", "that's not", "thats not",
-        "incorrect", "not right", "different answer", "try harder",
-        "still wrong", "no that", "you said", "that was wrong",
-        "redo", "search again", "look again", "check again", "that's wrong",
-        "thats wrong", "bad answer", "wrong answer",
+        # explicit corrections
+        "wrong", "you're wrong", "youre wrong", "that's wrong", "thats wrong",
+        "that was wrong", "bad answer", "wrong answer", "incorrect", "not right",
+        "still wrong", "no that",
+        # stale/outdated data
+        "old data", "stale", "outdated", "your data is", "data is wrong",
+        "data is old", "data is outdated", "data is off", "data is stale",
+        "not current", "not live", "not accurate", "not up to date",
+        # retry requests
+        "try again", "retry", "search again", "look again", "check again",
+        "check current", "check polymarket", "check the price", "pull the price",
+        "get the price", "get current", "get live", "pull live", "pull current",
+        "different answer", "try harder", "redo",
+        # direct challenges
+        "that's not", "thats not", "you said", "actually", "no the price",
+        "the price is", "it's actually", "its actually", "are you sure",
+        "are you certain", "double check", "double-check", "verify that",
     }
     _is_correction = any(t in user_msg.lower() for t in _CORRECTION_TRIGGERS)
 
@@ -1819,24 +1831,35 @@ async def handle_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None
 
     injury_context = _build_injury_context(q)
 
-    # 6. Real-time web search — fires when a sport is detected OR when the user
-    #    is correcting a previous answer (correction forces a fresh search even
-    #    without a sport keyword so the AI has new data to work from).
-    #    Tries Tavily first (AI-native, 1,000/mo free), then falls back to
-    #    Serper (Google results, 2,500/mo free) if Tavily quota is exhausted.
+    # 6. Real-time data refresh — fires when sport detected OR user corrects us.
+    #    On correction + team mention: bypass cache and re-query Polymarket live.
+    #    On correction + sport only: force fresh web search with expanded query.
+    #    On sport only (no correction): standard injury web search.
     search_context = ""
-    if _chat_sport or _is_correction:
+    if _is_correction and _mentioned_teams:
+        # User says our price is wrong — re-hit Polymarket directly, bypass cache
+        # Clear file cache for this query so we don't return the same stale result
+        import glob as _glob, os as _os
+        for _f in _glob.glob(".cache/trader_leaderboard*.json"):
+            try: _os.remove(_f)
+            except Exception: pass
+        _fresh_market = _search_polymarket_game(_mentioned_teams)
+        if _fresh_market:
+            market_context = _fresh_market   # override with freshly fetched data
+            search_context = "\n[Market data refreshed from Polymarket live feed]"
+        else:
+            search_context = "\n[No live Polymarket market found for that matchup]"
+
+    elif _chat_sport or _is_correction:
         if _is_correction and _chat_sport:
-            # Expand query to force fresher / different results on correction
-            _query = f"{user_msg} {_chat_sport.upper()} latest confirmed update today"
+            _query = f"{user_msg} {_chat_sport.upper()} latest update today"
         elif _is_correction:
-            # No sport detected but user is correcting — search exactly what they said
-            _query = f"{user_msg} latest news today confirmed"
+            _query = f"{user_msg} latest confirmed data today"
         else:
             _query = f"{user_msg} {_chat_sport.upper()} injury report today"
         loop = asyncio.get_event_loop()
         search_context = await loop.run_in_executor(None, _tavily_search, _query)
-        if not search_context:   # Tavily failed/quota gone → try Serper
+        if not search_context:
             search_context = await loop.run_in_executor(None, _serper_search, _query)
 
     # 7. Win-probability impact context — injected when a sport is detected.
@@ -1850,12 +1873,17 @@ async def handle_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None
 
     # ── Correction mode instruction — prepended to system prompt ─────────────
     correction_instruction = (
-        "CORRECTION MODE ACTIVE: The user indicated your previous response was wrong. "
-        "Do NOT repeat or rephrase your previous answer. "
-        "Search the [Live web search results] block below for updated information and use that. "
-        "If the search results contradict what you said before, use the search results. "
-        "If you still cannot find clear data, say exactly what you found and what is uncertain — "
-        "do not guess or hallucinate.\n\n"
+        "CORRECTION MODE ACTIVE — the user told you your previous answer was wrong or stale.\n"
+        "Rules:\n"
+        "1. Start your reply by briefly acknowledging the mistake — be direct and natural "
+        "(e.g. 'My bad, let me pull fresh data.' or 'You're right, that was off — here's "
+        "what I'm seeing now:'). Keep the acknowledgment to ONE sentence.\n"
+        "2. Use ONLY the [Polymarket] or [Market data refreshed] block below for prices — "
+        "NEVER repeat the price you gave before.\n"
+        "3. If the refreshed block shows different data, lead with that and explain the delta.\n"
+        "4. If you still can't find accurate data, say honestly: 'I'm not finding a live feed "
+        "for that right now — check polymarket.com directly.' Do NOT guess or hallucinate.\n"
+        "5. Never be defensive or make excuses — just correct and move forward.\n\n"
         if _is_correction else ""
     )
 
