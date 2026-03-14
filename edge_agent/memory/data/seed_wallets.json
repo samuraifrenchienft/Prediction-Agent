@@ -1,0 +1,46 @@
+{
+  "description": "Manually seeded wallets for priority vetting and watchlist tracking.",
+  "added_by": "owner",
+  "wallets": [
+    {
+      "address": "0xb5f8ec43b7f79518600a7c7b485690b97aed8e32",
+      "note": "Owner seed — priority vet",
+      "vet_interval_hours": 6
+    },
+    {
+      "address": "0x0b7a6030507efe5db145fbb57a25ba0c5f9d86cf",
+      "note": "Owner seed — priority vet",
+      "vet_interval_hours": 6
+    },
+    {
+      "address": "0xf81e5fd35af7b2fa0b24a8dca645304c72a1c4b9",
+      "note": "Owner seed — priority vet",
+      "vet_interval_hours": 6
+    },
+    {
+      "address": "0xbfb8c763e089e3b71b1975134c10a1091f81cf89",
+      "note": "Owner seed — priority vet",
+      "vet_interval_hours": 6
+    },
+    {
+      "address": "0x5430e8954e74b93d07c84c38be0ee4f910dfc1d3",
+      "note": "Owner seed — priority vet",
+      "vet_interval_hours": 6
+    },
+    {
+      "address": "0x673bec9b3ede462dd62c9e4402bdd1f03844b22b",
+      "note": "Owner seed — priority vet",
+      "vet_interval_hours": 6
+    },
+    {
+      "address": "0xdce0d1016ead1525fc8c7b6513f989a60ff02daf",
+      "note": "Owner seed — priority vet",
+      "vet_interval_hours": 6
+    },
+    {
+      "address": "0x6a40a33b12cb6e727b42421aa0759678329fc93f",
+      "note": "Owner seed — priority vet",
+      "vet_interval_hours": 6
+    }
+  ]
+}
