@@ -836,3 +836,125 @@ class TraderAPIClient:
 
         scores.sort(key=lambda s: s.final_score, reverse=True)
         return scores[:limit]
+
+    # ------------------------------------------------------------------
+    # Tier-0/1 discovery sweep  (no per-wallet API calls)
+    # ------------------------------------------------------------------
+
+    # Leaderboard categories to sweep — maps our internal name → API param value
+    _SWEEP_CATEGORIES: dict[str, str] = {
+        "profit":   "PROFIT",
+        "volume":   "VOLUME",
+        "monthly":  "MONTHLY",
+        "weekly":   "WEEKLY",
+        "daily":    "DAILY",
+    }
+
+    def discovery_sweep(
+        self,
+        per_category: int = 100,
+        fast_score_threshold: float = 20.0,
+    ) -> dict[str, Any]:
+        """
+        Tier-0/1 discovery sweep: pull 5 leaderboard categories, fast-score
+        every wallet using only leaderboard data (zero per-wallet API calls),
+        and write everything into the discovery_pool table.
+
+        Fast score (0–100):
+          - ROI component  50 pts  → pnl / vol, capped at 1.0
+          - PnL component  30 pts  → log scale, capped at $100k → full credit
+          - Volume floor   20 pts  → vol / $10k, capped at 1.0
+          Penalty: –15 pts if avg_pos_size < $5 (micro-trader flag)
+          Penalty: –10 pts if n_trades > 5000 (likely HFT)
+
+        Wallets that survive pre-filter AND fast_score >= threshold are
+        flagged as vet_priority=1 so pool_get_vet_queue() surfaces them first.
+
+        Returns summary dict: {category: count_added, ...}
+        """
+        from edge_agent.memory.trader_cache import TraderCache
+        cache = TraderCache()
+        summary: dict[str, Any] = {}
+        seen: set[str] = set()   # deduplicate across categories
+
+        for cat_name, cat_param in self._SWEEP_CATEGORIES.items():
+            lb = self.fetch_leaderboard(category=cat_param, limit=per_category)
+            added = 0
+
+            for rank_idx, entry in enumerate(lb, start=1):
+                addr = entry.get("proxyWallet", "").lower()
+                if not addr or addr in seen:
+                    continue
+                seen.add(addr)
+
+                # ── Tier-0: extract raw leaderboard figures ──────────────
+                pnl = float(entry.get("pnl", 0) or 0)
+                vol = float(entry.get("vol", entry.get("volume", 0)) or 0)
+                n_trades = 0
+                for key in _TRADES_KEYS:
+                    val = entry.get(key)
+                    if val:
+                        try:
+                            n_trades = int(val)
+                            break
+                        except (TypeError, ValueError):
+                            pass
+
+                # ── Tier-1: fast score (all in-process, 0 API calls) ────
+                roi = pnl / max(vol, 1.0)
+
+                roi_pts = min(max(roi, 0.0), 1.0) * 50.0
+
+                pnl_pts = 0.0
+                if pnl > 0:
+                    import math as _math
+                    # log(pnl+1)/log(100001) → 0 at $0, 1.0 at $100k
+                    pnl_pts = min(_math.log(pnl + 1) / _math.log(100_001), 1.0) * 30.0
+
+                vol_pts = min(vol / 10_000, 1.0) * 20.0
+
+                fast = roi_pts + pnl_pts + vol_pts
+
+                # Penalties
+                avg_pos = vol / max(n_trades, 1)
+                if avg_pos < 5.0 and n_trades > 0:
+                    fast -= 15.0   # micro-trade farmer
+                if n_trades > 5_000:
+                    fast -= 10.0   # likely HFT / script
+
+                fast = round(max(0.0, min(100.0, fast)), 2)
+
+                # Bot pre-flag from leaderboard data alone
+                bot_pre = 0
+                keep, reason = self._prefilter(entry)
+                if not keep:
+                    bot_pre = 1
+
+                pool_row = {
+                    "wallet_address": addr,
+                    "display_name":   entry.get("userName", entry.get("name", "")),
+                    "category":       cat_name,
+                    "lb_rank":        rank_idx,
+                    "pnl_alltime":    round(pnl, 2),
+                    "volume_alltime": round(vol, 2),
+                    "roi":            round(roi, 4),
+                    "fast_score":     fast,
+                    "bot_preflag":    bot_pre,
+                    "vet_priority":   1 if (fast >= fast_score_threshold and not bot_pre) else 0,
+                    "full_vet_done":  0,
+                }
+
+                try:
+                    cache.pool_upsert(pool_row)
+                    added += 1
+                except Exception as exc:
+                    log.debug("pool_upsert failed for %s: %s", addr[:10], exc)
+
+            summary[cat_name] = added
+            log.info(
+                "[discovery_sweep] %s: %d/%d added to pool",
+                cat_name, added, len(lb),
+            )
+
+        summary["total_unique"] = len(seen)
+        return summary

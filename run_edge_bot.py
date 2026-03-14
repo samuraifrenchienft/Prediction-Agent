@@ -1118,6 +1118,278 @@ async def trader_refresh_job(ctx: ContextTypes.DEFAULT_TYPE) -> None:
         log.warning("Trader refresh failed: %s", exc)
 
 
+async def discovery_job(ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    """
+    Hourly — sweep 5 leaderboard categories (~500 wallets), fast-score each
+    with zero per-wallet API calls, populate discovery_pool.  Then graduate
+    the top candidates (fast_score >= 40) to Tier-2 full vet (max 15/cycle).
+    """
+    log.info("[discovery_job] Starting multi-category sweep.")
+    try:
+        loop   = asyncio.get_event_loop()
+        client = _TraderClient()
+        summary = await loop.run_in_executor(
+            None, lambda: client.discovery_sweep(per_category=100, fast_score_threshold=30.0)
+        )
+        log.info(
+            "[discovery_job] Sweep complete — %d unique wallets discovered: %s",
+            summary.get("total_unique", 0),
+            {k: v for k, v in summary.items() if k != "total_unique"},
+        )
+
+        # Graduate top candidates to Tier-2 full vet (up to 15 per cycle)
+        from edge_agent.memory.trader_cache import TraderCache
+        cache = TraderCache()
+        queue = cache.pool_get_vet_queue(limit=15, min_fast_score=40.0, exclude_done=True)
+        if queue:
+            log.info("[discovery_job] Tier-2 vetting %d top candidates.", len(queue))
+            scored = 0
+            for entry in queue:
+                try:
+                    addr = entry["wallet_address"]
+                    await loop.run_in_executor(
+                        None,
+                        lambda a=addr, e=entry: client.score_trader(a, {
+                            "pnl": e.get("pnl_alltime", 0),
+                            "vol": e.get("volume_alltime", 0),
+                            "userName": e.get("display_name", ""),
+                        }),
+                    )
+                    scored += 1
+                except Exception as exc:
+                    log.debug(
+                        "[discovery_job] Vet failed for %s: %s",
+                        entry.get("wallet_address", "?")[:10], exc,
+                    )
+            log.info("[discovery_job] Tier-2 complete — %d/%d vetted.", scored, len(queue))
+        else:
+            log.info("[discovery_job] No new candidates met Tier-2 threshold this cycle.")
+
+    except Exception as exc:
+        log.warning("[discovery_job] Failed: %s", exc)
+
+
+async def watchlist_vet_job(ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    """
+    Every 6h — re-vet watchlist wallets whose interval has elapsed.
+    Sends a Telegram alert when score changes ≥ 10 pts or bot flag appears.
+    """
+    log.info("[watchlist_vet_job] Checking due wallets.")
+    try:
+        from edge_agent.memory.trader_cache import TraderCache
+        cache  = TraderCache()
+        due    = cache.watchlist_due_for_vet()
+        if not due:
+            log.info("[watchlist_vet_job] No wallets due for re-vet.")
+            return
+
+        log.info("[watchlist_vet_job] %d wallet(s) due for re-vet.", len(due))
+        loop   = asyncio.get_event_loop()
+        client = _TraderClient()
+        alerts: list[str] = []
+
+        for entry in due:
+            addr      = entry["wallet_address"]
+            old_score = float(entry.get("latest_score") or 0)
+            old_bot   = int(entry.get("latest_bot_flag") or 0)
+            name      = entry.get("display_name") or addr[:10] + "…"
+            try:
+                ts = await loop.run_in_executor(
+                    None, lambda a=addr: client.score_trader(a)
+                )
+                cache.watchlist_mark_vetted(addr, score=ts.final_score * 100, bot_flag=ts.bot_flag)
+                new_score = round(ts.final_score * 100, 1)
+                delta     = new_score - old_score
+
+                if ts.bot_flag and not old_bot:
+                    alerts.append(
+                        f"🚨 <b>Watched wallet flagged as bot:</b>\n"
+                        f"  {_e(name)} (<code>{_e(addr[:14])}…</code>)\n"
+                        f"  Score: {old_score:.0f} → <b>{new_score:.0f}</b>"
+                    )
+                elif abs(delta) >= 10:
+                    arrow = "📈" if delta > 0 else "📉"
+                    alerts.append(
+                        f"{arrow} <b>Watchlist score change:</b>\n"
+                        f"  {_e(name)} (<code>{_e(addr[:14])}…</code>)\n"
+                        f"  {old_score:.0f} → <b>{new_score:.0f}</b> ({delta:+.0f} pts)"
+                    )
+                log.info("[watchlist_vet_job] %s → %.1f/100", addr[:12], new_score)
+
+            except Exception as exc:
+                log.debug("[watchlist_vet_job] Vet failed for %s: %s", addr[:10], exc)
+
+        if alerts and CHAT_ID:
+            await ctx.bot.send_message(
+                chat_id=CHAT_ID,
+                text="👀 <b>WATCHLIST UPDATE</b>\n\n" + "\n\n".join(alerts),
+                parse_mode=ParseMode.HTML,
+            )
+
+    except Exception as exc:
+        log.warning("[watchlist_vet_job] Failed: %s", exc)
+
+
+async def cmd_watch(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    """
+    /watch {address} [note]
+    Add a Polymarket wallet to the watchlist for automatic re-vetting every 6h.
+    """
+    args = ctx.args or []
+    if not args:
+        await update.message.reply_text(
+            "Usage: <code>/watch 0xADDRESS [optional note]</code>",
+            parse_mode=ParseMode.HTML,
+        )
+        return
+
+    addr = args[0].strip().lower()
+    note = " ".join(args[1:]) if len(args) > 1 else ""
+
+    if not addr.startswith("0x") or len(addr) < 10:
+        await update.message.reply_text("⚠️ That doesn't look like a valid wallet address.")
+        return
+
+    from edge_agent.memory.trader_cache import TraderCache
+    cache = TraderCache()
+
+    # Check if already watched
+    existing = cache.watchlist_get(addr)
+    if existing:
+        await update.message.reply_text(
+            f"👀 Already watching <code>{_e(addr[:14])}…</code>\n"
+            f"Last vetted: {_fmt_ts(existing.get('last_vetted_at', 0))}",
+            parse_mode=ParseMode.HTML,
+        )
+        return
+
+    cache.watchlist_add(
+        address=addr,
+        display_name="",
+        added_by=str(update.effective_user.id),
+        note=note,
+    )
+
+    await update.message.reply_text(
+        f"✅ Added <code>{_e(addr[:14])}…</code> to watchlist.\n"
+        f"Full vet will run within 6h. Use /watchlist to see all watched wallets.",
+        parse_mode=ParseMode.HTML,
+    )
+
+    # Kick off an immediate background vet so first score appears quickly
+    loop   = asyncio.get_event_loop()
+    client = _TraderClient()
+    try:
+        ts = await loop.run_in_executor(None, lambda: client.score_trader(addr))
+        cache.watchlist_mark_vetted(addr, score=ts.final_score * 100, bot_flag=ts.bot_flag)
+        score_str = f"{ts.final_score * 100:.0f}/100"
+        bot_str   = " 🚨 <b>BOT FLAGGED</b>" if ts.bot_flag else ""
+        await update.message.reply_text(
+            f"⚡ Quick vet done: <b>{score_str}</b>{bot_str}\n"
+            f"PnL: <b>${ts.pnl_alltime:,.0f}</b> | "
+            f"Win rate: <b>{ts.win_rate_alltime:.0%}</b>",
+            parse_mode=ParseMode.HTML,
+        )
+    except Exception as exc:
+        log.debug("cmd_watch immediate vet failed: %s", exc)
+
+
+async def cmd_unwatch(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    """
+    /unwatch {address}
+    Remove a wallet from the watchlist.
+    """
+    args = ctx.args or []
+    if not args:
+        await update.message.reply_text(
+            "Usage: <code>/unwatch 0xADDRESS</code>", parse_mode=ParseMode.HTML
+        )
+        return
+
+    addr = args[0].strip().lower()
+    from edge_agent.memory.trader_cache import TraderCache
+    removed = TraderCache().watchlist_remove(addr)
+
+    if removed:
+        await update.message.reply_text(f"🗑️ Removed <code>{_e(addr[:14])}…</code> from watchlist.", parse_mode=ParseMode.HTML)
+    else:
+        await update.message.reply_text(f"❌ <code>{_e(addr[:14])}…</code> wasn't in your watchlist.", parse_mode=ParseMode.HTML)
+
+
+async def cmd_watchlist(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    """
+    /watchlist
+    Show all watched wallets with their latest scores and last-vet time.
+    """
+    from edge_agent.memory.trader_cache import TraderCache
+    cache   = TraderCache()
+    entries = cache.watchlist_list()
+
+    if not entries:
+        await update.message.reply_text(
+            "📋 Watchlist is empty.\n\nUse <code>/watch 0xADDRESS</code> to add a wallet.",
+            parse_mode=ParseMode.HTML,
+        )
+        return
+
+    lines = [f"👀 <b>WATCHLIST</b> ({len(entries)} wallet{'s' if len(entries) != 1 else ''})\n"]
+
+    for e in entries:
+        addr      = e.get("wallet_address", "")
+        name      = e.get("display_name") or addr[:10] + "…"
+        score     = float(e.get("current_score") or e.get("latest_score") or 0)
+        bot_flag  = int(e.get("current_bot_flag") or e.get("latest_bot_flag") or 0)
+        last_vet  = _fmt_ts(e.get("last_vetted_at", 0))
+        note      = e.get("note", "")
+        pnl       = float(e.get("tp_pnl") or 0)
+        wr        = float(e.get("tp_win_rate") or 0)
+
+        if bot_flag:
+            badge = "🚨 BOT"
+        elif score >= 70:
+            badge = "✅ STRONG"
+        elif score >= 50:
+            badge = "🟡 LEGIT"
+        else:
+            badge = "🔴 WEAK"
+
+        pnl_str = f" | PnL: ${pnl:,.0f}" if pnl else ""
+        wr_str  = f" | WR: {wr:.0%}" if wr else ""
+        note_str = f"\n    📝 {_e(note)}" if note else ""
+
+        lines.append(
+            f"<b>{_e(name)}</b> {badge}\n"
+            f"  Score: <b>{score:.0f}/100</b>{pnl_str}{wr_str}\n"
+            f"  <code>{_e(addr[:14])}…</code> | Last vet: {last_vet}"
+            f"{note_str}"
+        )
+
+    pool_stats = cache.pool_stats()
+    lines.append(
+        f"\n<i>Discovery pool: {pool_stats['total']} wallets "
+        f"({pool_stats['vetted']} fully vetted) | "
+        f"Avg fast score: {pool_stats['avg_fast_score']:.0f}</i>"
+    )
+
+    await _send_chunked(update.message.reply_text, "\n\n".join(lines), parse_mode=ParseMode.HTML)
+
+
+def _fmt_ts(ts: float | None) -> str:
+    """Format a unix timestamp as a human-readable relative time or UTC clock."""
+    if not ts:
+        return "never"
+    try:
+        dt  = datetime.fromtimestamp(float(ts), tz=timezone.utc)
+        ago = time.time() - float(ts)
+        if ago < 3600:
+            return f"{int(ago // 60)}m ago"
+        if ago < 86400:
+            return f"{int(ago // 3600)}h ago"
+        return dt.strftime("%b %d")
+    except Exception:
+        return "unknown"
+
+
 async def cmd_status(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     await _send_chunked(update.message.reply_text, _last_status)
 
@@ -2695,8 +2967,11 @@ def main() -> None:
     app.add_handler(CommandHandler("injurys",   cmd_injuries,  filters=_auth_filter))  # typo alias
     app.add_handler(CommandHandler("tracking",  cmd_tracking,  filters=_auth_filter))
     app.add_handler(CommandHandler("top",       cmd_top,       filters=_auth_filter))
-    app.add_handler(CommandHandler("traders",   cmd_traders,   filters=_auth_filter))
+    app.add_handler(CommandHandler("traders",     cmd_traders,     filters=_auth_filter))
     app.add_handler(CommandHandler("wallet",      cmd_wallet,      filters=_auth_filter))
+    app.add_handler(CommandHandler("watch",       cmd_watch,       filters=_auth_filter))
+    app.add_handler(CommandHandler("unwatch",     cmd_unwatch,     filters=_auth_filter))
+    app.add_handler(CommandHandler("watchlist",   cmd_watchlist,   filters=_auth_filter))
     app.add_handler(CommandHandler("performance", cmd_performance, filters=_auth_filter))
     app.add_handler(CommandHandler("mytrades",    cmd_mytrades,    filters=_auth_filter))
     app.add_handler(CommandHandler("status",      cmd_status,      filters=_auth_filter))
@@ -2736,6 +3011,12 @@ def main() -> None:
     # Trader leaderboard — refresh daily at 8am PT, warm cache 2 min after boot
     app.job_queue.run_daily(trader_refresh_job, time=dt_time(8, 0, tzinfo=_PACIFIC))
     app.job_queue.run_once(trader_refresh_job, when=120)
+
+    # Discovery sweep — multi-category fast-score, every 1h, first run 3 min after boot
+    app.job_queue.run_repeating(discovery_job, interval=3600, first=180)
+
+    # Watchlist re-vet — every 6h, first run 10 min after boot
+    app.job_queue.run_repeating(watchlist_vet_job, interval=21600, first=600)
 
     # Outcome resolution — check pending signals every 2h, first run 5 min after boot
     app.job_queue.run_repeating(outcome_resolution_job, interval=7200, first=300)
