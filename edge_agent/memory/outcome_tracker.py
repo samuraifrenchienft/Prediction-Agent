@@ -37,8 +37,12 @@ log = logging.getLogger(__name__)
 _DB_PATH      = Path(__file__).parent / "data" / "outcome_tracker.db"
 _GAMMA_API    = "https://gamma-api.polymarket.com"
 _KALSHI_API   = "https://api.elections.kalshi.com/trade-api/v2"
-_DEFAULT_STAKE = 10.0          # paper trade default stake $10
-_MAX_CHECK_AGE = 86400 * 60    # stop retrying after 60 days
+_DEFAULT_STAKE    = 10.0          # paper trade default stake $10
+_MAX_CHECK_AGE    = 86400 * 60    # stop retrying after 60 days
+_MAX_CHECK_COUNT  = 48            # mark UNRESOLVABLE after this many consecutive API failures
+# Exponential back-off: minimum seconds to wait between resolution checks
+# check_count → min gap:  0→0s  1→5m  2→10m  4→20m  8→40m  16→80m  24→3h  32→6h  48→12h
+_BACKOFF_BASE_SECS = 300          # 5 minutes base
 _SESS = requests.Session()
 _SESS.headers.update({"User-Agent": "edge-agent/1.0"})
 
@@ -263,11 +267,18 @@ class OutcomeTracker:
 
     def resolve_pending(self, limit: int = 50) -> dict[str, int]:
         """
-        Check all PENDING signals against their respective APIs.
-        Updates outcomes and propagates to user_picks.
-        Returns counts: {resolved, still_pending, errors}.
+        Check PENDING signals against their respective APIs using exponential back-off.
+
+        Back-off logic: each consecutive API failure doubles the minimum wait gap
+        (capped at ~12h).  Only signals whose last check was older than the computed
+        gap are re-queried this cycle.  After _MAX_CHECK_COUNT failures the signal
+        is marked UNRESOLVABLE so it never blocks the queue again.
+
+        Returns counts: {resolved, still_pending, skipped_backoff, unresolvable, errors}.
         """
-        cutoff = time.time() - _MAX_CHECK_AGE
+        now    = time.time()
+        cutoff = now - _MAX_CHECK_AGE
+
         rows = self._conn.execute(
             """
             SELECT * FROM signal_outcomes
@@ -278,15 +289,46 @@ class OutcomeTracker:
             (cutoff, limit),
         ).fetchall()
 
-        resolved = 0
-        still_pending = 0
-        errors = 0
+        resolved        = 0
+        still_pending   = 0
+        skipped_backoff = 0
+        unresolvable    = 0
+        errors          = 0
 
         for row in rows:
             row = dict(row)
-            venue     = row["venue"]
-            market_id = row["market_id"]
-            signal_id = row["signal_id"]
+            venue       = row["venue"]
+            market_id   = row["market_id"]
+            signal_id   = row["signal_id"]
+            check_count = row.get("check_count", 0)
+            resolved_at = row.get("resolved_at")  # used as "last_checked_at" for pending
+
+            # ── Back-off gate ─────────────────────────────────────────────
+            # Exponential gap: min_gap = base * 2^(check_count/4), capped at 12h
+            min_gap_secs = min(
+                _BACKOFF_BASE_SECS * (2 ** (check_count / 4)),
+                43200,  # 12h cap
+            )
+            last_check = resolved_at or row["created_at"]
+            if (now - last_check) < min_gap_secs:
+                skipped_backoff += 1
+                continue
+
+            # ── Too many failures → mark UNRESOLVABLE ────────────────────
+            if check_count >= _MAX_CHECK_COUNT:
+                with self._conn:
+                    self._conn.execute(
+                        "UPDATE signal_outcomes SET outcome = 'VOID', resolved_at = ? "
+                        "WHERE signal_id = ?",
+                        (now, signal_id),
+                    )
+                log.warning(
+                    "[OutcomeTracker] Signal %s marked VOID after %d failed resolution attempts",
+                    signal_id,
+                    check_count,
+                )
+                unresolvable += 1
+                continue
 
             resolution = None
             if venue == "POLYMARKET":
@@ -294,11 +336,12 @@ class OutcomeTracker:
             elif venue == "KALSHI":
                 resolution = _resolve_kalshi(market_id)
 
-            # Increment check counter regardless
+            # Increment check counter and record last-check timestamp
             with self._conn:
                 self._conn.execute(
-                    "UPDATE signal_outcomes SET check_count = check_count + 1 WHERE signal_id = ?",
-                    (signal_id,),
+                    "UPDATE signal_outcomes SET check_count = check_count + 1, "
+                    "resolved_at = ? WHERE signal_id = ?",
+                    (now, signal_id),
                 )
 
             if resolution is None:
@@ -363,7 +406,13 @@ class OutcomeTracker:
                 signal_id, resolution, edge_outcome, market_id[:20],
             )
 
-        return {"resolved": resolved, "still_pending": still_pending, "errors": errors}
+        return {
+            "resolved":        resolved,
+            "still_pending":   still_pending,
+            "skipped_backoff": skipped_backoff,
+            "unresolvable":    unresolvable,
+            "errors":          errors,
+        }
 
     # ── Stats ─────────────────────────────────────────────────────────────────
 
@@ -433,6 +482,50 @@ class OutcomeTracker:
             (cutoff, limit),
         ).fetchall()
         return [dict(r) for r in rows]
+
+    def cleanup(self, resolved_max_age_days: int = 180) -> dict[str, int]:
+        """
+        Purge old resolved signal_outcomes (and their user_picks) to prevent
+        unbounded table growth.  PENDING signals are never deleted by cleanup.
+
+        Default: keep resolved signals for 180 days (6 months).
+        user_picks rows are cascade-deleted when their parent signal is deleted.
+        """
+        cutoff = time.time() - (resolved_max_age_days * 86400)
+
+        with self._conn:
+            # Find old resolved signal_ids first
+            old_ids = [
+                r[0]
+                for r in self._conn.execute(
+                    """
+                    SELECT signal_id FROM signal_outcomes
+                    WHERE outcome != 'PENDING' AND created_at < ?
+                    """,
+                    (cutoff,),
+                ).fetchall()
+            ]
+
+            picks_deleted = 0
+            sigs_deleted  = 0
+            if old_ids:
+                ph = ",".join("?" * len(old_ids))
+                cur = self._conn.execute(
+                    f"DELETE FROM user_picks WHERE signal_id IN ({ph})", old_ids
+                )
+                picks_deleted = cur.rowcount
+                cur = self._conn.execute(
+                    f"DELETE FROM signal_outcomes WHERE signal_id IN ({ph})", old_ids
+                )
+                sigs_deleted = cur.rowcount
+
+        if sigs_deleted:
+            log.info(
+                "[OutcomeTracker] Cleanup: removed %d signals + %d picks older than %dd",
+                sigs_deleted, picks_deleted, resolved_max_age_days,
+            )
+
+        return {"signals_deleted": sigs_deleted, "picks_deleted": picks_deleted}
 
     def get_user_picks(
         self,

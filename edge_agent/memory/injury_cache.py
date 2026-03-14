@@ -29,7 +29,8 @@ from typing import Any
 log = logging.getLogger(__name__)
 
 _DB_PATH = Path(__file__).parent / "data" / "injury_cache.db"
-_TTL_HOURS = 24  # records older than this are discarded on next write
+_TTL_HOURS = 24        # injury records older than this are discarded on next write
+_ALERT_TTL_DAYS = 7   # change-alerts older than 7 days are auto-purged (sent or not)
 
 # Severity ordering for get_all() sorting (index 0 = most severe)
 _SEVERITY_ORDER = ["Out", "Suspension", "Doubtful", "Questionable", "Day-To-Day"]
@@ -120,12 +121,22 @@ class InjuryCache:
         Replace all cached records for this sport with new ones.
         Old records for the sport are deleted before inserting so there are no
         stale duplicates. Also prunes expired records for ALL sports.
+
+        Safety: if records is empty the existing cache is left untouched so a
+        failed API fetch does not wipe good data.
         """
+        if not records:
+            log.warning(
+                "[InjuryCache] store() called with 0 records for %s — keeping existing cache",
+                sport.upper(),
+            )
+            return
+
         now = time.time()
         expires = now + _TTL_HOURS * 3600
 
         with self._conn:
-            # Remove existing records for this sport (full replacement)
+            # Remove existing records for this sport (full replacement, atomic)
             self._conn.execute(
                 "DELETE FROM injury_cache WHERE sport = ?", (sport.lower(),)
             )
@@ -289,22 +300,27 @@ class InjuryCache:
         self, direction: str | None = None
     ) -> list[dict[str, Any]]:
         """
-        Return all unsent change alerts and mark them as sent in one transaction.
+        Return all unsent change alerts newer than _ALERT_TTL_DAYS and mark
+        them as sent in one transaction.  Alerts older than the TTL are silently
+        discarded — this prevents a flood of stale notifications after a restart.
 
         direction: if given, filter to 'worsening' or 'return' only.
                    If None (default), returns ALL pending alerts (both directions).
         Called by injury_refresh_job() to dispatch proactive Telegram messages.
         """
+        # Hard cutoff — ignore alerts older than 7 days regardless of sent state
+        age_cutoff = time.time() - (_ALERT_TTL_DAYS * 86400)
+
         if direction:
             rows = self._conn.execute(
                 """
                 SELECT id, sport, player_name, team, position,
                        old_status, new_status, direction, created_at
                 FROM   injury_change_alerts
-                WHERE  sent = 0 AND direction = ?
+                WHERE  sent = 0 AND direction = ? AND created_at >= ?
                 ORDER  BY created_at
                 """,
-                (direction,),
+                (direction, age_cutoff),
             ).fetchall()
         else:
             rows = self._conn.execute(
@@ -312,9 +328,10 @@ class InjuryCache:
                 SELECT id, sport, player_name, team, position,
                        old_status, new_status, direction, created_at
                 FROM   injury_change_alerts
-                WHERE  sent = 0
+                WHERE  sent = 0 AND created_at >= ?
                 ORDER  BY created_at
-                """
+                """,
+                (age_cutoff,),
             ).fetchall()
 
         if not rows:
@@ -333,15 +350,34 @@ class InjuryCache:
     # ── Maintenance ──────────────────────────────────────────────────────────
 
     def cleanup(self) -> int:
-        """Delete expired rows from all sports. Returns count of deleted rows."""
+        """
+        Delete expired injury rows and stale alert rows.
+        Returns total count of deleted rows.
+
+        Alert purge rules:
+          • sent=1 alerts older than _ALERT_TTL_DAYS → always deleted
+          • sent=0 alerts older than _ALERT_TTL_DAYS → deleted (prevents restart flood)
+        """
         now = time.time()
-        cur = self._conn.execute(
-            "DELETE FROM injury_cache WHERE expires_at <= ?", (now,)
-        )
-        self._conn.commit()
-        if cur.rowcount:
-            log.info("[InjuryCache] Cleaned up %d expired rows", cur.rowcount)
-        return cur.rowcount
+        alert_cutoff = now - (_ALERT_TTL_DAYS * 86400)
+
+        with self._conn:
+            r1 = self._conn.execute(
+                "DELETE FROM injury_cache WHERE expires_at <= ?", (now,)
+            )
+            r2 = self._conn.execute(
+                "DELETE FROM injury_change_alerts WHERE created_at < ?",
+                (alert_cutoff,),
+            )
+
+        total = r1.rowcount + r2.rowcount
+        if total:
+            log.info(
+                "[InjuryCache] Cleanup: %d expired injury rows, %d stale alert rows removed",
+                r1.rowcount,
+                r2.rowcount,
+            )
+        return total
 
     def stats(self) -> dict[str, Any]:
         """Summary of current cache state — useful for /status display."""

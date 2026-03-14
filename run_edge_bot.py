@@ -284,8 +284,20 @@ def _get_platform_doc_context(user_msg: str) -> str:
             ctx += "\n\n=== KALSHI ===\n" + _KALSHI_DOC[:1500]
     return ctx
 
-# Tracks already-alerted market keys to avoid duplicate alerts per scan cycle
-_alerted_keys: set[str] = set()
+# Tracks already-alerted market keys to avoid duplicate alerts per scan cycle.
+# Dict format: {key: first_alerted_timestamp} — entries expire after 24h so
+# duplicate suppression survives restarts (re-alerted after 24h is fine) and
+# the dict doesn't grow unbounded over long-running sessions.
+_alerted_keys: dict[str, float] = {}
+_ALERTED_KEYS_TTL = 86400  # 24h
+
+
+def _prune_alerted_keys() -> None:
+    """Remove alert-key entries older than _ALERTED_KEYS_TTL. Call before reads/writes."""
+    cutoff = time.time() - _ALERTED_KEYS_TTL
+    expired = [k for k, ts in _alerted_keys.items() if ts < cutoff]
+    for k in expired:
+        del _alerted_keys[k]
 
 # Approved signal types — only markets matching these signals will trigger alerts.
 # Empty set means "alert on all" (bootstrapping mode until user approves something).
@@ -294,6 +306,19 @@ _approved_signals: set[str] = _load_approved_signals()
 # Outcome tracker — resolution engine + paper trading DB
 from edge_agent.memory.outcome_tracker import OutcomeTracker as _OutcomeTracker
 _ot = _OutcomeTracker()
+
+# TraderCache singleton — shared connection across all commands to avoid
+# spawning a new DB connection on every /traders, /wallet, /watch invocation
+from edge_agent.memory.trader_cache import TraderCache as _TraderCache
+_trader_cache: "_TraderCache | None" = None
+
+
+def _get_trader_cache() -> "_TraderCache":
+    """Return the module-level TraderCache singleton, creating it if needed."""
+    global _trader_cache
+    if _trader_cache is None:
+        _trader_cache = _TraderCache()
+    return _trader_cache
 
 # Long-term per-user profile store (facts, moments, trading prefs)
 from edge_agent.memory.user_profile import UserProfileStore as _UserProfileStore
@@ -493,6 +518,7 @@ async def _broadcast(bot, text: str, **kwargs) -> None:
 
 async def _run_scan(bot, notify: bool = True) -> str:
     global _last_status, _alerted_keys
+    _prune_alerted_keys()  # expire stale dedup entries before processing
 
     svc = _get_service()
     scanner = _get_scanner()
@@ -521,7 +547,7 @@ async def _run_scan(bot, notify: bool = True) -> str:
             if _approved_signals and signal not in _approved_signals:
                 continue
 
-            _alerted_keys.add(key)
+            _alerted_keys[key] = time.time()
             new_alerts += 1
 
             if notify and bot:
@@ -551,7 +577,7 @@ async def _run_scan(bot, notify: bool = True) -> str:
         for game in triggered:
             tkey = f"trigger:{game.venue.value}:{game.market_id}"
             if tkey not in _alerted_keys:
-                _alerted_keys.add(tkey)
+                _alerted_keys[tkey] = time.time()
                 if notify and bot:
                     await _broadcast(
                         bot,
@@ -768,11 +794,10 @@ async def cmd_traders(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     if category not in valid_cats:
         category = "OVERALL"
 
-    from edge_agent.memory.trader_cache import TraderCache
     _TraderScore = _trader_mod.TraderScore  # already imported via importlib at top
 
     # ── Cache-first: pre-warmed by daily job, instant response ──────────────
-    cache     = TraderCache()
+    cache      = _get_trader_cache()
     cache_rows = cache.get_top(20)
 
     if cache_rows:
@@ -1029,8 +1054,7 @@ async def cmd_performance(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> Non
 
     # Smart money cache stats
     try:
-        from edge_agent.memory.trader_cache import TraderCache
-        st = TraderCache().stats()
+        st = _get_trader_cache().stats()
         if st["count"]:
             lines.append(
                 f"\n📈 <b>Smart Money Cache:</b> "
@@ -1097,11 +1121,78 @@ async def outcome_resolution_job(ctx: ContextTypes.DEFAULT_TYPE) -> None:
         loop = asyncio.get_event_loop()
         result = await loop.run_in_executor(None, lambda: _ot.resolve_pending(limit=50))
         log.info(
-            "Outcome resolution: %d resolved, %d still pending, %d errors.",
-            result["resolved"], result["still_pending"], result["errors"],
+            "Outcome resolution: %d resolved, %d pending, %d backoff-skipped, "
+            "%d unresolvable, %d errors.",
+            result["resolved"], result["still_pending"], result.get("skipped_backoff", 0),
+            result.get("unresolvable", 0), result["errors"],
         )
+        # Periodic 180-day cleanup of old resolved signals
+        await loop.run_in_executor(None, lambda: _ot.cleanup(resolved_max_age_days=180))
     except Exception as exc:
         log.warning("Outcome resolution job failed: %s", exc)
+
+
+async def maintenance_job(ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    """
+    Weekly Sunday 3am PT — vacuum all SQLite DBs, archive old scan logs,
+    and purge stale .cache/ JSON files.
+    Keeps DB files compact and prevents unbounded disk growth.
+    """
+    import glob as _glob
+    import os as _os
+    from pathlib import Path as _Path
+
+    log.info("[maintenance_job] Weekly maintenance starting.")
+
+    # ── 1. VACUUM all SQLite databases ────────────────────────────────────
+    db_dir = _Path(__file__).parent / "edge_agent" / "memory" / "data"
+    vacuumed = []
+    for db_file in sorted(db_dir.glob("*.db")):
+        try:
+            import sqlite3 as _sqlite3
+            conn = _sqlite3.connect(str(db_file))
+            conn.execute("VACUUM")
+            conn.close()
+            vacuumed.append(db_file.name)
+        except Exception as exc:
+            log.warning("[maintenance_job] VACUUM failed for %s: %s", db_file.name, exc)
+    log.info("[maintenance_job] VACUUMed: %s", ", ".join(vacuumed))
+
+    # ── 2. Archive old scan log entries ───────────────────────────────────
+    try:
+        from edge_agent.memory.scan_log import ScanLog as _ScanLog
+        sl = _ScanLog()
+        result = sl.cleanup(max_age_days=90)
+        log.info(
+            "[maintenance_job] scan_log: %d runs + %d signals archived.",
+            result["runs_deleted"], result["signals_deleted"],
+        )
+    except Exception as exc:
+        log.warning("[maintenance_job] scan_log cleanup failed: %s", exc)
+
+    # ── 3. Purge stale .cache/ JSON files (>48h old) ──────────────────────
+    import time as _time
+    cache_dir = _Path(__file__).parent / ".cache"
+    cutoff    = _time.time() - (48 * 3600)  # 48 hours
+    removed   = 0
+    errors    = 0
+    if cache_dir.exists():
+        for fpath in cache_dir.glob("*.json"):
+            try:
+                if fpath.stat().st_mtime < cutoff:
+                    fpath.unlink()
+                    removed += 1
+            except Exception:
+                errors += 1
+    log.info(
+        "[maintenance_job] .cache/ cleanup: %d stale files removed (%d errors).",
+        removed, errors,
+    )
+
+    # ── 4. Prune in-memory alerted_keys (already time-keyed, just force prune) ─
+    _prune_alerted_keys()
+
+    log.info("[maintenance_job] Weekly maintenance complete.")
 
 
 async def trader_refresh_job(ctx: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1138,8 +1229,7 @@ async def discovery_job(ctx: ContextTypes.DEFAULT_TYPE) -> None:
         )
 
         # Graduate top candidates to Tier-2 full vet (up to 15 per cycle)
-        from edge_agent.memory.trader_cache import TraderCache
-        cache = TraderCache()
+        cache = _get_trader_cache()
         queue = cache.pool_get_vet_queue(limit=15, min_fast_score=40.0, exclude_done=True)
         if queue:
             log.info("[discovery_job] Tier-2 vetting %d top candidates.", len(queue))
@@ -1176,8 +1266,7 @@ async def watchlist_vet_job(ctx: ContextTypes.DEFAULT_TYPE) -> None:
     """
     log.info("[watchlist_vet_job] Checking due wallets.")
     try:
-        from edge_agent.memory.trader_cache import TraderCache
-        cache  = TraderCache()
+        cache  = _get_trader_cache()
         due    = cache.watchlist_due_for_vet()
         if not due:
             log.info("[watchlist_vet_job] No wallets due for re-vet.")
@@ -1250,8 +1339,7 @@ async def cmd_watch(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         await update.message.reply_text("⚠️ That doesn't look like a valid wallet address.")
         return
 
-    from edge_agent.memory.trader_cache import TraderCache
-    cache = TraderCache()
+    cache = _get_trader_cache()
 
     # Check if already watched
     existing = cache.watchlist_get(addr)
@@ -1306,9 +1394,8 @@ async def cmd_unwatch(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         )
         return
 
-    addr = args[0].strip().lower()
-    from edge_agent.memory.trader_cache import TraderCache
-    removed = TraderCache().watchlist_remove(addr)
+    addr    = args[0].strip().lower()
+    removed = _get_trader_cache().watchlist_remove(addr)
 
     if removed:
         await update.message.reply_text(f"🗑️ Removed <code>{_e(addr[:14])}…</code> from watchlist.", parse_mode=ParseMode.HTML)
@@ -1321,8 +1408,7 @@ async def cmd_watchlist(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     /watchlist
     Show all watched wallets with their latest scores and last-vet time.
     """
-    from edge_agent.memory.trader_cache import TraderCache
-    cache   = TraderCache()
+    cache   = _get_trader_cache()
     entries = cache.watchlist_list()
 
     if not entries:
@@ -3020,6 +3106,14 @@ def main() -> None:
 
     # Outcome resolution — check pending signals every 2h, first run 5 min after boot
     app.job_queue.run_repeating(outcome_resolution_job, interval=7200, first=300)
+
+    # Weekly maintenance — VACUUM all DBs + archive scan_log + purge .cache/
+    # Runs every Sunday at 3:00 AM PT (604800s = 7 days)
+    app.job_queue.run_daily(
+        maintenance_job,
+        time=dt_time(3, 0, tzinfo=_PACIFIC),
+        days=(6,),  # Sunday only (0=Mon … 6=Sun)
+    )
 
     # Background market scan loop — reads from injury cache, no live injury API calls
     app.job_queue.run_repeating(

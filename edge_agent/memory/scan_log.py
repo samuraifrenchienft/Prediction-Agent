@@ -21,7 +21,8 @@ from typing import Any
 
 log = logging.getLogger(__name__)
 
-_DB_PATH = Path(__file__).parent / "data" / "scan_log.db"
+_DB_PATH        = Path(__file__).parent / "data" / "scan_log.db"
+_ARCHIVE_DAYS   = 90   # scan_runs + scan_signals older than this are purged
 
 
 def _connect() -> sqlite3.Connection:
@@ -216,3 +217,57 @@ class ScanLog:
             (limit,),
         ).fetchall()
         return [dict(r) for r in rows]
+
+    # ------------------------------------------------------------------
+    # Maintenance
+    # ------------------------------------------------------------------
+
+    def cleanup(self, max_age_days: int = _ARCHIVE_DAYS) -> dict[str, int]:
+        """
+        Delete scan_runs and their child scan_signals older than max_age_days.
+        Cascades correctly: signals are deleted first by run_id, then runs.
+
+        Returns {"runs_deleted": N, "signals_deleted": M}.
+        Called automatically every _ARCHIVE_DAYS * 0.1 scans (~9 scans/day
+        triggers cleanup once per day at 288 scans/day cadence).
+        """
+        cutoff = time.time() - (max_age_days * 86400)
+
+        with self._conn:
+            # Delete signals for old runs first (no FK cascade in SQLite by default)
+            old_run_ids = [
+                r[0]
+                for r in self._conn.execute(
+                    "SELECT id FROM scan_runs WHERE ts < ?", (cutoff,)
+                ).fetchall()
+            ]
+
+            sig_deleted = 0
+            if old_run_ids:
+                placeholders = ",".join("?" * len(old_run_ids))
+                cur = self._conn.execute(
+                    f"DELETE FROM scan_signals WHERE scan_run_id IN ({placeholders})",
+                    old_run_ids,
+                )
+                sig_deleted = cur.rowcount
+
+            cur = self._conn.execute(
+                "DELETE FROM scan_runs WHERE ts < ?", (cutoff,)
+            )
+            runs_deleted = cur.rowcount
+
+        if runs_deleted:
+            log.info(
+                "[ScanLog] Archive cleanup: removed %d runs + %d signals older than %d days",
+                runs_deleted,
+                sig_deleted,
+                max_age_days,
+            )
+
+        return {"runs_deleted": runs_deleted, "signals_deleted": sig_deleted}
+
+    def row_counts(self) -> dict[str, int]:
+        """Return current row counts — useful for /status monitoring."""
+        r1 = self._conn.execute("SELECT COUNT(*) FROM scan_runs").fetchone()[0]
+        r2 = self._conn.execute("SELECT COUNT(*) FROM scan_signals").fetchone()[0]
+        return {"scan_runs": r1, "scan_signals": r2}
