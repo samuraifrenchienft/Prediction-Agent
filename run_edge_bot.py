@@ -198,6 +198,7 @@ log = logging.getLogger("edge_bot")
 BOT_TOKEN          = os.environ.get("TELEGRAM_BOT_TOKEN", "")
 CHAT_ID            = os.environ.get("TELEGRAM_CHAT_ID", "")
 OWNER_ID           = os.environ.get("TELEGRAM_OWNER_ID", "")   # your personal user ID (from @userinfobot)
+ALERT_CHANNEL_ID   = os.environ.get("ALERT_CHANNEL_ID", CHAT_ID)  # dedicated copy-trade alert channel
 SCAN_INTERVAL_MIN    = int(os.environ.get("SCAN_INTERVAL_MINUTES", "180"))  # default 3 hours
 INJURY_REFRESH_MIN   = int(os.environ.get("INJURY_REFRESH_MINUTES", "240"))  # default 4 hours
 BANKROLL_USD         = float(os.environ.get("BANKROLL_USD", "10000"))
@@ -348,7 +349,13 @@ _trader_cache: "_TraderCache | None" = None
 # Smart money positions cache — refreshed every 30 min by background job.
 # Stores open positions from top-scored watchlist wallets so the AI can
 # reference what real traders are currently betting on without per-message latency.
-_sm_positions_cache: dict = {"lines": [], "fetched_at": 0.0}
+_sm_positions_cache: dict = {
+    "lines":         [],
+    "fetched_at":    0.0,
+    "position_keys": set(),  # "addr:condId:side" keys seen in last cycle (for new-position diff)
+    "alertable":     [],     # list[dict] of new positions that passed quality filters this cycle
+}
+_sm_alerted_24h: dict[str, float] = {}   # "addr:condId" → Unix timestamp of last alert sent
 _SM_CACHE_TTL = 1800   # 30 minutes
 
 
@@ -2073,7 +2080,11 @@ def _build_smart_money_context(force_refresh: bool = False, sport_filter: str = 
         # Top 8 non-bot wallets by final_score — sport specialists may be ranked lower
         top    = cache.get_top(limit=8)
         client = _TraderClient()
-        new_lines: list[str] = []
+        new_lines:    list[str]  = []
+        new_pos_keys: set[str]   = set()
+        new_alertable: list[dict] = []
+
+        prev_keys = _sm_positions_cache.get("position_keys", set())
 
         # Sort: specialists for the requested sport first, then by score
         if sport_filter:
@@ -2090,10 +2101,12 @@ def _build_smart_money_context(force_refresh: bool = False, sport_filter: str = 
         for tw in top:
             if shown >= 5:
                 break
-            addr   = tw.get("wallet_address", "")
-            score  = int(float(tw.get("final_score", 0) or 0) * 100)
-            streak = int(tw.get("current_streak", 0) or 0)
-            strat  = _derive_strategy_tag(tw)
+            addr     = tw.get("wallet_address", "")
+            score    = int(float(tw.get("final_score", 0) or 0) * 100)
+            streak   = int(tw.get("current_streak", 0) or 0)
+            strat    = _derive_strategy_tag(tw)
+            pnl_all  = float(tw.get("pnl_alltime", 0) or 0)
+            win_rate = float(tw.get("win_rate_alltime", 0) or 0)
             if not addr:
                 continue
             try:
@@ -2118,24 +2131,44 @@ def _build_smart_money_context(force_refresh: bool = False, sport_filter: str = 
             elif streak <= -3:
                 streak_badge = f" -{abs(streak)}L skid"
 
-            wallet_header = (
-                f"  [{score}/100]{streak_badge} {addr[:8]}... | {strat}"
-            )
+            wallet_header = f"  [{score}/100]{streak_badge} {addr[:8]}... | {strat}"
             new_lines.append(wallet_header)
 
-            # Format each position compactly
             for pos in sig[:3]:   # max 3 positions per wallet
                 title   = (pos.get("title") or pos.get("market", "Unknown market"))[:55]
                 side    = "YES" if pos.get("outcomeIndex", 0) == 0 else "NO"
                 size    = float(pos.get("size", pos.get("currentValue", 0)) or 0)
                 cur_pct = float(pos.get("curPrice", pos.get("currentPrice", 0.5)) or 0.5)
+                cond_id = pos.get("conditionId", pos.get("market", title[:20]))
+
+                pos_key = f"{addr}:{cond_id}:{side}"
+                new_pos_keys.add(pos_key)
+
+                # Detect new positions (not seen in previous cycle) for alert candidates
+                if pos_key not in prev_keys:
+                    new_alertable.append({
+                        "addr":     addr,
+                        "score":    score,
+                        "streak":   streak,
+                        "strat":    strat,
+                        "pnl_all":  pnl_all,
+                        "win_rate": win_rate,
+                        "title":    title,
+                        "side":     side,
+                        "size":     size,
+                        "cur_pct":  cur_pct,
+                        "cond_id":  cond_id,
+                    })
+
                 new_lines.append(
                     f"    → {side} on '{title}' ${size:,.0f} @ {cur_pct:.0%}"
                 )
             shown += 1
 
-        _sm_positions_cache["lines"]      = new_lines
-        _sm_positions_cache["fetched_at"] = now
+        _sm_positions_cache["lines"]         = new_lines
+        _sm_positions_cache["fetched_at"]    = now
+        _sm_positions_cache["position_keys"] = new_pos_keys
+        _sm_positions_cache["alertable"]     = new_alertable
 
         if new_lines:
             return (
@@ -2146,6 +2179,149 @@ def _build_smart_money_context(force_refresh: bool = False, sport_filter: str = 
         log.debug("[SmartMoney] Position refresh failed: %s", exc)
 
     return ""
+
+
+# ---------------------------------------------------------------------------
+# Copy-trade alert quality filter + channel notifier
+# ---------------------------------------------------------------------------
+
+_SM_ALERT_MIN_SCORE   = 40    # wallets below this score are too low-quality
+_SM_ALERT_MIN_SIZE    = 200   # positions below $200 are noise / test trades
+_SM_ALERT_PRICE_LOW   = 0.15  # below 15% → near-certain NO, no useful entry window
+_SM_ALERT_PRICE_HIGH  = 0.75  # above 75% → mostly played out, follower gets little upside
+_SM_ALERT_DCA_WINDOW  = 86400 # 24 hours — suppress follow-on buys into same market
+
+
+def _copy_trade_quality_check(pos: dict) -> tuple[bool, str]:
+    """
+    Return (passes, reason_if_rejected) for a candidate copy-trade position.
+
+    Filters:
+      1. Wallet score gate (too low quality)
+      2. Entry window — price too high (mostly played out) or too low (near-certain)
+      3. Position size gate (test trade / noise)
+      4. DCA suppression — same wallet already alerted on this market in last 24h
+    """
+    score   = pos["score"]
+    cur_pct = pos["cur_pct"]
+    size    = pos["size"]
+    key_24h = f"{pos['addr']}:{pos['cond_id']}"
+
+    if score < _SM_ALERT_MIN_SCORE:
+        return False, f"score {score}/100 below minimum {_SM_ALERT_MIN_SCORE}"
+
+    if size < _SM_ALERT_MIN_SIZE:
+        return False, f"position ${size:.0f} below minimum ${_SM_ALERT_MIN_SIZE}"
+
+    if cur_pct < _SM_ALERT_PRICE_LOW:
+        return False, f"price {cur_pct:.0%} — near-certain NO, no entry window"
+
+    if cur_pct > _SM_ALERT_PRICE_HIGH:
+        return False, f"price {cur_pct:.0%} — market mostly resolved, poor upside"
+
+    last_alerted = _sm_alerted_24h.get(key_24h, 0.0)
+    if time.time() - last_alerted < _SM_ALERT_DCA_WINDOW:
+        return False, "DCA follow-on — same market alerted in last 24h"
+
+    return True, "ok"
+
+
+async def _send_copy_trade_alerts(bot) -> int:
+    """
+    Read new alertable positions from _sm_positions_cache, apply quality filters,
+    and send passing alerts to ALERT_CHANNEL_ID.
+
+    Called by the async smart money refresh job after _build_smart_money_context().
+    Returns the number of alerts sent.
+    """
+    if not ALERT_CHANNEL_ID:
+        return 0
+
+    candidates = _sm_positions_cache.get("alertable", [])
+    if not candidates:
+        return 0
+
+    # First-run guard: if prev_keys was empty, this is a cold start — don't
+    # alert everything in the cache at once (they aren't new, we just don't know).
+    # We detect cold start by checking if prev_keys was empty before the refresh.
+    # The cache now has the populated keys, so we check if alertable count equals
+    # total positions (which means prev_keys was empty = cold start).
+    total_pos = len(_sm_positions_cache.get("position_keys", set()))
+    if len(candidates) == total_pos and total_pos > 0:
+        log.info("[CopyAlert] Cold start — skipping %d positions (no previous baseline)", total_pos)
+        return 0
+
+    sent = 0
+    for pos in candidates:
+        ok, reason = _copy_trade_quality_check(pos)
+        if not ok:
+            log.debug("[CopyAlert] Filtered out '%s': %s", pos["title"][:40], reason)
+            continue
+
+        score   = pos["score"]
+        streak  = pos["streak"]
+        strat   = pos["strat"]
+        addr    = pos["addr"]
+        title   = pos["title"]
+        side    = pos["side"]
+        size    = pos["size"]
+        cur_pct = pos["cur_pct"]
+        pnl_all = pos["pnl_all"]
+        wr      = pos["win_rate"]
+
+        # Upside/downside remaining
+        upside_pp  = round((1.0 - cur_pct) * 100, 1) if side == "YES" else round(cur_pct * 100, 1)
+        downside_pp = round(cur_pct * 100, 1) if side == "YES" else round((1.0 - cur_pct) * 100, 1)
+
+        streak_line = ""
+        if streak >= 5:
+            streak_line = f"\n🔥 On a <b>{streak}-game win streak</b>"
+        elif streak >= 3:
+            streak_line = f"\n📈 +{streak}W streak"
+        elif streak <= -3:
+            streak_line = f"\n⚠️ On a {abs(streak)}-game losing skid"
+
+        pnl_str = f"+${pnl_all:,.0f}" if pnl_all >= 0 else f"-${abs(pnl_all):,.0f}"
+        confidence = (
+            "High conviction" if score >= 60 else
+            "Moderate signal" if score >= 40 else "Weak signal"
+        )
+
+        text = (
+            f"🔔 <b>COPY TRADE SIGNAL</b>\n\n"
+            f"<b>{_e(title)}</b>\n"
+            f"→ <b>{side}</b> @ <b>{cur_pct:.0%}</b> | ${size:,.0f} position\n"
+            f"📊 Upside: +{upside_pp}pp | Risk: -{downside_pp}pp\n\n"
+            f"<b>Wallet:</b> {addr[:10]}... [{score}/100] — {_e(strat)}"
+            f"{streak_line}\n"
+            f"All-time: {wr:.0%} win rate | {pnl_str} PnL\n"
+            f"<i>{confidence} — entry window still open</i>\n\n"
+            f"<i>Search this market on Polymarket or Kalshi to follow.</i>"
+        )
+
+        try:
+            await bot.send_message(
+                chat_id    = ALERT_CHANNEL_ID,
+                text       = text,
+                parse_mode = ParseMode.HTML,
+            )
+            # Mark this wallet+market as alerted so DCA follow-ons are suppressed
+            _sm_alerted_24h[f"{addr}:{pos['cond_id']}"] = time.time()
+            sent += 1
+            log.info(
+                "[CopyAlert] Sent: %s %s on '%s' @ %.0f%% (score=%d)",
+                addr[:10], side, title[:40], cur_pct * 100, score,
+            )
+        except Exception as exc:
+            log.warning("[CopyAlert] Failed to send alert: %s", exc)
+
+    # Prune _sm_alerted_24h — remove entries older than 24h to prevent unbounded growth
+    cutoff = time.time() - _SM_ALERT_DCA_WINDOW
+    expired = [k for k, ts in _sm_alerted_24h.items() if ts < cutoff]
+    for k in expired:
+        del _sm_alerted_24h[k]
+
+    return sent
 
 
 # ---------------------------------------------------------------------------
@@ -3678,8 +3854,14 @@ def main() -> None:
     async def _smart_money_refresh_job(ctx: ContextTypes.DEFAULT_TYPE) -> None:
         try:
             _build_smart_money_context(force_refresh=True)
-            log.info("[smart_money_job] Position cache refreshed — %d lines",
-                     len(_sm_positions_cache["lines"]))
+            n_lines = len(_sm_positions_cache["lines"])
+            n_new   = len(_sm_positions_cache.get("alertable", []))
+            log.info("[smart_money_job] Position cache refreshed — %d lines, %d new candidates",
+                     n_lines, n_new)
+            if n_new > 0:
+                n_sent = await _send_copy_trade_alerts(ctx.bot)
+                if n_sent:
+                    log.info("[smart_money_job] Sent %d copy-trade alert(s) to channel", n_sent)
         except Exception as exc:
             log.debug("[smart_money_job] Refresh failed: %s", exc)
 
