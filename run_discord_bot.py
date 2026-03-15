@@ -77,6 +77,15 @@ from edge_agent.memory.outcome_tracker import OutcomeTracker as _OutcomeTracker
 from edge_agent.memory.user_profile import UserProfileStore as _UserProfileStore
 from edge_agent.memory.channel_registry import ChannelRegistry as _ChannelRegistry
 from edge_agent.models import Recommendation
+from edge_agent.memory.trader_cache import TraderCache as _TraderCache
+from edge_agent.insider_alerts import InsiderAlertEngine as _InsiderAlertEngine
+from edge_agent.memory.decision_log import DecisionLog as _DecisionLog
+from edge_agent.ml.ml_store import MLStore as _MLStore
+from edge_agent.ml.signal_scorer import SignalScorer as _SignalScorer
+from edge_agent.ml.confidence_calibrator import ConfidenceCalibrator as _ConfidenceCalibrator
+from edge_agent.ml.regime_detector import RegimeDetector as _RegimeDetector
+from edge_agent.prompt_registry import get_registry as _get_prompt_registry
+import time
 
 try:
     _scanner_mod   = importlib.import_module("edge_agent.scanner")
@@ -106,6 +115,47 @@ _registry  = _ChannelRegistry()   # reuse same SQLite registry as Telegram
 
 _alerted_keys: set[str] = set()
 _last_status: str        = "No scan yet"
+
+# Shared singletons
+_tc             = _TraderCache()
+_decision_log   = _DecisionLog()
+_ml_store       = _MLStore()
+_signal_scorer  = _SignalScorer()
+_calibrator     = _ConfidenceCalibrator(_ml_store)
+_regime         = _RegimeDetector(_ml_store)
+_prompt_registry = _get_prompt_registry()
+_calibrator.load()
+_signal_scorer.load()
+
+# Smart money cache
+_sm_positions_cache: dict = {}
+_sm_cache_ts: float = 0.0
+_SM_CACHE_TTL = 1800   # 30 min
+_sm_prev_positions: dict = {}  # for new-position detection
+
+# Insider engine
+_insider_engine: _InsiderAlertEngine | None = None
+
+def _get_insider_engine() -> _InsiderAlertEngine:
+    global _insider_engine
+    if _insider_engine is None:
+        _insider_engine = _InsiderAlertEngine()
+    return _insider_engine
+
+# Approved signals set (mirrors Telegram)
+_APPROVALS_FILE = Path("edge_agent/memory/data/approvals.json")
+
+def _load_approved() -> set[str]:
+    try:
+        if _APPROVALS_FILE.exists():
+            return set(json.loads(_APPROVALS_FILE.read_text()))
+    except Exception:
+        pass
+    return set()
+
+_approved_signals: set[str] = _load_approved()
+
+import json
 
 # ---------------------------------------------------------------------------
 # Helpers — engine access
@@ -248,22 +298,63 @@ def _get_session(user_id: int) -> SessionMemory:
 # AI response helper
 # ---------------------------------------------------------------------------
 
+_SMART_MONEY_TRIGGERS = {
+    "trade", "buy", "bet", "position", "market", "edge", "wallet",
+    "copy", "follow", "who", "smart money", "trader", "recommend",
+    "should i", "worth", "streak", "hot", "specialist", "insider",
+}
+
+
+def _build_smart_money_context_discord() -> str:
+    """Pull top tracked wallets and their open positions for AI context."""
+    global _sm_positions_cache, _sm_cache_ts
+    now = time.time()
+    if _sm_positions_cache and (now - _sm_cache_ts) < _SM_CACHE_TTL:
+        return _sm_positions_cache.get("block", "")
+    try:
+        traders = _tc.get_top(limit=5)
+        if not traders:
+            return ""
+        lines = ["\n[Smart Money — top tracked wallets]"]
+        for t in traders:
+            addr  = t.get("wallet_address", "")[:10]
+            score = t.get("final_score", 0)
+            pnl   = t.get("pnl_alltime", 0)
+            wr    = t.get("win_rate_alltime", 0)
+            streak = int(t.get("current_streak", 0))
+            streak_str = f" 🔥{streak}W" if streak >= 3 else ""
+            lines.append(
+                f"  Score {score:.0f}/100{streak_str} | "
+                f"PnL ${pnl:+,.0f} | WR {wr:.0%} | {addr}..."
+            )
+        lines.append("[End Smart Money]")
+        block = "\n".join(lines)
+        _sm_positions_cache = {"block": block}
+        _sm_cache_ts = now
+        return block
+    except Exception as exc:
+        log.debug("smart_money_context_discord failed: %s", exc)
+        return ""
+
+
 async def _ai_reply(
     message: discord.Message,
     user_msg: str,
     user_id: int,
 ) -> str:
-    """Build context and get an AI response, same logic as Telegram bot."""
+    """Build context and get an AI response — full feature parity with Telegram."""
+    import time as _time
+    t_start = _time.time()
     loop = asyncio.get_event_loop()
 
-    mem       = _get_session(user_id)
-    kb_ctx    = _kb.get_context_for_question(user_msg)
-    sess_ctx  = mem.get_session_context(max_exchanges=4)
-    prof_ctx  = _profiles.get_profile_context(user_id)
+    mem      = _get_session(user_id)
+    kb_ctx   = _kb.get_context_for_question(user_msg)
+    sess_ctx = mem.get_session_context(max_exchanges=4)
+    prof_ctx = _profiles.get_profile_context(user_id)
 
     # Recent scan opps
-    svc   = _get_service()
-    top   = svc.engine.top_opportunities(limit=3)
+    svc = _get_service()
+    top = svc.engine.top_opportunities(limit=3)
     scan_ctx = ""
     if top:
         lines = ["\nRecent scan opportunities:"]
@@ -274,35 +365,60 @@ async def _ai_reply(
             )
         scan_ctx = "\n".join(lines)
 
-    system_prompt = (
-        "You are EDGE, an AI prediction market analyst operating on Discord. "
-        "Your job: help users find and act on mispriced prediction markets on "
-        "Polymarket and Kalshi.\n\n"
-        "PAPER TRADING — THIS IS A BUILT-IN FEATURE:\n"
-        "• Every scan alert has ✅ YES / ❌ NO buttons — clicking logs a $10 virtual stake.\n"
-        "• /mytrades — open picks + settled WIN/LOSS/VOID history + P&L.\n"
-        "• /performance — your paper P&L, win rate, and ROI.\n\n"
-        "PLATFORMS:\n"
-        "• Polymarket — decentralized, USDC on Polygon, no KYC, 0% fees\n"
-        "• Kalshi — US-regulated (CFTC), USD, KYC required, ~7% fee\n\n"
-        "Be concise. Use Discord markdown (**bold**, *italic*, `code`). "
-        "Keep replies under 300 words. Return plain text, not JSON.\n\n"
-        "CRITICAL — YOU ARE A PREDICTION MARKET ANALYST, NOT A SPORTSBOOK:\n"
-        "• Frame edges as probability, not spreads.\n"
-        "• Prices are probabilities (0-100%). Positions are YES/NO contracts."
-    )
+    # Smart money context — inject when trading keywords present
+    q_lower = user_msg.lower()
+    smart_money_ctx = ""
+    if any(kw in q_lower for kw in _SMART_MONEY_TRIGGERS) or scan_ctx:
+        smart_money_ctx = _build_smart_money_context_discord()
 
-    prompt = user_msg + kb_ctx + prof_ctx + sess_ctx + scan_ctx
+    # System prompt from registry (same as Telegram — chat_system@2.6)
+    try:
+        system_prompt, _pv = _prompt_registry.render(
+            "chat_system",
+            correction_instruction="",
+            onboarding_hint="",
+            user_name=str(user_id),
+            current_month=datetime.now(timezone.utc).strftime("%B"),
+        )
+        # Discord uses markdown not HTML — append platform note
+        system_prompt = system_prompt.replace(
+            "operating on Telegram", "operating on Discord"
+        ) + "\n\nUse Discord markdown (**bold**, *italic*, `code`) not HTML."
+    except Exception:
+        system_prompt = (
+            "You are EDGE, an AI prediction market analyst on Discord. "
+            "Help users find mispriced prediction markets. Be concise, under 300 words."
+        )
+
+    full_prompt = user_msg + kb_ctx + prof_ctx + sess_ctx + scan_ctx + smart_money_ctx
 
     reply = await loop.run_in_executor(
         None,
-        lambda: get_chat_response(prompt, task_type="creative", system_prompt=system_prompt),
+        lambda: get_chat_response(full_prompt, task_type="creative", system_prompt=system_prompt),
     )
     reply = reply or "Sorry, I couldn't generate a response right now."
 
-    # Save to session
     mem.add_exchange(user_msg, reply)
     _profiles.update_from_message(user_id, user_msg)
+
+    # Log to decision log
+    try:
+        latency_ms = int((_time.time() - t_start) * 1000)
+        ctx_blocks = ["kb", "session"]
+        if smart_money_ctx:
+            ctx_blocks.append("smart_money")
+        if scan_ctx:
+            ctx_blocks.append("scan")
+        _decision_log.log(
+            call_type="chat",
+            model="discord",
+            prompt_version="chat_system@2.6",
+            context_blocks=ctx_blocks,
+            latency_ms=latency_ms,
+            user_id=str(user_id),
+        )
+    except Exception:
+        pass
 
     return reply
 
@@ -435,6 +551,10 @@ class EdgeDiscordBot(discord.Client):
             injury_job.start()
         if not resolution_job.is_running():
             resolution_job.start()
+        if not smart_money_job.is_running():
+            smart_money_job.start()
+        if not insider_job.is_running():
+            insider_job.start()
 
     async def on_message(self, message: discord.Message) -> None:
         if message.author.bot:
@@ -526,6 +646,101 @@ async def resolution_job():
         log.warning("resolution_job error: %s", exc)
 
 
+@tasks.loop(minutes=30)
+async def smart_money_job():
+    """Refresh smart money cache and broadcast copy-trade alerts for new positions."""
+    global _sm_positions_cache, _sm_cache_ts, _sm_prev_positions
+    _sm_cache_ts = 0  # force refresh
+    try:
+        traders = _tc.get_top(limit=5)
+        if not traders:
+            return
+        _trader_api = importlib.import_module("edge_agent.dat-ingestion.trader_api")
+        loop = asyncio.get_event_loop()
+        new_positions: dict = {}
+        for t in traders:
+            addr  = t.get("wallet_address", "")
+            score = t.get("final_score", 0)
+            if score < 35 or not addr:
+                continue
+            try:
+                positions = await loop.run_in_executor(
+                    None, lambda a=addr: _trader_api.get_open_positions(a)
+                )
+                for p in (positions or []):
+                    cid  = p.get("conditionId", "")
+                    size = float(p.get("currentValue") or p.get("size") or 0)
+                    if size < 100 or not cid:
+                        continue
+                    price = float(p.get("currentPrice") or p.get("price") or 0)
+                    # Filter: skip near-certain and too-late entries
+                    if price > 0.80 or price < 0.15:
+                        continue
+                    key = f"{addr}:{cid}"
+                    new_positions[key] = {"addr": addr, "cid": cid, "size": size,
+                                          "price": price, "score": score,
+                                          "q": p.get("question", "")[:80]}
+            except Exception:
+                continue
+
+        # Detect new positions not in previous cache
+        truly_new = {k: v for k, v in new_positions.items() if k not in _sm_prev_positions}
+        _sm_prev_positions = new_positions
+
+        if truly_new:
+            chat_ids = _registry.get_all_chat_ids()
+            for pos in truly_new.values():
+                embed = discord.Embed(
+                    title  = "🐋 Copy-Trade Alert — Smart Money Move",
+                    colour = 0xAA00FF,
+                    timestamp = datetime.now(timezone.utc),
+                )
+                embed.add_field(name="Market",  value=pos["q"] or pos["cid"][:40], inline=False)
+                embed.add_field(name="Score",   value=f"{pos['score']:.0f}/100",   inline=True)
+                embed.add_field(name="Size",    value=f"${pos['size']:,.0f}",       inline=True)
+                embed.add_field(name="Price",   value=f"{int(pos['price']*100)}% YES", inline=True)
+                embed.add_field(name="Wallet",  value=f"`{pos['addr'][:10]}...`",  inline=False)
+                embed.set_footer(text="Entry window open — verify on Polymarket before following")
+                for cid in chat_ids:
+                    ch = bot.get_channel(cid)
+                    if ch:
+                        try:
+                            await ch.send(embed=embed)
+                        except Exception:
+                            pass
+    except Exception as exc:
+        log.warning("smart_money_job error: %s", exc)
+
+
+@tasks.loop(minutes=5)
+async def insider_job():
+    """Detect whale/insider bets on niche markets and broadcast to all user channels."""
+    engine = _get_insider_engine()
+    try:
+        chat_ids = _registry.get_all_chat_ids()
+
+        async def _send_to_channels(msg: str) -> None:
+            embed = discord.Embed(
+                description = msg[:4000],
+                colour      = 0xFF4500,
+                timestamp   = datetime.now(timezone.utc),
+            )
+            embed.set_author(name="🚨 Insider Alert — Whale Detected")
+            for cid in chat_ids:
+                ch = bot.get_channel(cid)
+                if ch:
+                    try:
+                        await ch.send(embed=embed)
+                    except Exception:
+                        pass
+
+        n = await engine.run_scan(send_alert_fn=_send_to_channels)
+        if n:
+            log.info("[insider_job] %d alert(s) fired", n)
+    except Exception as exc:
+        log.warning("insider_job error: %s", exc)
+
+
 # ---------------------------------------------------------------------------
 # Admin slash commands (owner only)
 # ---------------------------------------------------------------------------
@@ -592,15 +807,23 @@ async def cmd_adduser(interaction: discord.Interaction, member: discord.Member):
             f"Hey {member.mention}! Your private prediction market intelligence channel is ready.\n\n"
             "**What I do:**\n"
             "• Scan Polymarket & Kalshi for mispriced markets\n"
-            "• Vet smart money wallets for edges\n"
-            "• Track injuries and their market impact\n"
-            "• Help you build a paper trading track record\n\n"
+            "• Vet and track smart money wallets — copy-trade alerts fire here\n"
+            "• Detect whale/insider bets on niche markets before they move\n"
+            "• Track injuries and their market impact in real-time\n"
+            "• Build your paper trading track record with one tap\n\n"
             "**Quick start:**\n"
-            "`/scan` — run a live market scan\n"
-            "`/top` — top 3 highest-EV picks right now\n"
+            "`/scan` — live market scan\n"
+            "`/top` — top 3 highest-EV picks\n"
+            "`/traders` — top smart money wallets\n"
+            "`/insider` — recent whale/insider alerts\n"
             "`/injuries nba` — live injury report\n"
-            "`/mytrades` — your paper P&L\n\n"
-            "Or just ask me anything — I'm always listening here."
+            "`/mytrades` — your paper P&L\n"
+            "`/watch <address>` — add a wallet to watchlist\n\n"
+            "**Auto-alerts (no action needed):**\n"
+            "🐋 Copy-trade: smart money opens a new position\n"
+            "🚨 Insider: fresh wallet places large bet on niche market\n"
+            "🚑 Injury: player status changes before market adjusts\n\n"
+            "Or just type anything — I'm always listening here."
         ),
         colour    = 0x5865F2,
         timestamp = datetime.now(timezone.utc),
@@ -900,6 +1123,267 @@ async def cmd_standings(interaction: discord.Interaction, sport: str = "nba"):
         await interaction.followup.send(f"Error: {exc}")
 
 
+# ---------------------------------------------------------------------------
+# Watchlist commands
+# ---------------------------------------------------------------------------
+
+@bot.tree.command(name="watch", description="Add a Polymarket wallet to your watchlist")
+@app_commands.describe(address="Wallet address to watch")
+async def cmd_watch(interaction: discord.Interaction, address: str):
+    if not _registry.is_allowed(interaction.user.id):
+        await interaction.response.send_message("❌ Not authorised.", ephemeral=True)
+        return
+    try:
+        added = _tc.watchlist_add(address.strip(), added_by="discord_user", note="Added via /watch")
+        if added:
+            await interaction.response.send_message(
+                f"✅ Added `{address[:20]}...` to watchlist. Will be fully vetted within 6h.",
+                ephemeral=True,
+            )
+        else:
+            await interaction.response.send_message(
+                f"ℹ️ `{address[:20]}...` is already on the watchlist.", ephemeral=True
+            )
+    except Exception as exc:
+        await interaction.response.send_message(f"❌ Error: {exc}", ephemeral=True)
+
+
+@bot.tree.command(name="unwatch", description="Remove a wallet from your watchlist")
+@app_commands.describe(address="Wallet address to remove")
+async def cmd_unwatch(interaction: discord.Interaction, address: str):
+    if not _registry.is_allowed(interaction.user.id):
+        await interaction.response.send_message("❌ Not authorised.", ephemeral=True)
+        return
+    try:
+        _tc.watchlist_remove(address.strip())
+        await interaction.response.send_message(
+            f"🗑 Removed `{address[:20]}...` from watchlist.", ephemeral=True
+        )
+    except Exception as exc:
+        await interaction.response.send_message(f"❌ Error: {exc}", ephemeral=True)
+
+
+@bot.tree.command(name="watchlist", description="Show all wallets on your watchlist")
+async def cmd_watchlist(interaction: discord.Interaction):
+    if not _registry.is_allowed(interaction.user.id):
+        await interaction.response.send_message("❌ Not authorised.", ephemeral=True)
+        return
+    await interaction.response.defer()
+    try:
+        wallets = _tc.watchlist_list()
+        if not wallets:
+            await interaction.followup.send(
+                "Watchlist is empty. Use `/watch <address>` to add wallets."
+            )
+            return
+        embed = discord.Embed(
+            title     = "👁 Watchlist",
+            colour    = 0xAA00FF,
+            timestamp = datetime.now(timezone.utc),
+        )
+        for w in wallets[:20]:
+            addr  = w.get("address", "")
+            score = w.get("final_score") or w.get("fast_score") or 0
+            note  = w.get("note", "")[:50]
+            embed.add_field(
+                name  = f"`{addr[:10]}...{addr[-4:]}`  —  {score:.0f}/100",
+                value = note or "No note",
+                inline= False,
+            )
+        await interaction.followup.send(embed=embed)
+    except Exception as exc:
+        await interaction.followup.send(f"Error: {exc}")
+
+
+# ---------------------------------------------------------------------------
+# Tracking command
+# ---------------------------------------------------------------------------
+
+@bot.tree.command(name="tracking", description="Show live game tracking list (injury-triggered)")
+async def cmd_tracking(interaction: discord.Interaction):
+    if not _registry.is_allowed(interaction.user.id):
+        await interaction.response.send_message("❌ Not authorised.", ephemeral=True)
+        return
+    await interaction.response.defer()
+    try:
+        from edge_agent.game_tracker import GameTracker
+        loop    = asyncio.get_event_loop()
+        tracker = GameTracker()
+        games   = await loop.run_in_executor(None, tracker.get_tracked_games)
+        if not games:
+            await interaction.followup.send("No games currently being tracked.")
+            return
+        embed = discord.Embed(
+            title     = "👁 Game Tracker — Active",
+            colour    = 0xFF8800,
+            timestamp = datetime.now(timezone.utc),
+        )
+        for g in games[:15]:
+            drop      = g.get("current_drop", 0)
+            triggered = g.get("triggered", False)
+            status    = "🔥 TRIGGERED" if triggered else f"drop {drop:+.1%}"
+            phase     = g.get("phase", "")
+            q         = g.get("question", "?")[:60]
+            embed.add_field(
+                name  = f"{'🔥' if triggered else '👁'} [{phase}] {status}",
+                value = q,
+                inline= False,
+            )
+        await interaction.followup.send(embed=embed)
+    except Exception as exc:
+        await interaction.followup.send(f"Error: {exc}")
+
+
+# ---------------------------------------------------------------------------
+# Insider alerts command
+# ---------------------------------------------------------------------------
+
+@bot.tree.command(name="insider", description="Recent insider/whale bet alerts")
+@app_commands.describe(limit="Number of alerts to show (default 10)")
+async def cmd_insider(interaction: discord.Interaction, limit: int = 10):
+    if not _registry.is_allowed(interaction.user.id):
+        await interaction.response.send_message("❌ Not authorised.", ephemeral=True)
+        return
+    await interaction.response.defer()
+    engine  = _get_insider_engine()
+    alerts  = engine.get_recent_alerts(limit=min(limit, 20))
+    if not alerts:
+        await interaction.followup.send(
+            "No insider alerts yet. The engine scans every 5 minutes for fresh "
+            "wallets placing large bets on niche markets."
+        )
+        return
+    embed = discord.Embed(
+        title     = f"🚨 Insider Alerts — Last {len(alerts)}",
+        colour    = 0xFF4500,
+        timestamp = datetime.now(timezone.utc),
+    )
+    for a in alerts:
+        ts      = datetime.fromtimestamp(a["fired_at"], tz=timezone.utc).strftime("%m/%d %H:%M")
+        addr    = a["wallet"][:6] + "..." + a["wallet"][-4:]
+        score   = a["suspicion_score"]
+        size    = a["trade_size_usd"]
+        price   = int(a["current_price"] * 100)
+        outcome = a["outcome"]
+        icon    = {"win": "✅", "loss": "❌", "pending": "⏳"}.get(outcome, "⏳")
+        s_icon  = "🚨" if score >= 70 else "⚠️" if score >= 50 else "🔍"
+        embed.add_field(
+            name  = f"{s_icon} {score}/100  —  ${size:,.0f} @ {price}% YES  {icon}",
+            value = f"`{addr}`  ·  {a['question'][:60]}  ·  {ts}",
+            inline= False,
+        )
+    embed.set_footer(text="70+ = HIGH | 50-69 = MEDIUM-HIGH | 45-49 = MEDIUM")
+    await interaction.followup.send(embed=embed)
+
+
+# ---------------------------------------------------------------------------
+# ML status command
+# ---------------------------------------------------------------------------
+
+@bot.tree.command(name="mlstatus", description="[Admin] ML model status and calibration info")
+async def cmd_mlstatus(interaction: discord.Interaction):
+    if not _is_owner(interaction):
+        await interaction.response.send_message("❌ Admin only.", ephemeral=True)
+        return
+    await interaction.response.defer(ephemeral=True)
+    try:
+        loop    = asyncio.get_event_loop()
+        labeled = await loop.run_in_executor(
+            None, lambda: _ml_store.get_labeled_features(min_samples=0, days=180)
+        )
+        n_total = len(labeled)
+        n_30d   = len([x for x in labeled if x.get("age_days", 999) <= 30])
+        cal_ok  = _calibrator.is_trained
+        xgb_ok  = _signal_scorer.is_trained
+        phase   = getattr(_signal_scorer, "_phase", 0)
+        drifted = False
+        try:
+            recent  = _ml_store.get_labeled_features(min_samples=0, days=14)
+            drifted = _regime.check(recent)
+        except Exception:
+            pass
+
+        embed = discord.Embed(
+            title     = "🤖 ML Status",
+            colour    = 0x5865F2,
+            timestamp = datetime.now(timezone.utc),
+        )
+        embed.add_field(name="Labeled signals",       value=f"{n_total} total / {n_30d} last 30d", inline=False)
+        embed.add_field(name="Calibrator",            value="✅ Trained" if cal_ok else "⏳ Not trained (needs 50+)", inline=True)
+        embed.add_field(name="XGBoost scorer",        value=f"✅ Phase {phase}" if xgb_ok else "⏳ Shadow mode (<400)", inline=True)
+        embed.add_field(name="Regime drift",          value="🔴 DRIFT DETECTED" if drifted else "✅ Stable", inline=True)
+        await interaction.followup.send(embed=embed, ephemeral=True)
+    except Exception as exc:
+        await interaction.followup.send(f"Error: {exc}", ephemeral=True)
+
+
+# ---------------------------------------------------------------------------
+# Decision log command
+# ---------------------------------------------------------------------------
+
+@bot.tree.command(name="decisions", description="[Admin] Last AI decisions for debugging")
+@app_commands.describe(limit="Number of decisions to show (default 10)")
+async def cmd_decisions(interaction: discord.Interaction, limit: int = 10):
+    if not _is_owner(interaction):
+        await interaction.response.send_message("❌ Admin only.", ephemeral=True)
+        return
+    await interaction.response.defer(ephemeral=True)
+    try:
+        rows = _decision_log.get_recent(limit=min(limit, 20))
+        if not rows:
+            await interaction.followup.send("No decisions logged yet.", ephemeral=True)
+            return
+        embed = discord.Embed(
+            title     = f"🔍 Last {len(rows)} AI Decisions",
+            colour    = 0x5865F2,
+            timestamp = datetime.now(timezone.utc),
+        )
+        for r in rows:
+            ts      = datetime.fromtimestamp(r.get("created_at", 0), tz=timezone.utc).strftime("%m/%d %H:%M")
+            model   = r.get("model", "?")
+            pv      = r.get("prompt_version", "?")
+            latency = r.get("latency_ms", 0)
+            ctx     = r.get("context_blocks", "")
+            embed.add_field(
+                name  = f"`{pv}` — {model} — {latency}ms — {ts}",
+                value = f"ctx: {ctx or 'none'}",
+                inline= False,
+            )
+        await interaction.followup.send(embed=embed, ephemeral=True)
+    except Exception as exc:
+        await interaction.followup.send(f"Error: {exc}", ephemeral=True)
+
+
+# ---------------------------------------------------------------------------
+# Approvals command (admin)
+# ---------------------------------------------------------------------------
+
+@bot.tree.command(name="approvals", description="[Admin] Manage approved signal types for alerts")
+@app_commands.describe(action="add / remove / list", signal="Signal type e.g. MISPRICED_YES")
+async def cmd_approvals(interaction: discord.Interaction, action: str = "list", signal: str = ""):
+    if not _is_owner(interaction):
+        await interaction.response.send_message("❌ Admin only.", ephemeral=True)
+        return
+    global _approved_signals
+    action = action.lower().strip()
+    signal = signal.upper().strip()
+    if action == "add" and signal:
+        _approved_signals.add(signal)
+        _APPROVALS_FILE.parent.mkdir(parents=True, exist_ok=True)
+        _APPROVALS_FILE.write_text(json.dumps(sorted(_approved_signals)))
+        await interaction.response.send_message(f"✅ Added `{signal}` to approved signals.", ephemeral=True)
+    elif action == "remove" and signal:
+        _approved_signals.discard(signal)
+        _APPROVALS_FILE.write_text(json.dumps(sorted(_approved_signals)))
+        await interaction.response.send_message(f"🗑 Removed `{signal}` from approved signals.", ephemeral=True)
+    else:
+        sigs = ", ".join(sorted(_approved_signals)) if _approved_signals else "All (no filter active)"
+        await interaction.response.send_message(
+            f"**Approved signals:** {sigs}\n\nValid types: `MISPRICED_YES`, `MISPRICED_NO`, `MOMENTUM`, `SMART_MONEY`, `INJURY_MOMENTUM_REVERSAL`",
+            ephemeral=True,
+        )
+
+
 @bot.tree.command(name="help", description="Show all available commands")
 async def cmd_help(interaction: discord.Interaction):
     embed = discord.Embed(
@@ -913,7 +1397,8 @@ async def cmd_help(interaction: discord.Interaction):
             "`/scan` — live market scan for edge\n"
             "`/top` — top 3 highest-EV picks\n"
             "`/status` — last scan summary\n"
-            "`/standings [sport]` — standings + championship odds"
+            "`/standings [sport]` — standings + championship odds\n"
+            "`/tracking` — live game tracker (injury-triggered)"
         ),
         inline=False,
     )
@@ -930,7 +1415,18 @@ async def cmd_help(interaction: discord.Interaction):
         name  = "👛 Trader Intel",
         value = (
             "`/traders` — top 10 smart money wallets\n"
-            "`/wallet <address>` — vet a specific wallet"
+            "`/wallet <address>` — vet a specific wallet\n"
+            "`/watch <address>` — add wallet to watchlist\n"
+            "`/unwatch <address>` — remove from watchlist\n"
+            "`/watchlist` — view all watched wallets"
+        ),
+        inline=False,
+    )
+    embed.add_field(
+        name  = "🚨 Insider Alerts",
+        value = (
+            "`/insider` — recent whale/insider bet alerts\n"
+            "Alerts auto-fire when fresh wallets place large bets on niche markets"
         ),
         inline=False,
     )
@@ -944,7 +1440,7 @@ async def cmd_help(interaction: discord.Interaction):
         value = "Just type anything in this channel — EDGE is always listening",
         inline=False,
     )
-    embed.set_footer(text="Alerts fire automatically when markets move or injuries change")
+    embed.set_footer(text="Copy-trade + insider alerts auto-fire to your channel")
     await interaction.response.send_message(embed=embed)
 
 
