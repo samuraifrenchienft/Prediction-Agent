@@ -1273,10 +1273,11 @@ async def outcome_resolution_job(ctx: ContextTypes.DEFAULT_TYPE) -> None:
                     try:
                         await loop.run_in_executor(
                             None,
-                            lambda a=addr: tc.add_to_watchlist(
+                            lambda a=addr: tc.watchlist_add(
                                 a,
+                                added_by="insider_engine",
                                 note="Auto-added: insider alert confirmed (bet resolved YES)",
-                                vet_interval_hours=6,
+                                vet_interval_sec=21600,  # 6h
                             ),
                         )
                         log.info("[insider] Auto-watchlisted confirmed wallet: %s", addr[:10])
