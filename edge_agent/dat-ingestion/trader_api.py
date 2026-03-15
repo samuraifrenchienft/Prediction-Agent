@@ -547,6 +547,7 @@ class TraderAPIClient:
         market_costs:     dict[str, float] = {}
         market_receipts:  dict[str, float] = {}
         market_oldest_ts: dict[str, float] = {}   # earliest BUY timestamp per market
+        market_close_ts:  dict[str, float] = {}   # latest SELL/REDEEM timestamp per market
 
         buy_trades: list[dict] = []
         for t in trades:
@@ -566,9 +567,13 @@ class TraderAPIClient:
             elif ttype == "TRADE" and side == "SELL":
                 if cid:
                     market_receipts[cid] = market_receipts.get(cid, 0.0) + usd
+                    if t_ms > market_close_ts.get(cid, 0.0):
+                        market_close_ts[cid] = t_ms
             elif ttype == "REDEEM":
                 if cid:
                     market_receipts[cid] = market_receipts.get(cid, 0.0) + usd
+                    if t_ms > market_close_ts.get(cid, 0.0):
+                        market_close_ts[cid] = t_ms
 
         # Markets countable in win rate:
         #   a) Has a receipt (confirmed closed — win or loss)
@@ -585,6 +590,40 @@ class TraderAPIClient:
         losses_act = len(countable_markets) - wins_act
         n_settled  = wins_act + losses_act
         win_rate   = wins_act / n_settled if n_settled > 0 else 0.0
+
+        # ── Win streak from ordered market outcomes ────────────────────────────
+        # Sort by close timestamp (most recent first).  Markets without a close
+        # event fall back to their oldest BUY ts — this puts uncertain markets
+        # last so they don't break the current streak prematurely.
+        ordered_markets = sorted(
+            countable_markets,
+            key=lambda c: market_close_ts.get(c, market_oldest_ts.get(c, 0.0)),
+            reverse=True,   # most-recent outcome first
+        )
+
+        cur_streak  = 0
+        for cid in ordered_markets:
+            won = market_receipts.get(cid, 0.0) > market_costs[cid]
+            if cur_streak == 0:
+                cur_streak = 1 if won else -1
+            elif (cur_streak > 0 and won) or (cur_streak < 0 and not won):
+                cur_streak += (1 if won else -1)
+            else:
+                break   # streak broken — stop
+
+        # Max streak over the most-recent 50 markets
+        max_streak = 0
+        _tmp = 0
+        for cid in ordered_markets[:50]:
+            won = market_receipts.get(cid, 0.0) > market_costs[cid]
+            if _tmp == 0:
+                _tmp = 1 if won else -1
+            elif (_tmp > 0 and won) or (_tmp < 0 and not won):
+                _tmp += (1 if won else -1)
+            else:
+                max_streak = max(max_streak, abs(_tmp))
+                _tmp = 1 if won else -1
+        max_streak = max(max_streak, abs(_tmp))
 
         # ── Activity-based PnL ─────────────────────────────────────────────────
         # Summing all receipts minus all costs gives realised cash-flow P&L.
@@ -637,6 +676,8 @@ class TraderAPIClient:
         contrarian = sum(1 for p in genuine_prices if p < 0.45)
         fade_score = round(contrarian / max(len(genuine_prices), 1), 4)
 
+        avg_entry = sum(genuine_prices) / len(genuine_prices) if genuine_prices else 0.5
+
         # ── ROI and performance sub-score ─────────────────────────────────────
         # Priority: leaderboard PnL (authoritative) → activity cash-flow PnL
         # (accurate for non-top-N wallets) → open-position PnL (last resort).
@@ -686,6 +727,25 @@ class TraderAPIClient:
                 cat_vol[cat] = cat_vol.get(cat, 0.0) + _size(t)
         top_cats = [c for c, _ in sorted(cat_vol.items(), key=lambda x: x[1], reverse=True)[:2]]
 
+        # ── Strategy classification ───────────────────────────────────────────
+        # Derives a human-readable trading style from the computed signals.
+        # Used in AI copy-trade suggestions ("NBA Specialist on a 7-game streak").
+        top_cat_name = top_cats[0] if top_cats else ""
+        top_cat_pct = (
+            cat_vol.get(top_cat_name, 0.0) / max(effective_vol, 1.0)
+            if top_cat_name else 0.0
+        )
+        if top_cat_pct > 0.70:
+            strategy_tag = f"{top_cat_name} Specialist"
+        elif fade_score > 0.55:
+            strategy_tag = "Contrarian"
+        elif timing_score > 0.65 and avg_entry < 0.40:
+            strategy_tag = "Value Hunter"
+        elif timing_score > 0.60 and fade_score < 0.35:
+            strategy_tag = "Momentum"
+        else:
+            strategy_tag = "Generalist"
+
         all_stats = {
             "wins": wins_act, "losses": losses_act,
             "win_rate": round(win_rate, 4),
@@ -703,8 +763,8 @@ class TraderAPIClient:
             "7d":                d7_stats,
             "pos_pnl":           round(pos_pnl, 2),
             "perf_score":        round(min(perf_score, 1.0), 4),
-            "cur_streak":        0,
-            "max_streak":        0,
+            "cur_streak":        cur_streak,
+            "max_streak":        max_streak,
             "n_trades":          n_activity,
             "n_settled_markets": n_settled,
             "quality_win_rate":  round(win_rate, 4),
@@ -714,6 +774,7 @@ class TraderAPIClient:
             "consistency_score": 0.0,
             "fade_score":        fade_score,
             "sizing_discipline": 0.0,
+            "strategy_tag":      strategy_tag,
         }
 
     def _reliability_score(

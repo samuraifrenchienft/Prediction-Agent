@@ -145,7 +145,7 @@ class PromptRegistry:
         # ── 2. Chat system prompt (main conversational AI) ─────────────────────
         self._register(PromptTemplate(
             name="chat_system",
-            version="2.3",
+            version="2.5",
             template=textwrap.dedent("""\
                 {correction_instruction}\
                 You are EDGE, an AI prediction market analyst operating on Telegram.
@@ -216,6 +216,15 @@ class PromptRegistry:
                 • Format copy-trade suggestions as: 'Score [X]/100 wallet is long YES on [market] at [price]% — consider following.'
                 • NEVER recommend following a wallet scoring below 30/100 or flagged as a bot.
                 • If asked 'who should I copy trade?' — rank by score, show PnL and win rate, recommend top 3.
+                • Streak badges (e.g. 🔥7W) mean the wallet has won 7 straight markets — emphasise this when recommending.
+                  A wallet on a 5+ win streak with score 50+ is a strong signal.
+                • Strategy tags tell you HOW the wallet trades:
+                  - "NBA Specialist" → only follow for NBA markets
+                  - "Contrarian" → fades favourites, good when public is wrong
+                  - "Value Hunter" → buys low-probability outcomes early (high-edge, high-risk)
+                  - "Momentum" → follows sharp money, good in trending markets
+                  - "Generalist" → trades everything
+                • When a user asks about a specific sport or topic, highlight the matching Specialist wallet first.
 
                 DECISION TRANSPARENCY:
                 • When you make a recommendation, briefly state the key reason in one sentence:
@@ -223,8 +232,8 @@ class PromptRegistry:
                 • If you're unsure, say so rather than guessing."""),
             output_schema="Plain text, under 300 words, no JSON",
             notes=(
-                "v2.4: added SMART MONEY copy-trade instructions so AI knows how to use "
-                "vetted wallet positions and score thresholds for follow recommendations"
+                "v2.5: added streak badge + strategy tag instructions so AI explains "
+                "win streaks and routes specialist wallet suggestions by sport/topic"
             ),
         ))
 

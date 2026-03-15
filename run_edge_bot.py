@@ -2017,10 +2017,39 @@ def _build_injury_context(query: str) -> str:
 # Smart Money context builder
 # ---------------------------------------------------------------------------
 
-def _build_smart_money_context(force_refresh: bool = False) -> str:
+def _derive_strategy_tag(tw: dict) -> str:
+    """
+    Derive a human-readable strategy label from stored wallet signals.
+    Called in smart money context builder — no extra DB query needed.
+    """
+    top_cats   = tw.get("top_categories", "")
+    timing     = float(tw.get("timing_score", 0.0) or 0.0)
+    fade       = float(tw.get("fade_score", 0.0) or 0.0)
+    # Rough avg-entry proxy from timing_score: timing = 1 - (avg - 0.10)/0.70
+    avg_entry  = 0.10 + (1.0 - timing) * 0.70 if timing > 0 else 0.5
+
+    # Specialist: top category contains a single sport/domain name
+    if top_cats:
+        first_cat = top_cats.split(",")[0].strip()
+        if first_cat:
+            return f"{first_cat} Specialist"
+
+    if fade > 0.55:
+        return "Contrarian"
+    if timing > 0.65 and avg_entry < 0.40:
+        return "Value Hunter"
+    if timing > 0.60 and fade < 0.35:
+        return "Momentum"
+    return "Generalist"
+
+
+def _build_smart_money_context(force_refresh: bool = False, sport_filter: str = "") -> str:
     """
     Return a compact [Smart Money] context block showing what top-scored
     watchlist wallets are currently betting on.
+
+    sport_filter — if set (e.g. "NBA"), surface specialist wallets for that
+    sport first; non-specialists still appear but after specialists.
 
     Uses a 30-minute in-memory cache so the AI gets fresh data without
     adding API latency to every message.  Returns "" if no data available.
@@ -2040,15 +2069,31 @@ def _build_smart_money_context(force_refresh: bool = False) -> str:
 
     # ── Refresh: pull top-scored non-bot wallets from cache, fetch positions ──
     try:
-        cache   = _get_trader_cache()
-        # Top 5 non-bot wallets by final_score from trader_profiles
-        top     = cache.get_top(limit=5)
-        client  = _TraderClient()
+        cache  = _get_trader_cache()
+        # Top 8 non-bot wallets by final_score — sport specialists may be ranked lower
+        top    = cache.get_top(limit=8)
+        client = _TraderClient()
         new_lines: list[str] = []
 
+        # Sort: specialists for the requested sport first, then by score
+        if sport_filter:
+            sf = sport_filter.upper()
+            top = sorted(
+                top,
+                key=lambda w: (
+                    0 if sf in (w.get("top_categories") or "").upper() else 1,
+                    -float(w.get("final_score", 0) or 0),
+                ),
+            )
+
+        shown = 0
         for tw in top:
-            addr  = tw.get("wallet_address", "")
-            score = int(tw.get("final_score", 0) * 100)
+            if shown >= 5:
+                break
+            addr   = tw.get("wallet_address", "")
+            score  = int(float(tw.get("final_score", 0) or 0) * 100)
+            streak = int(tw.get("current_streak", 0) or 0)
+            strat  = _derive_strategy_tag(tw)
             if not addr:
                 continue
             try:
@@ -2064,6 +2109,20 @@ def _build_smart_money_context(force_refresh: bool = False) -> str:
             if not sig:
                 continue
 
+            # Streak badge: show only meaningful streaks (|streak| >= 3)
+            streak_badge = ""
+            if streak >= 5:
+                streak_badge = f" 🔥{streak}W"
+            elif streak >= 3:
+                streak_badge = f" +{streak}W streak"
+            elif streak <= -3:
+                streak_badge = f" -{abs(streak)}L skid"
+
+            wallet_header = (
+                f"  [{score}/100]{streak_badge} {addr[:8]}... | {strat}"
+            )
+            new_lines.append(wallet_header)
+
             # Format each position compactly
             for pos in sig[:3]:   # max 3 positions per wallet
                 title   = (pos.get("title") or pos.get("market", "Unknown market"))[:55]
@@ -2071,9 +2130,9 @@ def _build_smart_money_context(force_refresh: bool = False) -> str:
                 size    = float(pos.get("size", pos.get("currentValue", 0)) or 0)
                 cur_pct = float(pos.get("curPrice", pos.get("currentPrice", 0.5)) or 0.5)
                 new_lines.append(
-                    f"  [{score}/100] {addr[:8]}... → {side} on '{title}' "
-                    f"${size:,.0f} @ {cur_pct:.0%}"
+                    f"    → {side} on '{title}' ${size:,.0f} @ {cur_pct:.0%}"
                 )
+            shown += 1
 
         _sm_positions_cache["lines"]      = new_lines
         _sm_positions_cache["fetched_at"] = now
@@ -2475,10 +2534,29 @@ async def handle_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None
         "trade", "buy", "bet", "position", "market", "edge", "wallet",
         "copy", "follow", "who", "smart money", "trader", "recommend",
         "should i", "worth", "call", "play", "play on", "long", "short",
+        # streak / hot-hand queries
+        "streak", "hot", "on fire", "killing it", "winning",
+        # strategy / specialist queries
+        "specialist", "expert", "best at", "who trades", "who bets",
+        "nba trader", "nhl trader", "crypto trader", "sports trader",
+        # copy-trade intent
+        "copy trade", "who should", "top trader", "best trader",
     }
+    # Detect sport context in the question for specialist routing
+    _SPORT_KEYWORDS: dict[str, str] = {
+        "nba": "NBA", "basketball": "NBA",
+        "nhl": "NHL", "hockey": "NHL",
+        "nfl": "NFL", "football": "NFL",
+        "mlb": "MLB", "baseball": "MLB",
+        "soccer": "Soccer", "football": "Soccer",
+        "crypto": "Crypto", "bitcoin": "Crypto", "btc": "Crypto",
+        "politics": "Politics", "election": "Politics",
+    }
+    sm_sport = next((label for kw, label in _SPORT_KEYWORDS.items() if kw in q), "")
+
     smart_money_context = ""
     if any(kw in q for kw in _SMART_MONEY_TRIGGERS) or market_context or scan_context:
-        smart_money_context = _build_smart_money_context()
+        smart_money_context = _build_smart_money_context(sport_filter=sm_sport)
 
     # ── Correction mode instruction — prepended to system prompt ─────────────
     correction_instruction = (
