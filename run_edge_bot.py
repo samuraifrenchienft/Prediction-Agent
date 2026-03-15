@@ -60,6 +60,8 @@ import html
 import json
 import logging
 import os
+import signal
+import time
 from datetime import datetime, timezone
 from datetime import time as dt_time
 from pathlib import Path
@@ -622,6 +624,7 @@ async def _run_scan(bot, notify: bool = True) -> str:
                     [
                         InlineKeyboardButton("📈 YES",     callback_data=f"pt:YES:{slot}"),
                         InlineKeyboardButton("📉 NO",      callback_data=f"pt:NO:{slot}"),
+                        InlineKeyboardButton("🔄 Fade",   callback_data=f"f:{slot}"),
                     ],
                     [
                         InlineKeyboardButton("✅ Approve", callback_data=f"a:{slot}"),
@@ -1001,7 +1004,23 @@ async def cmd_traders(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         )
 
     lines.append(f"\n{source_note}")
-    lines.append("<i>Use /wallet 0x… to deep-dive any trader.</i>")
+
+    # ── Your Watchlist — always shown, regardless of leaderboard rank ────────
+    wl_rows = cache.watchlist_list()
+    if wl_rows:
+        lines.append("\n👀 <b>Your Watchlist</b>")
+        for w in wl_rows:
+            addr      = w.get("wallet_address", "")
+            disp      = w.get("display_name") or addr[:10] + "…"
+            raw_score = w.get("current_score") or w.get("latest_score")
+            score_str = f"<code>{int(raw_score)}/100</code>" if raw_score else "<i>pending vet</i>"
+            bot_warn  = " ⚠️ Bot" if w.get("current_bot_flag") else ""
+            note      = f" — {_e(w['note'])}" if w.get("note") else ""
+            lines.append(f"  • <b>{_e(disp)}</b> {score_str}{bot_warn}{note}")
+        lines.append("<i>Run /wallet 0x… to force a fresh vet on any address.</i>")
+    else:
+        lines.append("<i>Use /wallet 0x… to deep-dive any trader.</i>")
+
     await _send_chunked(update.message.reply_text, "\n".join(lines), parse_mode=ParseMode.HTML)
 
 
@@ -1865,6 +1884,53 @@ async def handle_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> Non
                 f"⚠️ Details expired (slot <code>{_e(slot)}</code> no longer cached).",
                 parse_mode=ParseMode.HTML,
             )
+
+    elif data.startswith("f:"):
+        # Fade — paper trade the OPPOSITE of the bot's recommendation
+        slot = data[2:]
+        rec  = _rec_store.get(slot)
+        if not rec:
+            await query.answer("⚠️ Signal expired — can't record fade.", show_alert=True)
+            return
+        bot_side  = "YES" if "YES" in rec.action.upper() else "NO"
+        fade_side = "NO"  if bot_side == "YES" else "YES"
+        # Re-use the pt: handler logic by rewriting data and falling through
+        data = f"pt:{fade_side}:{slot}"
+        fade_label = f"🔄 Fading bot's {bot_side} → your pick: {fade_side}"
+        # Inline answer before falling through so user sees the fade label
+        # Store fade tag in side field so /mytrades can show it distinctly
+        user_id = update.effective_user.id
+        try:
+            sig_row = _ot._conn.execute(
+                "SELECT signal_id, entry_prob FROM signal_outcomes WHERE market_id = ? ORDER BY created_at DESC LIMIT 1",
+                (rec.market_id,),
+            ).fetchone()
+            if not sig_row:
+                await query.answer("⚠️ Signal not registered yet — try again in a moment.", show_alert=True)
+                return
+            signal_id  = sig_row["signal_id"]
+            entry_prob = sig_row["entry_prob"]
+            recorded = _ot.record_user_pick(
+                signal_id=signal_id,
+                market_id=rec.market_id,
+                user_id=user_id,
+                side=f"FADE_{fade_side}",  # tagged as fade in DB
+            )
+            if not recorded:
+                await query.answer("You already picked this one.", show_alert=True)
+                return
+            prob   = entry_prob or rec.market_prob or 0.5
+            f_prob = (1 - prob) if fade_side == "YES" else prob
+            payout = round(10 * (1 / max(f_prob, 0.01) - 1), 2)
+            await query.answer(
+                f"{fade_label}\nPaper $10 @ {f_prob:.0%} — Win = +${payout:.2f} | Loss = -$10.00\n"
+                "EDGE will track resolution automatically.",
+                show_alert=True,
+            )
+        except Exception as exc:
+            log.warning("Fade pick failed: %s", exc)
+            await query.answer("⚠️ Could not save fade — try again.", show_alert=True)
+        return
 
     elif data.startswith("pt:"):
         # Paper trade pick — "pt:YES:{slot}" or "pt:NO:{slot}"
@@ -3843,6 +3909,35 @@ async def scan_job(ctx: ContextTypes.DEFAULT_TYPE) -> None:
 # Entry point
 # ---------------------------------------------------------------------------
 
+_SEED_WALLET_FILE = Path(__file__).parent / "edge_agent" / "memory" / "data" / "seed_wallets.json"
+
+
+def _bootstrap_seed_wallets() -> None:
+    """
+    Load seed_wallets.json into the trader watchlist at startup.
+    Skips wallets already present. Runs in O(n) — safe to call every restart.
+    """
+    if not _SEED_WALLET_FILE.exists():
+        log.warning("[bootstrap] seed_wallets.json not found — skipping.")
+        return
+    try:
+        data    = json.loads(_SEED_WALLET_FILE.read_text(encoding="utf-8"))
+        wallets = data.get("wallets", [])
+        tc      = _TraderCache()
+        added   = 0
+        for w in wallets:
+            addr = w.get("address", "").strip().lower()
+            note = w.get("note", "Owner seed — priority vet")
+            if not addr:
+                continue
+            ok = tc.watchlist_add(addr, added_by="seed_bootstrap", note=note)
+            if ok:
+                added += 1
+        log.info("[bootstrap] Seed wallets loaded: %d new / %d total in file.", added, len(wallets))
+    except Exception as exc:
+        log.warning("[bootstrap] Failed to load seed wallets: %s", exc)
+
+
 def main() -> None:
     if not BOT_TOKEN:
         raise SystemExit(
@@ -3854,6 +3949,8 @@ def main() -> None:
             "TELEGRAM_CHAT_ID not set in .env\n"
             "See the setup instructions at the top of this file."
         )
+
+    _bootstrap_seed_wallets()
 
     log.info(
         "Starting EDGE Telegram bot (scan every %d min, injury refresh every %d min)...",
@@ -3954,7 +4051,7 @@ def main() -> None:
     app.job_queue.run_repeating(discovery_job, interval=3600, first=180)
 
     # Watchlist re-vet — every 6h, first run 10 min after boot
-    app.job_queue.run_repeating(watchlist_vet_job, interval=21600, first=600)
+    app.job_queue.run_repeating(watchlist_vet_job, interval=21600, first=30)
 
     # Smart money position refresh — every 30 min, first run 2 min after boot
     # Pre-warms the cache so the first user message doesn't trigger a live fetch
@@ -4043,5 +4140,43 @@ def main() -> None:
     app.run_polling(drop_pending_updates=True)
 
 
+_PID_FILE = Path(__file__).parent / ".edge_bot.pid"
+
+
+def _acquire_instance_lock() -> None:
+    """Kill any previous instance, then write our own PID."""
+    if _PID_FILE.exists():
+        try:
+            old_pid = int(_PID_FILE.read_text().strip())
+            if old_pid != os.getpid():
+                try:
+                    if os.name == "nt":
+                        import subprocess
+                        subprocess.run(
+                            ["taskkill", "/F", "/PID", str(old_pid)],
+                            capture_output=True,
+                        )
+                    else:
+                        os.kill(old_pid, signal.SIGTERM)
+                    log.info("Killed previous bot instance (PID %d).", old_pid)
+                    time.sleep(2)  # give Telegram time to release the long-poll
+                except (ProcessLookupError, PermissionError, OSError):
+                    pass  # process already dead — fine
+        except (ValueError, OSError):
+            pass
+    _PID_FILE.write_text(str(os.getpid()))
+
+
+def _release_instance_lock() -> None:
+    try:
+        _PID_FILE.unlink(missing_ok=True)
+    except OSError:
+        pass
+
+
 if __name__ == "__main__":
-    main()
+    _acquire_instance_lock()
+    try:
+        main()
+    finally:
+        _release_instance_lock()
