@@ -1,5 +1,5 @@
 """
-vet_wallets.py — Batch Wallet Vetting Script
+vet_wallets.py - Batch Wallet Vetting Script
 =============================================
 
 Runs full Tier-2 vetting on a list of Polymarket wallet addresses,
@@ -30,7 +30,7 @@ Output:
     • JSON export at ./vet_results_<timestamp>.json (or --out path)
     • All scores persisted to trader_cache.db (24h TTL)
     • All wallets added to watchlist table (6h re-vet cycle)
-    • AI context snippet printed at end — paste into run_edge_bot for testing
+    • AI context snippet printed at end - paste into run_edge_bot for testing
 """
 from __future__ import annotations
 
@@ -45,18 +45,18 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 from pathlib import Path
 
-# ── Make sure the project root is on sys.path so imports work ────────────────
+# -- Make sure the project root is on sys.path so imports work ----------------
 _PROJECT_ROOT = Path(__file__).parent
 sys.path.insert(0, str(_PROJECT_ROOT))
 
-# dat-ingestion has a hyphen so standard imports don't work — use importlib
+# dat-ingestion has a hyphen so standard imports don't work - use importlib
 _trader_mod   = importlib.import_module(".dat-ingestion.trader_api", "edge_agent")
 TraderAPIClient = _trader_mod.TraderAPIClient
 TraderScore     = _trader_mod.TraderScore
 
 from edge_agent.memory.trader_cache import TraderCache
 
-# ── Logging ───────────────────────────────────────────────────────────────────
+# -- Logging -------------------------------------------------------------------
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s  %(levelname)-7s  %(message)s",
@@ -64,14 +64,14 @@ logging.basicConfig(
 )
 log = logging.getLogger("vet_wallets")
 
-# ── Paths ─────────────────────────────────────────────────────────────────────
+# -- Paths ---------------------------------------------------------------------
 _SEED_FILE   = _PROJECT_ROOT / "edge_agent" / "memory" / "data" / "seed_wallets.json"
 _DEFAULT_OUT = _PROJECT_ROOT / f"vet_results_{datetime.now(tz=timezone.utc).strftime('%Y%m%d_%H%M%S')}.json"
 
 
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 # Helpers
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 
 def _load_seed_wallets() -> list[dict]:
     """Load wallet list from seed_wallets.json. Returns [] if file missing."""
@@ -109,10 +109,10 @@ def _score_one(
 ) -> TraderScore | None:
     """Vet a single wallet. Returns TraderScore or None on hard error."""
     try:
-        log.info("  Vetting %s…", address[:10])
+        log.info("  Vetting %s...", address[:10])
         ts = client.score_trader(address, profile or {})
         log.info(
-            "  ✓ %s… score=%d bot=%d wins=%d pnl=$%.0f",
+            "  OK %s... score=%d bot=%d wins=%d pnl=$%.0f",
             address[:10],
             int(ts.final_score * 100),
             ts.bot_flag,
@@ -121,7 +121,7 @@ def _score_one(
         )
         return ts
     except Exception as exc:
-        log.error("  ✗ %s… failed: %s", address[:10], exc)
+        log.error("  ✗ %s... failed: %s", address[:10], exc)
         return None
 
 
@@ -135,7 +135,7 @@ def _register_watchlist(
     added = 0
     for ts in scores:
         if ts.bot_flag:
-            log.info("  Skip watchlist for confirmed bot: %s…", ts.wallet_address[:10])
+            log.info("  Skip watchlist for confirmed bot: %s...", ts.wallet_address[:10])
             continue
         meta = seed_meta.get(ts.wallet_address, {})
         vet_hours = int(meta.get("vet_interval_hours", 6))
@@ -157,25 +157,24 @@ def _register_watchlist(
 
 def _format_table(scores: list[TraderScore]) -> str:
     """Render a formatted ASCII table of results."""
+    sep = "+" + "-"*25 + "+" + "-"*7 + "+" + "-"*10 + "+" + "-"*13 + "+" + "-"*14 + "+" + "-"*9 + "+"
     lines = [
         "",
-        "┌─────────────────────────┬───────┬──────────┬───────────┬──────────────┬─────────┐",
-        "│ Wallet                  │ Score │ Win Rate │ PnL       │ Volume       │ Bot     │",
-        "├─────────────────────────┼───────┼──────────┼───────────┼──────────────┼─────────┤",
+        sep,
+        "| Wallet                  | Score | Win Rate | PnL         | Volume       | Bot     |",
+        sep,
     ]
     for ts in sorted(scores, key=lambda s: s.final_score, reverse=True):
-        addr_short = f"{ts.wallet_address[:6]}…{ts.wallet_address[-4:]}"
+        addr_short = f"{ts.wallet_address[:6]}...{ts.wallet_address[-4:]}"
         score_pct  = int(ts.final_score * 100)
         win_pct    = int(ts.win_rate_alltime * 100)
         pnl_str    = f"${ts.pnl_alltime:,.0f}"
         vol_str    = f"${ts.volume_alltime:,.0f}"
-        bot_str    = "⚠️  BOT" if ts.bot_flag else "✅  Human"
+        bot_str    = "!!! BOT" if ts.bot_flag else "Human  "
         lines.append(
-            f"│ {addr_short:<23} │ {score_pct:>5} │ {win_pct:>7}% │ {pnl_str:>9} │ {vol_str:>12} │ {bot_str:<7} │"
+            f"| {addr_short:<23} | {score_pct:>5} | {win_pct:>7}% | {pnl_str:>11} | {vol_str:>12} | {bot_str:<7} |"
         )
-    lines.append(
-        "└─────────────────────────┴───────┴──────────┴───────────┴──────────────┴─────────┘"
-    )
+    lines.append(sep)
     return "\n".join(lines)
 
 
@@ -189,11 +188,11 @@ def _build_ai_context(scores: list[TraderScore]) -> str:
     if not humans:
         return "[Seeded Wallets] No human wallets passed vetting."
 
-    lines = [f"[Seeded Wallets — {len(humans)} human traders vetted]"]
+    lines = [f"[Seeded Wallets - {len(humans)} human traders vetted]"]
     for ts in humans:
         cats = ts.top_categories or "Mixed"
         lines.append(
-            f"• {ts.wallet_address[:10]}… | Score {int(ts.final_score*100)}/100 | "
+            f"• {ts.wallet_address[:10]}... | Score {int(ts.final_score*100)}/100 | "
             f"Win {int(ts.win_rate_alltime*100)}% | PnL ${ts.pnl_alltime:,.0f} | "
             f"Vol ${ts.volume_alltime:,.0f} | Speciality: {cats}"
         )
@@ -213,9 +212,9 @@ def _export_json(scores: list[TraderScore], path: Path) -> None:
     log.info("JSON export written to %s", path)
 
 
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 # Main
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 
 def main() -> None:
     parser = argparse.ArgumentParser(
@@ -235,7 +234,7 @@ def main() -> None:
     parser.add_argument(
         "--no-seed",
         action="store_true",
-        help="Skip seed_wallets.json — only vet addresses from command line",
+        help="Skip seed_wallets.json - only vet addresses from command line",
     )
     parser.add_argument(
         "--no-watch",
@@ -262,7 +261,7 @@ def main() -> None:
     )
     args = parser.parse_args()
 
-    # ── Gather wallets ────────────────────────────────────────────────────────
+    # -- Gather wallets --------------------------------------------------------
     seed_entries: list[dict] = [] if args.no_seed else _load_seed_wallets()
     seed_addresses = _normalise_addresses([e["address"] for e in seed_entries])
     seed_meta      = {e["address"].lower(): e for e in seed_entries}
@@ -289,7 +288,7 @@ def main() -> None:
     log.info("Workers:        %d", args.workers)
     log.info("=" * 60)
 
-    # ── Vet concurrently ──────────────────────────────────────────────────────
+    # -- Vet concurrently ------------------------------------------------------
     client = TraderAPIClient()
     scores: list[TraderScore] = []
     start  = time.time()
@@ -312,13 +311,13 @@ def main() -> None:
     elapsed = time.time() - start
     log.info("Vetting complete: %d/%d succeeded in %.1fs", len(scores), len(all_addresses), elapsed)
 
-    # ── Watchlist registration ─────────────────────────────────────────────────
+    # -- Watchlist registration -------------------------------------------------
     if not args.no_watch and scores:
         cache   = TraderCache()
         n_added = _register_watchlist(cache, scores, seed_meta)
         log.info("Watchlist: %d wallets registered for ongoing 6h re-vet", n_added)
 
-    # ── Report ────────────────────────────────────────────────────────────────
+    # -- Report ----------------------------------------------------------------
     display_scores = (
         [s for s in scores if int(s.final_score * 100) >= args.min_score]
         if args.min_score > 0 else scores
@@ -331,10 +330,10 @@ def main() -> None:
     print(_format_table(display_scores))
 
     # Score breakdown per wallet
-    print("\n── Detailed Breakdown ──────────────────────────────────────────────────────")
+    print("\n-- Detailed Breakdown ------------------------------------------------------")
     for ts in sorted(display_scores, key=lambda s: s.final_score, reverse=True):
-        status    = "🤖 BOT" if ts.bot_flag else "✅"
-        addr_disp = f"{ts.wallet_address[:8]}…"
+        status    = "[BOT]" if ts.bot_flag else "[OK] "
+        addr_disp = f"{ts.wallet_address[:8]}..."
         cats_disp = ts.top_categories or "Unknown"
         print(
             f"\n{status} {addr_disp}  [{int(ts.final_score * 100)}/100]\n"
@@ -346,12 +345,12 @@ def main() -> None:
             f"Volume: ${ts.volume_alltime:,.2f}\n"
             f"   Speciality: {cats_disp}  |  "
             f"Hidden-loss exposure: ${ts.hidden_loss_exposure:,.2f}  |  "
-            f"Fresh wallet: {'YES ⚠️' if ts.is_fresh_wallet else 'No'}"
+            f"Fresh wallet: {'YES [WARN]' if ts.is_fresh_wallet else 'No'}"
         )
         if ts.onchain_burst_flag:
-            print("   ⚠️  ON-CHAIN BURST FLAG: rapid-fire trades detected in 1-hour windows")
+            print("   [WARN] ON-CHAIN BURST FLAG: rapid-fire trades detected in 1-hour windows")
         if ts.hidden_loss_exposure > 500:
-            print(f"   ⚠️  HIDDEN LOSS: ${ts.hidden_loss_exposure:,.2f} in unresolved losing positions")
+            print(f"   [WARN] HIDDEN LOSS: ${ts.hidden_loss_exposure:,.2f} in unresolved losing positions")
 
     # Summary stats
     humans = [s for s in scores if not s.bot_flag]
@@ -361,7 +360,7 @@ def main() -> None:
         avg_wr    = sum(s.win_rate_alltime for s in humans) / len(humans)
         total_pnl = sum(s.pnl_alltime for s in humans)
         print(
-            f"\n── Summary ─────────────────────────────────────────────────────────────────\n"
+            f"\n-- Summary -----------------------------------------------------------------\n"
             f"   Total vetted:  {len(scores)}\n"
             f"   Human traders: {len(humans)}  |  Bots flagged: {len(bots)}\n"
             f"   Avg score:     {int(avg_score * 100)}/100\n"
@@ -369,16 +368,16 @@ def main() -> None:
             f"   Combined PnL:  ${total_pnl:,.2f}"
         )
 
-    # ── AI Context Block ──────────────────────────────────────────────────────
+    # -- AI Context Block ------------------------------------------------------
     ai_ctx = _build_ai_context(scores)
     print(
-        f"\n── AI Context Block (inject into system prompt for testing) ─────────────────\n"
+        f"\n-- AI Context Block (inject into system prompt for testing) -----------------\n"
         f"{ai_ctx}\n"
     )
 
-    # ── JSON Export ───────────────────────────────────────────────────────────
+    # -- JSON Export -----------------------------------------------------------
     _export_json(scores, args.out)
-    print(f"Full results exported → {args.out}\n")
+    print(f"Full results exported -> {args.out}\n")
 
 
 if __name__ == "__main__":

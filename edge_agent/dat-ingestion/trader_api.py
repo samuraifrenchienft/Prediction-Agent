@@ -529,14 +529,24 @@ class TraderAPIClient:
                 t.get("price", t.get("outcomePrice", t.get("avgPrice", 0.5))) or 0.5
             )
 
-        # ── Win rate from activity cash flows (correct approach) ──────────────
+        # ── Win rate from activity cash flows ─────────────────────────────────
         # /v1/positions only shows OPEN positions — settled ones disappear when
         # a market resolves.  Instead, reconstruct settled markets from activity:
         #   BUY events  → money spent per market (conditionId)
         #   SELL/REDEEM → money received per market
-        # A market where we received > we spent = WIN.
-        market_costs:    dict[str, float] = {}
-        market_receipts: dict[str, float] = {}
+        #
+        # DENOMINATOR FIX (v2):
+        # Old approach: count only markets with BOTH costs AND receipts.
+        # Problem: a trader who loses $5,000 across 157 markets and never
+        # redeems (because tokens are worthless) has those losses silently
+        # excluded — inflating win rate from a true ~51% to a fake 96%.
+        #
+        # Fix: any market with a BUY older than 30 days and no receipt
+        # is assumed resolved and lost.  Recent markets (< 30 days) without
+        # receipts are excluded (they may still be live).
+        market_costs:     dict[str, float] = {}
+        market_receipts:  dict[str, float] = {}
+        market_oldest_ts: dict[str, float] = {}   # earliest BUY timestamp per market
 
         buy_trades: list[dict] = []
         for t in trades:
@@ -544,11 +554,15 @@ class TraderAPIClient:
             ttype = t.get("type", "").upper()
             side  = t.get("side", "").upper()
             usd   = _size(t)
+            t_ms  = _ts(t)   # normalised milliseconds
 
             if ttype == "TRADE" and side == "BUY":
                 buy_trades.append(t)
                 if cid:
                     market_costs[cid] = market_costs.get(cid, 0.0) + usd
+                    # Track earliest BUY so we know how old this position is
+                    if cid not in market_oldest_ts or t_ms < market_oldest_ts[cid]:
+                        market_oldest_ts[cid] = t_ms
             elif ttype == "TRADE" and side == "SELL":
                 if cid:
                     market_receipts[cid] = market_receipts.get(cid, 0.0) + usd
@@ -556,13 +570,27 @@ class TraderAPIClient:
                 if cid:
                     market_receipts[cid] = market_receipts.get(cid, 0.0) + usd
 
-        # Only count markets where we have both cost AND receipt data
-        settled_markets = {c for c in market_costs if c in market_receipts}
-        wins_act   = sum(1 for c in settled_markets
-                         if market_receipts[c] > market_costs[c])
-        losses_act = len(settled_markets) - wins_act
+        # Markets countable in win rate:
+        #   a) Has a receipt (confirmed closed — win or loss)
+        #   b) Has a BUY older than 30 days with no receipt (old enough to have resolved = loss)
+        cutoff_ms = now_ms - 30 * 86_400_000
+        countable_markets = {
+            c for c in market_costs
+            if (c in market_receipts)                              # confirmed outcome
+            or (market_oldest_ts.get(c, now_ms) < cutoff_ms)     # old enough to have resolved
+        }
+
+        wins_act   = sum(1 for c in countable_markets
+                         if market_receipts.get(c, 0.0) > market_costs[c])
+        losses_act = len(countable_markets) - wins_act
         n_settled  = wins_act + losses_act
         win_rate   = wins_act / n_settled if n_settled > 0 else 0.0
+
+        # ── Activity-based PnL ─────────────────────────────────────────────────
+        # Summing all receipts minus all costs gives realised cash-flow P&L.
+        # This is the most reliable PnL signal for wallets that aren't in the
+        # top-N leaderboard (where lb_pnl would be zero from an empty profile).
+        activity_pnl = sum(market_receipts.values()) - sum(market_costs.values())
 
         # Also gather open-position P&L for reliability scoring reference
         pos_pnl = sum(
@@ -578,8 +606,27 @@ class TraderAPIClient:
         vol_30d = _window_vol([t for t in buy_trades if _ts(t) >= day30])
         vol_7d  = _window_vol([t for t in buy_trades if _ts(t) >= day7])
 
-        # ── Timing / style signals ────────────────────────────────────────────
+        # ── Certainty farming discount on win rate ────────────────────────────
+        # A trader buying at 0.99¢ "wins" 99% of the time but earns almost
+        # nothing — identical to a certainty farmer.  We discount the effective
+        # win rate by the fraction of near-certain trades so that high-volume
+        # farmers don't masquerade as skilled traders in the perf score.
+        # Discount only kicks in when >= 40% of trades are near-certain
+        # (preserves score for genuinely skilled high-win-rate traders).
         prices = [_price(t) for t in trades if t.get("type", "").upper() == "TRADE"]
+        if prices:
+            near_certain_cnt = sum(1 for p in prices if p > 0.85 or p < 0.10)
+            near_certain_pct = near_certain_cnt / len(prices)
+            if near_certain_pct > 0.40:
+                # Discount win rate proportionally: e.g. 60% near-certain → win_rate *= 0.60
+                discount = 1.0 - (near_certain_pct - 0.40)
+                win_rate = round(win_rate * max(discount, 0.30), 4)
+                log.debug(
+                    "Certainty farming discount %.0f%% near-certain → win_rate adj to %.1f%%",
+                    near_certain_pct * 100, win_rate * 100,
+                )
+
+        # ── Timing / style signals ────────────────────────────────────────────
         genuine_prices = [p for p in prices if 0.10 <= p <= 0.80]
         if genuine_prices:
             avg_entry    = sum(genuine_prices) / len(genuine_prices)
@@ -591,7 +638,11 @@ class TraderAPIClient:
         fade_score = round(contrarian / max(len(genuine_prices), 1), 4)
 
         # ── ROI and performance sub-score ─────────────────────────────────────
-        effective_pnl = lb_pnl if lb_pnl != 0 else pos_pnl
+        # Priority: leaderboard PnL (authoritative) → activity cash-flow PnL
+        # (accurate for non-top-N wallets) → open-position PnL (last resort).
+        effective_pnl = (lb_pnl        if lb_pnl != 0
+                         else activity_pnl if activity_pnl != 0.0
+                         else pos_pnl)
         effective_vol = lb_vol if lb_vol != 0 else _window_vol(buy_trades)
         roi           = effective_pnl / max(effective_vol, 1)
 
@@ -639,7 +690,9 @@ class TraderAPIClient:
             "wins": wins_act, "losses": losses_act,
             "win_rate": round(win_rate, 4),
             "pnl": round(effective_pnl, 2),
+            "pnl_activity": round(activity_pnl, 2),   # cash-flow PnL (independent of LB)
             "volume": round(effective_vol, 2),
+            "n_countable_markets": n_settled,          # denominator used for win rate
         }
         d30_stats = {"wins": 0, "losses": 0, "win_rate": 0.0, "pnl": 0.0, "volume": vol_30d}
         d7_stats  = {"wins": 0, "losses": 0, "win_rate": 0.0, "pnl": 0.0, "volume": vol_7d}
