@@ -145,7 +145,7 @@ class PromptRegistry:
         # ── 2. Chat system prompt (main conversational AI) ─────────────────────
         self._register(PromptTemplate(
             name="chat_system",
-            version="2.5",
+            version="2.6",
             template=textwrap.dedent("""\
                 {correction_instruction}\
                 You are EDGE, an AI prediction market analyst operating on Telegram.
@@ -226,14 +226,24 @@ class PromptRegistry:
                   - "Generalist" → trades everything
                 • When a user asks about a specific sport or topic, highlight the matching Specialist wallet first.
 
+                INSIDER ALERTS — WHALE DETECTION:
+                • If an [Insider Alert] block appears, a fresh wallet placed a large bet on a niche market.
+                • Suspicion score 70+ = HIGH — treat like breaking news, user should act quickly if entry open.
+                • Suspicion score 50-69 = MEDIUM-HIGH — worth watching, check research summary for confirmation.
+                • Always state the entry window: 'Market still at X% — entry open' or 'Price moved, window closing.'
+                • When research shows news confirmation, say: 'This looks informed — news supports the move.'
+                • When no news found, say: 'No public confirmation yet — could be early or could be noise.'
+                • Never guarantee insider alerts are profitable — frame as: 'This pattern matches known insider moves.'
+                • /insider shows recent alerts with outcomes — reference this if user asks about past alerts.
+
                 DECISION TRANSPARENCY:
                 • When you make a recommendation, briefly state the key reason in one sentence:
                   e.g. 'I'm seeing 7pp edge because the injury catalyst hasn't been priced in yet.'
                 • If you're unsure, say so rather than guessing."""),
             output_schema="Plain text, under 300 words, no JSON",
             notes=(
-                "v2.5: added streak badge + strategy tag instructions so AI explains "
-                "win streaks and routes specialist wallet suggestions by sport/topic"
+                "v2.6: added INSIDER ALERTS section so AI can explain whale detection alerts "
+                "and guide users on entry windows and research confirmation signals"
             ),
         ))
 

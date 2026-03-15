@@ -344,6 +344,7 @@ _ai_svc_mod.set_decision_log(_decision_log)
 # TraderCache singleton — shared connection across all commands to avoid
 # spawning a new DB connection on every /traders, /wallet, /watch invocation
 from edge_agent.memory.trader_cache import TraderCache as _TraderCache
+from edge_agent.insider_alerts import InsiderAlertEngine as _InsiderAlertEngine
 _trader_cache: "_TraderCache | None" = None
 
 # Smart money positions cache — refreshed every 30 min by background job.
@@ -357,6 +358,23 @@ _sm_positions_cache: dict = {
 }
 _sm_alerted_24h: dict[str, float] = {}   # "addr:condId" → Unix timestamp of last alert sent
 _SM_CACHE_TTL = 1800   # 30 minutes
+
+# ---------------------------------------------------------------------------
+# Insider alert engine — singleton, initialised lazily in main()
+# ---------------------------------------------------------------------------
+_insider_engine: "_InsiderAlertEngine | None" = None
+
+def _get_insider_engine() -> "_InsiderAlertEngine":
+    global _insider_engine
+    if _insider_engine is None:
+        # Pass the best available search function so AI research works immediately
+        def _search_wrapper(query: str, max_results: int = 4) -> str:
+            result = _tavily_search(query, max_results=max_results)
+            if not result:
+                result = _serper_search(query, max_results=max_results)
+            return result
+        _insider_engine = _InsiderAlertEngine(search_fn=_search_wrapper)
+    return _insider_engine
 
 
 def _get_trader_cache() -> "_TraderCache":
@@ -1235,6 +1253,37 @@ async def outcome_resolution_job(ctx: ContextTypes.DEFAULT_TYPE) -> None:
                 )
         except Exception as _ml_prop_exc:
             log.debug("[ML] outcome propagation failed: %s", _ml_prop_exc)
+
+        # Propagate resolved outcomes → insider alert engine (auto-watchlist winners)
+        try:
+            _recent_all = _ot.recent_resolved(days=3, limit=200)
+            engine = _get_insider_engine()
+            tc = _get_trader_cache()
+            for _res in _recent_all:
+                cid     = _res.get("condition_id") or _res.get("market_id") or ""
+                outcome = _res.get("outcome", "VOID")
+                if not cid or outcome == "VOID":
+                    continue
+                resolved_yes = outcome == "WIN"
+                winning_wallets = await loop.run_in_executor(
+                    None, lambda c=cid, r=resolved_yes: engine.record_outcome(c, r)
+                )
+                # Auto-add confirmed insider wallets (bet paid off) to watchlist
+                for addr in winning_wallets:
+                    try:
+                        await loop.run_in_executor(
+                            None,
+                            lambda a=addr: tc.add_to_watchlist(
+                                a,
+                                note="Auto-added: insider alert confirmed (bet resolved YES)",
+                                vet_interval_hours=6,
+                            ),
+                        )
+                        log.info("[insider] Auto-watchlisted confirmed wallet: %s", addr[:10])
+                    except Exception as _wl_exc:
+                        log.debug("[insider] Watchlist add failed for %s: %s", addr[:10], _wl_exc)
+        except Exception as _ins_exc:
+            log.debug("[insider] outcome propagation to insider engine failed: %s", _ins_exc)
 
     except Exception as exc:
         log.warning("Outcome resolution job failed: %s", exc)
@@ -3721,6 +3770,62 @@ async def cmd_decisions(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
 
 
 # ---------------------------------------------------------------------------
+# /insider command — show recent insider alerts
+# ---------------------------------------------------------------------------
+
+async def cmd_insider(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    """
+    Show the last 10 insider alerts fired by the engine.
+
+    Usage:
+      /insider          — last 10 alerts
+      /insider 20       — last 20 alerts
+
+    Each alert shows: market, wallet, position size, suspicion score, outcome.
+    """
+    args = ctx.args or []
+    limit = 10
+    try:
+        if args:
+            limit = max(1, min(int(args[0]), 25))
+    except ValueError:
+        pass
+
+    engine = _get_insider_engine()
+    alerts = engine.get_recent_alerts(limit=limit)
+
+    if not alerts:
+        await update.message.reply_text(
+            "No insider alerts fired yet.\n\n"
+            "The engine scans every 5 minutes for fresh wallets placing large bets "
+            "on niche markets. Alerts fire when suspicion score >= 45/100.",
+            parse_mode=ParseMode.HTML,
+        )
+        return
+
+    lines = [f"<b>Insider Alerts — Last {len(alerts)}</b>\n"]
+    for a in alerts:
+        ts   = datetime.fromtimestamp(a["fired_at"], tz=timezone.utc).strftime("%m/%d %H:%M")
+        addr = a["wallet"][:6] + "..." + a["wallet"][-4:]
+        q    = _e(a["question"][:70])
+        score = a["suspicion_score"]
+        size  = a["trade_size_usd"]
+        price = int(a["current_price"] * 100)
+        outcome_emoji = {"win": "✅", "loss": "❌", "pending": "⏳"}.get(a["outcome"], "⏳")
+        score_emoji = "🚨" if score >= 70 else "⚠️" if score >= 50 else "🔍"
+        lines.append(
+            f"{score_emoji} [{ts}] <b>{score}/100</b> — ${size:,.0f} @ {price}% YES\n"
+            f"  <i>{q}</i>\n"
+            f"  Wallet: <code>{_e(addr)}</code>  {outcome_emoji} {a['outcome'].upper()}\n"
+        )
+
+    lines.append(
+        "\n<i>Scores: 70+ = HIGH suspicion | 50-69 = MEDIUM-HIGH | 45-49 = MEDIUM</i>"
+    )
+    await _send_chunked(update.message.reply_text, "\n".join(lines))
+
+
+# ---------------------------------------------------------------------------
 # Background scan job
 # ---------------------------------------------------------------------------
 
@@ -3808,6 +3913,7 @@ def main() -> None:
     app.add_handler(CommandHandler("standings",   cmd_standings,   filters=_auth_filter))
     app.add_handler(CommandHandler("mlstatus",    cmd_mlstatus,    filters=_auth_filter))
     app.add_handler(CommandHandler("decisions",   cmd_decisions,   filters=_auth_filter))
+    app.add_handler(CommandHandler("insider",     cmd_insider,     filters=_auth_filter))
 
     # Inline keyboard (callback queries are always scoped to the chat they came from)
     app.add_handler(CallbackQueryHandler(handle_callback))
@@ -3866,6 +3972,42 @@ def main() -> None:
             log.debug("[smart_money_job] Refresh failed: %s", exc)
 
     app.job_queue.run_repeating(_smart_money_refresh_job, interval=1800, first=120)
+
+    # ---------------------------------------------------------------------------
+    # Insider alert job — scans niche markets for price moves driven by unknown
+    # fresh wallets placing large bets. Fires to ALERT_CHANNEL_ID.
+    # Runs every 5 min; first run 3 min after boot (after price snapshot baseline).
+    # ---------------------------------------------------------------------------
+    async def _insider_scan_job(ctx: ContextTypes.DEFAULT_TYPE) -> None:
+        engine = _get_insider_engine()
+        try:
+            async def _send_to_alert_channel(msg: str) -> None:
+                target = ALERT_CHANNEL_ID or CHAT_ID
+                if not target:
+                    return
+                try:
+                    await ctx.bot.send_message(
+                        chat_id=target,
+                        text=msg,
+                        parse_mode=ParseMode.HTML,
+                        disable_web_page_preview=True,
+                    )
+                except Exception as exc:
+                    log.warning("[insider_job] send failed: %s", exc)
+
+            n = await engine.run_scan(send_alert_fn=_send_to_alert_channel)
+            if n:
+                log.info("[insider_job] %d insider alert(s) fired this cycle", n)
+
+            # Cleanup old records weekly (piggyback on maintenance rhythm)
+            import random
+            if random.random() < 0.02:   # ~2% chance per run ≈ weekly at 5-min intervals
+                engine.cleanup_old_records(days=30)
+
+        except Exception as exc:
+            log.warning("[insider_job] scan failed: %s", exc)
+
+    app.job_queue.run_repeating(_insider_scan_job, interval=300, first=180)
 
     # Outcome resolution — check pending signals every 2h, first run 5 min after boot
     app.job_queue.run_repeating(outcome_resolution_job, interval=7200, first=300)
