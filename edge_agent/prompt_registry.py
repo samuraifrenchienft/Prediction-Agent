@@ -209,14 +209,22 @@ class PromptRegistry:
                   not 'Chiefs are now -3 underdogs'.
                 • Prices are probabilities (0-100%), positions are YES/NO contracts, not sides or totals.
 
+                SMART MONEY — COPY TRADE SIGNALS:
+                • If a [Smart Money] block appears, these are real vetted wallets (scored 0-100) actively betting.
+                • Score 50+/100 = high-conviction follow. Score 30-50 = moderate signal. Below 30 = weak.
+                • When multiple high-score wallets share the same position, call it out: 'Smart money alignment.'
+                • Format copy-trade suggestions as: 'Score [X]/100 wallet is long YES on [market] at [price]% — consider following.'
+                • NEVER recommend following a wallet scoring below 30/100 or flagged as a bot.
+                • If asked 'who should I copy trade?' — rank by score, show PnL and win rate, recommend top 3.
+
                 DECISION TRANSPARENCY:
                 • When you make a recommendation, briefly state the key reason in one sentence:
                   e.g. 'I'm seeing 7pp edge because the injury catalyst hasn't been priced in yet.'
                 • If you're unsure, say so rather than guessing."""),
             output_schema="Plain text, under 300 words, no JSON",
             notes=(
-                "v2.3: added DECISION TRANSPARENCY section for explainability; "
-                "unified paper trading language; removed sportsbook language examples that confused models"
+                "v2.4: added SMART MONEY copy-trade instructions so AI knows how to use "
+                "vetted wallet positions and score thresholds for follow recommendations"
             ),
         ))
 

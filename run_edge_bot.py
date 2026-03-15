@@ -345,6 +345,12 @@ _ai_svc_mod.set_decision_log(_decision_log)
 from edge_agent.memory.trader_cache import TraderCache as _TraderCache
 _trader_cache: "_TraderCache | None" = None
 
+# Smart money positions cache — refreshed every 30 min by background job.
+# Stores open positions from top-scored watchlist wallets so the AI can
+# reference what real traders are currently betting on without per-message latency.
+_sm_positions_cache: dict = {"lines": [], "fetched_at": 0.0}
+_SM_CACHE_TTL = 1800   # 30 minutes
+
 
 def _get_trader_cache() -> "_TraderCache":
     """Return the module-level TraderCache singleton, creating it if needed."""
@@ -2008,6 +2014,82 @@ def _build_injury_context(query: str) -> str:
 
 
 # ---------------------------------------------------------------------------
+# Smart Money context builder
+# ---------------------------------------------------------------------------
+
+def _build_smart_money_context(force_refresh: bool = False) -> str:
+    """
+    Return a compact [Smart Money] context block showing what top-scored
+    watchlist wallets are currently betting on.
+
+    Uses a 30-minute in-memory cache so the AI gets fresh data without
+    adding API latency to every message.  Returns "" if no data available.
+    """
+    global _sm_positions_cache
+
+    now = time.time()
+    if not force_refresh and (now - _sm_positions_cache["fetched_at"]) < _SM_CACHE_TTL:
+        lines = _sm_positions_cache["lines"]
+        if lines:
+            age_min = int((now - _sm_positions_cache["fetched_at"]) / 60)
+            return (
+                f"\n[Smart Money — top tracked wallets, refreshed {age_min}m ago]\n"
+                + "\n".join(lines)
+            )
+        return ""
+
+    # ── Refresh: pull top-scored non-bot wallets from cache, fetch positions ──
+    try:
+        cache   = _get_trader_cache()
+        # Top 5 non-bot wallets by final_score from trader_profiles
+        top     = cache.get_top(limit=5)
+        client  = _TraderClient()
+        new_lines: list[str] = []
+
+        for tw in top:
+            addr  = tw.get("wallet_address", "")
+            score = int(tw.get("final_score", 0) * 100)
+            if not addr:
+                continue
+            try:
+                positions = client.fetch_wallet_positions(addr)
+            except Exception:
+                continue
+
+            # Filter: significant open positions ($100+ size), active markets only
+            sig = [
+                p for p in positions
+                if float(p.get("size", p.get("currentValue", 0)) or 0) >= 100
+            ]
+            if not sig:
+                continue
+
+            # Format each position compactly
+            for pos in sig[:3]:   # max 3 positions per wallet
+                title   = (pos.get("title") or pos.get("market", "Unknown market"))[:55]
+                side    = "YES" if pos.get("outcomeIndex", 0) == 0 else "NO"
+                size    = float(pos.get("size", pos.get("currentValue", 0)) or 0)
+                cur_pct = float(pos.get("curPrice", pos.get("currentPrice", 0.5)) or 0.5)
+                new_lines.append(
+                    f"  [{score}/100] {addr[:8]}... → {side} on '{title}' "
+                    f"${size:,.0f} @ {cur_pct:.0%}"
+                )
+
+        _sm_positions_cache["lines"]      = new_lines
+        _sm_positions_cache["fetched_at"] = now
+
+        if new_lines:
+            return (
+                "\n[Smart Money — top tracked wallets, just refreshed]\n"
+                + "\n".join(new_lines)
+            )
+    except Exception as exc:
+        log.debug("[SmartMoney] Position refresh failed: %s", exc)
+
+    return ""
+
+
+# ---------------------------------------------------------------------------
 # Free-form AI chat
 # ---------------------------------------------------------------------------
 
@@ -2386,6 +2468,18 @@ async def handle_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None
         if wp_context:
             search_context = wp_context + ("\n\n" + search_context if search_context else "")
 
+    # 8. Smart money positions — injected when user asks about trading or markets.
+    #    Shows what top-scored vetted wallets are currently positioned on so the
+    #    AI can surface copy-trade ideas and smart money alignment signals.
+    _SMART_MONEY_TRIGGERS = {
+        "trade", "buy", "bet", "position", "market", "edge", "wallet",
+        "copy", "follow", "who", "smart money", "trader", "recommend",
+        "should i", "worth", "call", "play", "play on", "long", "short",
+    }
+    smart_money_context = ""
+    if any(kw in q for kw in _SMART_MONEY_TRIGGERS) or market_context or scan_context:
+        smart_money_context = _build_smart_money_context()
+
     # ── Correction mode instruction — prepended to system prompt ─────────────
     correction_instruction = (
         "CORRECTION MODE ACTIVE — the user told you your previous answer was wrong or stale.\n"
@@ -2484,6 +2578,7 @@ async def handle_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None
         + session_context        # today's conversation history (per user)
         + market_context
         + scan_context
+        + smart_money_context    # top-scored wallet positions (copy-trade signal)
         + injury_context
         + search_context
     )
@@ -2496,6 +2591,7 @@ async def handle_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None
     if session_context:       _active_ctx_blocks.append("session_history")
     if market_context:        _active_ctx_blocks.append("market_data")
     if scan_context:          _active_ctx_blocks.append("scan_results")
+    if smart_money_context:   _active_ctx_blocks.append("smart_money")
     if injury_context:        _active_ctx_blocks.append("injuries")
     if search_context:        _active_ctx_blocks.append("web_search")
 
@@ -2503,7 +2599,7 @@ async def handle_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None
         prompt,
         task_type       = "creative",
         system_prompt   = system_prompt,
-        prompt_version  = "chat_system@2.3",
+        prompt_version  = "chat_system@2.4",
         context_blocks  = _active_ctx_blocks,
         correction_mode = _is_correction,
         regime_safe     = _regime.is_ml_safe,
@@ -3498,6 +3594,18 @@ def main() -> None:
 
     # Watchlist re-vet — every 6h, first run 10 min after boot
     app.job_queue.run_repeating(watchlist_vet_job, interval=21600, first=600)
+
+    # Smart money position refresh — every 30 min, first run 2 min after boot
+    # Pre-warms the cache so the first user message doesn't trigger a live fetch
+    async def _smart_money_refresh_job(ctx: ContextTypes.DEFAULT_TYPE) -> None:
+        try:
+            _build_smart_money_context(force_refresh=True)
+            log.info("[smart_money_job] Position cache refreshed — %d lines",
+                     len(_sm_positions_cache["lines"]))
+        except Exception as exc:
+            log.debug("[smart_money_job] Refresh failed: %s", exc)
+
+    app.job_queue.run_repeating(_smart_money_refresh_job, interval=1800, first=120)
 
     # Outcome resolution — check pending signals every 2h, first run 5 min after boot
     app.job_queue.run_repeating(outcome_resolution_job, interval=7200, first=300)
