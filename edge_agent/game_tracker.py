@@ -65,6 +65,11 @@ class TrackedGame:
     last_market_prob: float = 0.0
     last_updated: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
 
+    # How this game was added to the tracker:
+    #   "pre_game_lag"     — PRE_GAME_INJURY_LAG signal fired (market underpriced injury)
+    #   "proactive_injury" — star player Out/Doubtful detected in injury cache
+    registration_type: str = "pre_game_lag"
+
     # Trigger state — set once when INJURY_MOMENTUM_REVERSAL condition is met
     triggered: bool = False
     trigger_prob: float = 0.0          # market_prob at the moment trigger fired
@@ -79,6 +84,15 @@ class TrackedGame:
     def current_drop(self) -> float:
         """Current price drop from pre-game reference (positive = team is losing)."""
         return self.reference_prob - self.last_market_prob
+
+    @property
+    def current_surge(self) -> float:
+        """Current price surge from pre-game reference (positive = team pulling ahead).
+
+        Opposite of current_drop. Useful for detecting when the healthy/favored team
+        is running away (injured team collapsing) — a "confirm & hold" or "too late" signal.
+        """
+        return self.last_market_prob - self.reference_prob
 
 
 # ---------------------------------------------------------------------------
@@ -95,6 +109,7 @@ _INJURY_KW = [
 # Price-drop thresholds from pre-game probability (in probability points)
 # These are intentionally lower than the default 10pp in _classify_signal
 # because we already have pre-game injury confirmation.
+_Q1_TRIGGER_DROP = 0.12   # Q1: 12pp drop — must be a clear blowout to fire this early
 _Q2_TRIGGER_DROP = 0.08   # Q2: 8pp drop fires the alert
 _Q3_TRIGGER_DROP = 0.06   # Q3/Q4: 6pp drop (more aggressive — less time to act)
 
@@ -130,20 +145,34 @@ class GameTracker:
     # Public API
     # ------------------------------------------------------------------
 
-    def register(self, snapshot: MarketSnapshot, catalysts: list[Catalyst], theme: str) -> None:
-        """Register a pre-game injury game for active tracking.
+    def register(
+        self,
+        snapshot: MarketSnapshot,
+        catalysts: list,          # list[Catalyst] OR list[str] for proactive registrations
+        theme: str,
+        registration_type: str = "pre_game_lag",
+    ) -> None:
+        """Register a game for injury monitoring.
 
-        Called when PRE_GAME_INJURY_LAG signal fires. Does nothing if the
-        game is already being tracked.
+        Two registration paths:
+          "pre_game_lag"     — PRE_GAME_INJURY_LAG signal fired; catalysts are Catalyst objects.
+          "proactive_injury" — star player Out/Doubtful in injury cache; catalysts are strings.
+
+        Does nothing if the game is already being tracked.
         """
         key = self._key(snapshot.venue, snapshot.market_id)
         if key in self._games:
             return
 
-        injury_sources = [
-            c.source for c in catalysts
-            if any(kw in c.source.lower() for kw in _INJURY_KW)
-        ]
+        # Extract injury source strings regardless of whether catalysts are
+        # Catalyst objects (news pipeline) or plain strings (injury-cache path).
+        injury_sources: list[str] = []
+        for c in catalysts:
+            src = c.source if hasattr(c, "source") else str(c)
+            if any(kw in src.lower() for kw in _INJURY_KW):
+                injury_sources.append(src)
+        if not injury_sources:
+            injury_sources = [f"(injury detected — {registration_type})"]
 
         game = TrackedGame(
             market_id=snapshot.market_id,
@@ -152,15 +181,18 @@ class GameTracker:
             theme=theme,
             pre_game_market_prob=snapshot.market_prob,
             pre_game_opening_prob=snapshot.opening_prob,
-            injury_catalysts=injury_sources or ["(injury detected via news)"],
+            injury_catalysts=injury_sources,
             registered_at=datetime.now(timezone.utc),
             last_market_prob=snapshot.market_prob,
+            registration_type=registration_type,
         )
         self._games[key] = game
+
+        tag = "📊 PRE-GAME LAG" if registration_type == "pre_game_lag" else "👁 PROACTIVE INJURY"
         print(
-            f"[GameTracker] +Registered '{snapshot.question[:70]}' | "
+            f"[GameTracker] +{tag} '{snapshot.question[:65]}' | "
             f"pre-game={snapshot.market_prob:.1%} | "
-            f"injury sources: {len(injury_sources)}"
+            f"sources: {len(injury_sources)}"
         )
 
     def update(self, snapshot: MarketSnapshot) -> SignalType | None:
@@ -189,11 +221,16 @@ class GameTracker:
         if game.triggered:
             return None
 
-        # Only check trigger during live phases Q2 and later
-        if phase not in (GamePhase.LIVE_Q2, GamePhase.LIVE_Q3, GamePhase.LIVE_Q4):
+        # Check trigger during live phases Q1 and later
+        if phase not in (GamePhase.LIVE_Q1, GamePhase.LIVE_Q2, GamePhase.LIVE_Q3, GamePhase.LIVE_Q4):
             return None
 
-        threshold = _Q2_TRIGGER_DROP if phase == GamePhase.LIVE_Q2 else _Q3_TRIGGER_DROP
+        if phase == GamePhase.LIVE_Q1:
+            threshold = _Q1_TRIGGER_DROP   # 12pp — clear blowout only
+        elif phase == GamePhase.LIVE_Q2:
+            threshold = _Q2_TRIGGER_DROP   # 8pp — main trigger window
+        else:
+            threshold = _Q3_TRIGGER_DROP   # 6pp — aggressive late-game
         drop = game.current_drop
 
         if drop >= threshold:
@@ -242,10 +279,19 @@ class GameTracker:
             f"[GameTracker] {len(games)} tracked | {len(triggered)} triggered"
         ]
         for g in games:
-            drop = g.current_drop
-            flag = "*** TRIGGERED ***" if g.triggered else f"drop={drop:+.1%}"
+            drop  = g.current_drop
+            surge = g.current_surge
+            if g.triggered:
+                flag = "*** TRIGGERED ***"
+            elif drop > 0:
+                flag = f"drop={drop:+.1%}"      # team losing — buy window forming
+            elif surge > 0.02:
+                flag = f"surge={surge:+.1%}"     # team pulling ahead — confirm/hold
+            else:
+                flag = f"Δ={-drop:+.1%}"         # near-flat
+            type_badge = "📌" if g.registration_type == "pre_game_lag" else "👁"
             lines.append(
-                f"  {'🔥' if g.triggered else '👁'} [{g.phase.value:10}] "
+                f"  {'🔥' if g.triggered else type_badge} [{g.phase.value:10}] "
                 f"{g.question[:55]:<55} | ref={g.reference_prob:.1%} → {g.last_market_prob:.1%} | {flag}"
             )
         return "\n".join(lines)

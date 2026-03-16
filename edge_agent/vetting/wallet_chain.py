@@ -58,13 +58,18 @@ def _rpc_nonce(address: str) -> int:
         "id": 1,
     }
     for url in _RPC_URLS:
-        try:
-            r = requests.post(url, json=payload, timeout=8)
-            r.raise_for_status()
-            hex_val = r.json().get("result", "0x0")
-            return int(hex_val, 16)
-        except Exception as exc:
-            log.debug("RPC %s failed for %s: %s", url, address[:10], exc)
+        last_exc = None
+        for attempt in range(2):  # 2 tries per endpoint
+            try:
+                r = requests.post(url, json=payload, timeout=8)
+                r.raise_for_status()
+                hex_val = r.json().get("result", "0x0")
+                return int(hex_val, 16)
+            except Exception as exc:
+                last_exc = exc
+                if attempt < 1:
+                    time.sleep(1)
+        log.debug("RPC %s failed for %s after retries: %s", url, address[:10], last_exc)
     return -1  # all endpoints failed
 
 

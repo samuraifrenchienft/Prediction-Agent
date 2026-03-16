@@ -40,8 +40,10 @@ class MarketAdapter(Protocol):
 
 class KalshiAdapter:
     venue = Venue.KALSHI
-    _cache: list[AdapterMarket] = []
-    _cache_at: float = 0.0
+
+    def __init__(self) -> None:
+        self._cache: list[AdapterMarket] = []
+        self._cache_at: float = 0.0
 
     def fetch_markets(self) -> list[AdapterMarket]:
         if self._cache and (time.time() - self._cache_at) < _CACHE_TTL:
@@ -79,8 +81,8 @@ class KalshiAdapter:
                         theme=self._infer_theme(m),
                     )
                 )
-            KalshiAdapter._cache = result
-            KalshiAdapter._cache_at = time.time()
+            self._cache = result
+            self._cache_at = time.time()
             logger.info("Kalshi: fetched %d live markets", len(result))
             return result
         except Exception as exc:
@@ -121,8 +123,10 @@ class KalshiAdapter:
 
 class PolymarketAdapter:
     venue = Venue.POLYMARKET
-    _cache: list[AdapterMarket] = []
-    _cache_at: float = 0.0
+
+    def __init__(self) -> None:
+        self._cache: list[AdapterMarket] = []
+        self._cache_at: float = 0.0
 
     def fetch_markets(self) -> list[AdapterMarket]:
         if self._cache and (time.time() - self._cache_at) < _CACHE_TTL:
@@ -153,8 +157,8 @@ class PolymarketAdapter:
                         theme=self._infer_theme(m),
                     )
                 )
-            PolymarketAdapter._cache = result
-            PolymarketAdapter._cache_at = time.time()
+            self._cache = result
+            self._cache_at = time.time()
             logger.info("Polymarket: fetched %d live markets", len(result))
             return result
         except Exception as exc:

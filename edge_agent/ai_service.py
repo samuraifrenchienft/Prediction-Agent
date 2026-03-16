@@ -54,28 +54,27 @@ def set_decision_log(dlog: object) -> None:
 # 503 = model unavailable → skip
 # ---------------------------------------------------------------------------
 
+# Updated 2026-03-15 — pruned retired models, added current free-tier options.
+# Check https://openrouter.ai/models?q=free for latest availability.
 _OR_FREE_SIMPLE: list[str] = [
-    "stepfun/step-3.5-flash:free",
-    "qwen/qwen2.5-7b-instruct:free",
-    "google/gemma-3-4b-it:free",
-    "meta-llama/llama-3.2-3b-instruct:free",
-    "microsoft/phi-3-mini-128k-instruct:free",
+    "stepfun/step-3.5-flash:free",              # 256k ctx — fast, reliable
+    "nvidia/nemotron-3-nano-30b-a3b:free",       # 256k ctx — small but capable
+    "liquid/lfm-2.5-1.2b-instruct:free",         # 32k ctx — ultra-fast fallback
+    "arcee-ai/trinity-mini:free",                 # 131k ctx — lightweight
 ]
 
 _OR_FREE_COMPLEX: list[str] = [
-    "arcee-ai/trinity-large-preview:free",
-    "deepseek/deepseek-chat-v3-0324:free",
-    "meta-llama/llama-3.3-70b-instruct:free",
-    "qwen/qwen2.5-72b-instruct:free",
-    "mistralai/mistral-7b-instruct:free",
+    "nvidia/nemotron-3-super-120b-a12b:free",    # 262k ctx — strongest free model
+    "arcee-ai/trinity-large-preview:free",        # 131k ctx — solid all-rounder
+    "stepfun/step-3.5-flash:free",                # 256k ctx — fast fallback
+    "nvidia/nemotron-3-nano-30b-a3b:free",        # 256k ctx — last resort
 ]
 
 _OR_FREE_CREATIVE: list[str] = [
-    "arcee-ai/trinity-large-preview:free",
-    "deepseek/deepseek-chat-v3-0324:free",
-    "meta-llama/llama-3.3-70b-instruct:free",
-    "qwen/qwen2.5-72b-instruct:free",
-    "mistralai/mistral-7b-instruct:free",
+    "nvidia/nemotron-3-super-120b-a12b:free",    # 262k ctx — strongest free model
+    "arcee-ai/trinity-large-preview:free",        # 131k ctx — solid all-rounder
+    "stepfun/step-3.5-flash:free",                # 256k ctx — fast fallback
+    "nvidia/nemotron-3-nano-30b-a3b:free",        # 256k ctx — last resort
 ]
 
 _OR_FREE_MAP: dict[str, list[str]] = {
@@ -93,6 +92,16 @@ _GROQ_MODEL_MAP: dict[str, str] = {
 
 # Status codes that mean "this model slot is unavailable — try the next one"
 _SKIP_STATUS_CODES = {402, 429, 503}
+
+# Circuit breaker — cooldown per model after skip-able errors
+# Avoids retrying a model we know is down for the next N seconds
+_MODEL_COOLDOWNS: dict[str, float] = {}   # model_id → expiry timestamp
+_COOLDOWN_SECS = {
+    402: 3600,   # out of credits → 1 hour cooldown
+    429: 120,    # rate limit → 2 min cooldown
+    503: 300,    # unavailable → 5 min cooldown
+}
+_CONNECTION_COOLDOWN = 60  # connection error → 1 min cooldown
 
 
 # ---------------------------------------------------------------------------
@@ -168,6 +177,12 @@ def get_ai_response(
 
     candidates = _get_candidates(task_type)
     for client, model in candidates:
+        # Circuit breaker: skip models in cooldown
+        cooldown_until = _MODEL_COOLDOWNS.get(model, 0)
+        if time.time() < cooldown_until:
+            log.debug("[AI] %s in cooldown (%.0fs left) — skipping", model, cooldown_until - time.time())
+            continue
+
         t0 = time.monotonic()
         try:
             response = client.chat.completions.create(
@@ -200,16 +215,18 @@ def get_ai_response(
 
         except APIStatusError as exc:
             if exc.status_code in _SKIP_STATUS_CODES:
+                _MODEL_COOLDOWNS[model] = time.time() + _COOLDOWN_SECS.get(exc.status_code, 60)
                 log.warning(
-                    "[AI] %s → HTTP %d — trying next model",
-                    model, exc.status_code,
+                    "[AI] %s → HTTP %d — cooldown %ds, trying next model",
+                    model, exc.status_code, _COOLDOWN_SECS.get(exc.status_code, 60),
                 )
                 continue
             log.error("[AI] get_ai_response fatal error (model=%s): %s", model, exc)
             return None
 
         except APIConnectionError as exc:
-            log.warning("[AI] %s → connection error — trying next model: %s", model, exc)
+            _MODEL_COOLDOWNS[model] = time.time() + _CONNECTION_COOLDOWN
+            log.warning("[AI] %s → connection error — cooldown %ds, trying next model: %s", model, _CONNECTION_COOLDOWN, exc)
             continue
 
         except Exception as exc:
@@ -229,6 +246,7 @@ def get_chat_response(
     correction_mode: bool = False,
     regime_safe: bool = True,
     user_id: str = "",
+    max_tokens: int = 400,
 ) -> str | None:
     """
     Plain-text response — rotates through free models until one succeeds.
@@ -251,11 +269,18 @@ def get_chat_response(
 
     candidates = _get_candidates(task_type)
     for client, model in candidates:
+        # Circuit breaker: skip models in cooldown
+        cooldown_until = _MODEL_COOLDOWNS.get(model, 0)
+        if time.time() < cooldown_until:
+            log.debug("[AI] %s in cooldown (%.0fs left) — skipping", model, cooldown_until - time.time())
+            continue
+
         t0 = time.monotonic()
         try:
             response = client.chat.completions.create(
                 model=model,
                 messages=messages,
+                max_tokens=max_tokens,
                 # No response_format constraint — plain text allowed
             )
             result = response.choices[0].message.content
@@ -285,16 +310,18 @@ def get_chat_response(
 
         except APIStatusError as exc:
             if exc.status_code in _SKIP_STATUS_CODES:
+                _MODEL_COOLDOWNS[model] = time.time() + _COOLDOWN_SECS.get(exc.status_code, 60)
                 log.warning(
-                    "[AI] %s → HTTP %d — trying next model",
-                    model, exc.status_code,
+                    "[AI] %s → HTTP %d — cooldown %ds, trying next model",
+                    model, exc.status_code, _COOLDOWN_SECS.get(exc.status_code, 60),
                 )
                 continue
             log.error("[AI] get_chat_response fatal error (model=%s): %s", model, exc)
             return None
 
         except APIConnectionError as exc:
-            log.warning("[AI] %s → connection error — trying next model: %s", model, exc)
+            _MODEL_COOLDOWNS[model] = time.time() + _CONNECTION_COOLDOWN
+            log.warning("[AI] %s → connection error — cooldown %ds, trying next model: %s", model, _CONNECTION_COOLDOWN, exc)
             continue
 
         except Exception as exc:

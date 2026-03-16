@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from enum import Enum
+from typing import TYPE_CHECKING
 
 from .models import (
     Catalyst,
@@ -13,6 +15,37 @@ from .models import (
     RiskPolicy,
     Venue,
 )
+
+if TYPE_CHECKING:
+    from .ml.confidence_calibrator import ConfidenceCalibrator
+
+# Lazy-import econ scanner for Fed market probability override
+_econ_scanner = None  # type: ignore[assignment]
+
+def _get_econ_scanner():
+    """Lazy-load econ scanner to avoid circular imports."""
+    global _econ_scanner
+    if _econ_scanner is None:
+        try:
+            from .scanners import econ_scanner as _es
+            _econ_scanner = _es
+        except Exception:
+            _econ_scanner = False  # permanently disable if import fails
+    return _econ_scanner if _econ_scanner else None
+
+log = logging.getLogger(__name__)
+
+# Module-level calibrator reference — injected at startup by run_edge_bot.py
+# If None (pre-training), probability_node uses raw confidence (safe passthrough)
+_calibrator: "ConfidenceCalibrator | None" = None
+
+
+def set_calibrator(cal: "ConfidenceCalibrator | None") -> None:
+    """Inject the active ConfidenceCalibrator into the nodes pipeline."""
+    global _calibrator
+    _calibrator = cal
+    if cal is not None:
+        log.info("[nodes] ConfidenceCalibrator injected (active=%s)", cal._active)
 
 
 class SignalType(str, Enum):
@@ -30,7 +63,9 @@ class ProbabilityOutput:
     uncertainty_band: tuple[float, float]
     thesis: list[str]
     disconfirming_evidence: list[str]
-    signal: SignalType = SignalType.NONE  # set by probability_node
+    signal: SignalType = SignalType.NONE       # set by probability_node
+    raw_confidence: float = 0.0               # pre-calibration value (for ML logging)
+    catalyst_strength: float = 0.0            # Σ(dir×conf×qual) used to shift p_true
 
 
 @dataclass
@@ -145,7 +180,39 @@ def probability_node(snapshot: MarketSnapshot, catalysts: list[Catalyst]) -> Pro
     Uses AI-scored catalyst data (from CatalystDetectionEngine) to adjust
     market probability. The catalysts already carry AI signal quality scores;
     combining them mathematically is more reliable than a second AI re-assessment.
+
+    Special handling for Fed rate / economic markets:
+      These are mutually-exclusive outcome groups (cut 25bps, cut 50bps, hold,
+      hike). The generic catalyst pipeline would give them all the same
+      adjustment — producing identical probabilities, which is nonsensical.
+      Instead, delegate to the econ scanner's specialized model (yield curve +
+      EFFR + BPS magnitude scaling).
     """
+    # ── Econ scanner override for Fed rate / economic markets ──────────────
+    # Detects Fed/rate markets by question text and uses the specialized
+    # probability model that differentiates cut/hike/hold/bps magnitude.
+    econ_override = None
+    econ_notes = ""
+    question = (snapshot.question or snapshot.market_id or "").lower()
+    es = _get_econ_scanner()
+    if es is not None:
+        category = es._detect_econ_category(question)
+        if category is not None:
+            try:
+                ctx = es._get_econ_context()
+                prob, notes = es._estimate_econ_prob(
+                    snapshot.question or snapshot.market_id, category, ctx
+                )
+                if prob is not None:
+                    econ_override = prob
+                    econ_notes = notes
+                    log.debug(
+                        "[nodes] Econ override for '%s': %.1f%% (%s)",
+                        question[:50], prob * 100, notes,
+                    )
+            except Exception as exc:
+                log.warning("[nodes] Econ scanner override failed: %s", exc)
+
     if catalysts:
         weighted_signal = sum(c.direction * c.confidence * c.quality for c in catalysts)
         catalyst_strength = min(0.12, max(-0.12, weighted_signal))
@@ -154,8 +221,22 @@ def probability_node(snapshot: MarketSnapshot, catalysts: list[Catalyst]) -> Pro
         catalyst_strength = 0.0
         source_confidence = 0.5
 
-    p_true = min(0.99, max(0.01, snapshot.market_prob + catalyst_strength))
-    confidence = max(0.45, min(0.95, source_confidence))
+    if econ_override is not None:
+        # Use econ scanner probability directly — it already accounts for
+        # cut/hike/hold direction and BPS magnitude.
+        p_true = econ_override
+        catalyst_strength = p_true - snapshot.market_prob
+    else:
+        p_true = min(0.99, max(0.01, snapshot.market_prob + catalyst_strength))
+
+    # Apply Platt-scaling calibration if a trained calibrator is available.
+    # Falls back to raw source_confidence if calibrator is inactive or not loaded.
+    raw_confidence = max(0.45, min(0.95, source_confidence))
+    if _calibrator is not None:
+        confidence = _calibrator.calibrate(raw_confidence)
+    else:
+        confidence = raw_confidence
+
     uncertainty = max(0.02, 0.18 - (confidence * 0.12))
     band = (max(0.01, p_true - uncertainty), min(0.99, p_true + uncertainty))
 
@@ -167,6 +248,8 @@ def probability_node(snapshot: MarketSnapshot, catalysts: list[Catalyst]) -> Pro
         f"(market: {snapshot.market_prob:.1%}, Δ{adj:+.1%}).",
         f"Signal: {signal.value}.",
     ]
+    if econ_override is not None and econ_notes:
+        thesis.append(f"Econ model: {econ_notes}")
     if catalysts:
         top_cat = max(catalysts, key=lambda c: c.quality * abs(c.direction))
         thesis.append(
@@ -187,6 +270,8 @@ def probability_node(snapshot: MarketSnapshot, catalysts: list[Catalyst]) -> Pro
         thesis=thesis,
         disconfirming_evidence=disconfirming,
         signal=signal,
+        raw_confidence=raw_confidence,
+        catalyst_strength=catalyst_strength,
     )
 
 

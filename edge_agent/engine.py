@@ -104,7 +104,10 @@ class EdgeEngine:
         active = self.game_tracker.active_games()
         triggered = self.game_tracker.triggered_games()
         if not active:
-            return "No games in injury tracker."
+            return (
+                "🏈 Injury tracker idle — will activate when a game market goes live "
+                "with a star player Out/Doubtful on one side."
+            )
         lines = [f"Injury tracker: {len(active)} active, {len(triggered)} triggered"]
         for g in active[:5]:
             drop = g.current_drop

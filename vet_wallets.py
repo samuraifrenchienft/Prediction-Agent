@@ -148,7 +148,7 @@ def _register_watchlist(
         )
         cache.watchlist_mark_vetted(
             address  = ts.wallet_address,
-            score    = ts.final_score,
+            score    = ts.final_score * 100,   # store 0–100 to match watchlist_vet_job
             bot_flag = ts.bot_flag,
         )
         added += 1
@@ -256,8 +256,8 @@ def main() -> None:
     parser.add_argument(
         "--min-score",
         type=int,
-        default=0,
-        help="Exclude results below this score (0-100) from report (still stored in DB)",
+        default=45,
+        help="Exclude results below this score (0-100) from report (still stored in DB). Default 45.",
     )
     args = parser.parse_args()
 
@@ -335,18 +335,30 @@ def main() -> None:
         status    = "[BOT]" if ts.bot_flag else "[OK] "
         addr_disp = f"{ts.wallet_address[:8]}..."
         cats_disp = ts.top_categories or "Unknown"
+        gl   = getattr(ts, "gl_ratio", 0.0)
+        cwr  = getattr(ts, "copyable_win_rate", 0.0)
+        gl_str  = f"{gl:.2f}x" if gl else "—"
+        cwr_str = f"{cwr:.1%}" if cwr else "—"
         print(
             f"\n{status} {addr_disp}  [{int(ts.final_score * 100)}/100]\n"
             f"   Anti-bot: {int(ts.anti_bot_score*100):>3}/100  |  "
             f"Performance: {int(ts.performance_score*100):>3}/100  |  "
             f"Reliability: {int(ts.reliability_score*100):>3}/100\n"
-            f"   Win Rate (all-time): {ts.win_rate_alltime:.1%}  |  "
-            f"PnL: ${ts.pnl_alltime:,.2f}  |  "
-            f"Volume: ${ts.volume_alltime:,.2f}\n"
-            f"   Speciality: {cats_disp}  |  "
-            f"Hidden-loss exposure: ${ts.hidden_loss_exposure:,.2f}  |  "
+            f"   Win Rate: {ts.win_rate_alltime:.1%}  |  "
+            f"G/L Ratio: {gl_str}  |  "
+            f"Copyable WR: {cwr_str}\n"
+            f"   PnL: ${ts.pnl_alltime:,.2f}  |  "
+            f"Volume: ${ts.volume_alltime:,.2f}  |  "
+            f"Speciality: {cats_disp}\n"
+            f"   Hidden-loss: ${ts.hidden_loss_exposure:,.2f}  |  "
             f"Fresh wallet: {'YES [WARN]' if ts.is_fresh_wallet else 'No'}"
         )
+        tokens = getattr(ts, "tokens_launched", 0)
+        chains = getattr(ts, "launch_chains", "")
+        if tokens == 0:
+            print("   Token launches: none detected on this address")
+        else:
+            print(f"   Token launches: {tokens} ({chains}) — use /adddev to score this dev separately")
         if ts.onchain_burst_flag:
             print("   [WARN] ON-CHAIN BURST FLAG: rapid-fire trades detected in 1-hour windows")
         if ts.hidden_loss_exposure > 500:

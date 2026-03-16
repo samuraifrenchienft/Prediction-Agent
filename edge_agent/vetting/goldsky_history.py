@@ -80,34 +80,40 @@ def fetch_onchain_trades(address: str, limit: int = 500) -> list[dict]:
         if time.time() - ts < _CACHE_TTL:
             return trades
 
-    try:
-        r = requests.post(
-            _GOLDSKY_URL,
-            json={
-                "query":     _QUERY,
-                "variables": {"maker": address, "limit": limit},
-            },
-            timeout=15,
-        )
-        r.raise_for_status()
-        body = r.json()
-
-        if "errors" in body:
-            log.warning(
-                "Goldsky errors for %s…: %s", address[:10], body["errors"]
+    last_exc: Exception | None = None
+    for attempt in range(3):
+        try:
+            r = requests.post(
+                _GOLDSKY_URL,
+                json={
+                    "query":     _QUERY,
+                    "variables": {"maker": address, "limit": limit},
+                },
+                timeout=15,
             )
-            return []
+            r.raise_for_status()
+            body = r.json()
 
-        events = body.get("data", {}).get("orderFilledEvents", [])
-        _CACHE[address] = (events, time.time())
-        log.debug(
-            "Goldsky: %d on-chain trades for %s…", len(events), address[:10]
-        )
-        return events
+            if "errors" in body:
+                log.warning(
+                    "Goldsky errors for %s…: %s", address[:10], body["errors"]
+                )
+                return []
 
-    except Exception as exc:
-        log.debug("Goldsky fetch failed for %s…: %s", address[:10], exc)
-        return []
+            events = body.get("data", {}).get("orderFilledEvents", [])
+            _CACHE[address] = (events, time.time())
+            log.debug(
+                "Goldsky: %d on-chain trades for %s…", len(events), address[:10]
+            )
+            return events
+
+        except Exception as exc:
+            last_exc = exc
+            if attempt < 2:
+                time.sleep(2 ** attempt)  # 1s, 2s
+
+    log.debug("Goldsky fetch failed for %s… after retries: %s", address[:10], last_exc)
+    return []
 
 
 def goldsky_summary(address: str) -> dict:

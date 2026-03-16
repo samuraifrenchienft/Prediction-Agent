@@ -722,8 +722,14 @@ class InsiderAlertEngine:
             # Current YES price
             try:
                 prices = market.get("outcomePrices") or []
+                # Gamma API returns outcomePrices as a JSON-encoded string
+                if isinstance(prices, str):
+                    try:
+                        prices = json.loads(prices)
+                    except (json.JSONDecodeError, ValueError):
+                        prices = []
                 current_price = float(prices[0]) if prices else float(market.get("lastTradePrice") or 0.5)
-            except (TypeError, ValueError):
+            except (TypeError, ValueError, IndexError):
                 current_price = 0.5
 
             vol_24h = float(market.get("volume24hrClob") or market.get("volumeNum") or 0)

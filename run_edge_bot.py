@@ -60,6 +60,7 @@ import html
 import json
 import logging
 import os
+import re
 import signal
 import time
 from datetime import datetime, timezone
@@ -110,8 +111,153 @@ _standings_client = _StandingsClient()   # singleton
 _trader_mod   = importlib.import_module(".dat-ingestion.trader_api", "edge_agent")
 _TraderClient = _trader_mod.TraderAPIClient
 
+# ---------------------------------------------------------------------------
+# Specialist scanners — weather, crypto, fed/econ
+# ---------------------------------------------------------------------------
+from edge_agent.scanners.weather_scanner import (
+    scan_weather_markets,
+    fetch_weather_markets_from_kalshi as _fetch_weather_mkts,
+    WeatherGap,
+)
+from edge_agent.scanners.crypto_scanner import (
+    scan_crypto_markets,
+    get_crypto_price_context,
+    CryptoGap,
+)
+from edge_agent.scanners.econ_scanner import (
+    scan_econ_markets,
+    get_econ_context_string,
+    EconGap,
+)
+
+# Scanner alert dedup keys — prevents re-alerting same gap within cooldown window
+_WEATHER_ALERTED: dict[str, float] = {}   # ticker → last_alerted unix ts
+_CRYPTO_ALERTED:  dict[str, float] = {}
+_ECON_ALERTED:    dict[str, float] = {}
+_SPECIALIST_ALERT_COOLDOWN = 14400        # 4 hours — same gap won't re-fire
+
 # Per-sport on-demand refresh rate limiter (unix timestamp of last trigger)
 _ONDEMAND_REFRESH_COOLDOWN: dict[str, float] = {}
+
+# ---------------------------------------------------------------------------
+# Topic keyword → Polymarket tag_slug mapping (module-level so reusable)
+# Used in Priority 3 market search AND the topic news search block.
+# ---------------------------------------------------------------------------
+_TOPIC_TAGS: dict[str, str] = {
+    # Crypto
+    "bitcoin": "bitcoin", "btc": "bitcoin", "crypto": "crypto",
+    "ethereum": "ethereum", "eth": "ethereum", "solana": "solana",
+    "xrp": "xrp", "dogecoin": "dogecoin", "doge": "dogecoin",
+    # Politics / World
+    "trump": "trump", "biden": "biden", "election": "elections",
+    "democrat": "elections", "republican": "elections",
+    "congress": "congress", "senate": "senate", "tariff": "tariffs",
+    "ukraine": "ukraine", "russia": "russia", "china": "china",
+    "israel": "israel", "iran": "iran", "gaza": "gaza",
+    "nato": "nato", "war": "geopolitics",
+    # Economics
+    "fed": "fed-funds-rate", "fomc": "fed-funds-rate",
+    "fed chair": "fed-chair", "inflation": "inflation",
+    "recession": "recession", "gdp": "gdp",
+    # Tech / Business
+    "tesla": "tesla", "elon": "elon-musk", "musk": "elon-musk",
+    "spacex": "spacex", "apple": "apple", "nvidia": "nvidia",
+    "amazon": "amazon", "google": "google", "meta": "meta",
+    "microsoft": "microsoft", "openai": "openai",
+    "artificial intelligence": "ai",
+    "ipo": "ipo", "stock market": "stocks",
+    # Entertainment / Awards
+    "oscar": "oscars", "oscars": "oscars", "academy award": "oscars",
+    "emmy": "emmys", "grammy": "grammys", "golden globe": "golden-globes",
+    "box office": "movies", "movie": "movies", "film": "movies",
+    "celebrity": "celebrities", "taylor swift": "taylor-swift",
+    # Sports expanded
+    "nhl": "nhl", "hockey": "nhl", "stanley cup": "stanley-cup",
+    "nfl": "nfl", "mlb": "mlb", "baseball": "mlb",
+    "ufc": "ufc", "mma": "ufc", "boxing": "boxing",
+    "golf": "golf", "pga": "golf", "tennis": "tennis",
+    "soccer": "soccer", "mls": "mls",
+    "champions league": "champions-league", "premier league": "premier-league",
+    "march madness": "march-madness", "ncaa": "ncaa",
+    "super bowl": "super-bowl", "world cup": "world-cup",
+    "olympics": "olympics", "formula 1": "formula-1", "f1": "formula-1",
+}
+
+# Topic → optimized Tavily/Serper search query.
+# Each query is tuned for the kind of info users actually need per topic.
+# Falls back to "{tag} latest news today" for any unregistered tag.
+_TOPIC_NEWS_QUERIES: dict[str, str] = {
+    # Awards — users need current nominees, frontrunners, critic consensus
+    "oscars":           "2026 Academy Awards Best Picture nominees odds favorite who will win",
+    "emmys":            "Emmy Awards 2026 nominees predictions odds",
+    "grammys":          "Grammy Awards 2026 nominees predictions odds",
+    "golden-globes":    "Golden Globes 2026 nominees odds predictions",
+    "taylor-swift":     "Taylor Swift latest news tour album 2026",
+    # Tech / Business — stock price + breaking news
+    "tesla":            "Tesla stock news latest today 2026",
+    "elon-musk":        "Elon Musk latest news today DOGE Twitter Tesla",
+    "spacex":           "SpaceX launch news latest 2026",
+    "apple":            "Apple stock earnings news latest today",
+    "nvidia":           "Nvidia stock AI chip news latest today",
+    "openai":           "OpenAI ChatGPT GPT latest news 2026",
+    "amazon":           "Amazon stock AWS news latest today",
+    "google":           "Google Alphabet stock AI news latest today",
+    "meta":             "Meta Facebook Instagram stock news latest today",
+    "microsoft":        "Microsoft stock Azure AI news latest today",
+    "ai":               "artificial intelligence AI news latest today 2026",
+    "ipo":              "IPO market latest filings upcoming IPOs 2026",
+    "stocks":           "stock market news today S&P 500 latest",
+    "fed-chair":        "Federal Reserve chair Powell latest news statements 2026",
+    # Politics / World — breaking news critical
+    "trump":            "Trump latest news today executive order policy 2026",
+    "biden":            "Biden latest news today 2026",
+    "elections":        "US 2026 elections midterm latest polls news",
+    "congress":         "US Congress legislation bills latest news today 2026",
+    "senate":           "US Senate vote legislation latest news today 2026",
+    "tariffs":          "US tariffs trade war Canada Mexico China latest news today",
+    "ukraine":          "Ukraine Russia war ceasefire latest news today",
+    "israel":           "Israel Gaza ceasefire latest news today",
+    "gaza":             "Gaza ceasefire humanitarian latest news today 2026",
+    "nato":             "NATO alliance defense latest news today 2026",
+    "china":            "China US trade relations Taiwan latest news today",
+    "russia":           "Russia Ukraine latest news today",
+    "iran":             "Iran nuclear deal sanctions latest news today",
+    "geopolitics":      "global geopolitics latest breaking news today",
+    # Economics — data releases + Fed decisions
+    "fed-funds-rate":   "Federal Reserve FOMC interest rate decision cut hike latest news",
+    "inflation":        "US CPI inflation report latest news today 2026",
+    "recession":        "US economy recession risk GDP latest news today",
+    "gdp":              "US GDP growth report latest news today",
+    # Sports leagues — standings + injury news + results
+    "nhl":              "NHL standings results injury news latest today 2026",
+    "stanley-cup":      "NHL Stanley Cup playoffs bracket odds latest 2026",
+    "nfl":              "NFL draft free agency news latest today 2026",
+    "mlb":              "MLB standings results injury news latest today 2026",
+    "ufc":              "UFC fight results card news latest tonight 2026",
+    "boxing":           "boxing fight results card news latest 2026",
+    "golf":             "PGA Tour golf results leaderboard news latest today",
+    "tennis":           "tennis ATP WTA results news latest today",
+    "formula-1":        "Formula 1 F1 race results standings news latest today",
+    "champions-league": "UEFA Champions League results standings news latest",
+    "premier-league":   "Premier League standings results injury news latest today",
+    "march-madness":    "NCAA March Madness tournament bracket results today 2026",
+    "ncaa":             "NCAA basketball tournament results bracket today",
+    "super-bowl":       "Super Bowl 2026 odds predictions latest news",
+    "world-cup":        "FIFA World Cup 2026 qualifying results news latest",
+    "olympics":         "Olympics 2026 news results latest",
+    "mls":              "MLS soccer standings results news latest today",
+    "soccer":           "soccer football results news latest today",
+    # Crypto — price action + on-chain news
+    "bitcoin":          "Bitcoin BTC price news today latest 2026",
+    "ethereum":         "Ethereum ETH price news latest today 2026",
+    "solana":           "Solana SOL price news latest today",
+    "xrp":              "XRP Ripple price SEC news latest today",
+    "dogecoin":         "Dogecoin DOGE price news Elon latest today",
+    "crypto":           "crypto market Bitcoin Ethereum price news today",
+    # Movies
+    "movies":           "box office results weekend latest movie news 2026",
+    "celebrities":      "celebrity entertainment news latest today",
+}
 
 load_dotenv()
 
@@ -291,8 +437,39 @@ def _get_platform_doc_context(user_msg: str) -> str:
 # Dict format: {key: first_alerted_timestamp} — entries expire after 24h so
 # duplicate suppression survives restarts (re-alerted after 24h is fine) and
 # the dict doesn't grow unbounded over long-running sessions.
-_alerted_keys: dict[str, float] = {}
+#
+# PERSISTED to disk — survives bot restarts so users don't get re-alerted on
+# the same markets after every reboot.
+_ALERTED_KEYS_FILE = os.path.join(
+    os.path.dirname(__file__), "edge_agent", "memory", "data", "alerted_keys.json"
+)
 _ALERTED_KEYS_TTL = 86400  # 24h
+
+
+def _load_alerted_keys() -> dict[str, float]:
+    """Load persisted alerted keys from disk. Returns empty dict on any error."""
+    try:
+        if os.path.exists(_ALERTED_KEYS_FILE):
+            with open(_ALERTED_KEYS_FILE, "r") as f:
+                data = json.load(f)
+            # Prune expired on load
+            cutoff = time.time() - _ALERTED_KEYS_TTL
+            return {k: ts for k, ts in data.items() if ts >= cutoff}
+    except Exception as exc:
+        log.warning("[alerted_keys] Failed to load from disk: %s", exc)
+    return {}
+
+
+def _save_alerted_keys() -> None:
+    """Persist alerted keys to disk. Fire-and-forget — never raises."""
+    try:
+        with open(_ALERTED_KEYS_FILE, "w") as f:
+            json.dump(_alerted_keys, f)
+    except Exception as exc:
+        log.warning("[alerted_keys] Failed to save to disk: %s", exc)
+
+
+_alerted_keys: dict[str, float] = _load_alerted_keys()
 
 
 def _prune_alerted_keys() -> None:
@@ -301,6 +478,8 @@ def _prune_alerted_keys() -> None:
     expired = [k for k, ts in _alerted_keys.items() if ts < cutoff]
     for k in expired:
         del _alerted_keys[k]
+    if expired:
+        _save_alerted_keys()  # persist after cleanup
 
 # Approved signal types — only markets matching these signals will trigger alerts.
 # Empty set means "alert on all" (bootstrapping mode until user approves something).
@@ -554,11 +733,19 @@ def _fmt_details(rec: Recommendation) -> str:
 
 
 def _fmt_game(g: TrackedGame) -> str:
-    drop = g.current_drop
-    flag = "🔥 TRIGGERED" if g.triggered else f"drop {drop:+.1%}"
+    drop     = g.current_drop
+    flag     = "🔥 TRIGGERED" if g.triggered else f"drop {drop:+.1%}"
+    reg_type = getattr(g, "registration_type", "pre_game_lag")
+    if g.triggered:
+        type_icon = "🔥"
+    elif reg_type == "pre_game_lag":
+        type_icon = "📌"   # pre-game lag watch (market was underpricing)
+    else:
+        type_icon = "👁"    # proactive injury watch
+    type_label = "Pre-game lag" if reg_type == "pre_game_lag" else "Star injury watch"
     return (
-        f"{'🔥' if g.triggered else '👁'} <b>[{_e(g.phase.value)}]</b> "
-        f"<code>{_e(g.question[:60])}</code>\n"
+        f"{type_icon} <b>[{_e(g.phase.value)}]</b> <i>{type_label}</i>\n"
+        f"<code>{_e(g.question[:65])}</code>\n"
         f"  Pre-game: {g.reference_prob:.1%} → Now: {g.last_market_prob:.1%}  ({_e(flag)})"
     )
 
@@ -579,6 +766,77 @@ async def _broadcast(bot, text: str, **kwargs) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Proactive injury game registration
+# ---------------------------------------------------------------------------
+
+def _proactive_injury_registration(game_tracker, inputs: list) -> int:
+    """
+    Pre-populate the game tracker with tonight's game markets where a star
+    player is Out/Doubtful on one side, regardless of whether the market has
+    already priced the injury.
+
+    This covers the case PRE_GAME_INJURY_LAG misses:
+      - Market correctly priced injury pre-game → no lag signal fires
+      - But the injured team can still outperform in Q1/Q2
+      - Creating a buy window on the healthy/favored team at improved odds
+
+    Runs BEFORE svc.run_scan() so game_tracker.update() immediately monitors
+    these games during the same scan cycle.
+
+    Returns the number of new games registered.
+    """
+    try:
+        from edge_agent.memory.injury_cache import InjuryCache
+        icache = InjuryCache()
+        n_new  = 0
+
+        # Collect teams with significant injuries tonight
+        injured_teams: set[str] = set()
+        for sport in ("nba", "nfl", "nhl", "cfb", "cbb", "wnba", "ncaaw"):
+            for record in icache.get_all(sport):
+                if record.get("status", "") in ("Out", "Doubtful"):
+                    team = (record.get("team") or "").strip()
+                    if team:
+                        injured_teams.add(team.lower())
+
+        if not injured_teams:
+            return 0
+
+        for item in inputs:
+            # inputs from scanner.collect() are tuples: (snapshot, catalysts, theme)
+            snapshot = item[0] if isinstance(item, (list, tuple)) else item
+
+            # Skip if already tracked (PRE_GAME_INJURY_LAG may have registered it)
+            if game_tracker.get_game(snapshot.venue, snapshot.market_id):
+                continue
+            # Only care about markets that are live or near-live (TTR 0.5–12h)
+            ttr = getattr(snapshot, "time_to_resolution_hours", 0) or 0
+            if not (0.5 <= ttr <= 12.0):
+                continue
+            title = (getattr(snapshot, "question", "") or "").lower()
+            if not title:
+                continue
+            # Match injured team name against market title
+            matched = next((t for t in injured_teams if t in title), None)
+            if not matched:
+                continue
+
+            game_tracker.register(
+                snapshot          = snapshot,
+                catalysts         = [f"injury_cache:{matched}"],
+                theme             = "sports",
+                registration_type = "proactive_injury",
+            )
+            n_new += 1
+
+        return n_new
+
+    except Exception as exc:
+        log.debug("[InjuryTracker] Proactive registration error: %s", exc)
+        return 0
+
+
+# ---------------------------------------------------------------------------
 # Scan helpers
 # ---------------------------------------------------------------------------
 
@@ -588,12 +846,25 @@ async def _run_scan(bot, notify: bool = True) -> str:
 
     svc = _get_service()
     scanner = _get_scanner()
-    loop = asyncio.get_event_loop()
+    loop = asyncio.get_running_loop()
 
     try:
         # ── Run all blocking I/O in a thread pool so the bot stays responsive ──
         # scanner.collect() hits Kalshi/Polymarket HTTP APIs (can take 10-30s)
         inputs = await loop.run_in_executor(None, scanner.collect)
+
+        # ── Proactive injury game registration ─────────────────────────────────
+        # Register ANY game market where a star is Out/Doubtful (per injury cache),
+        # even when the market has already correctly priced the injury.
+        # This enables Q1/Q2 monitoring for early-game price swings where the
+        # injured team outperforms, creating a buy window on the healthy team.
+        # (PRE_GAME_INJURY_LAG path still runs alongside — both coexist.)
+        n_proactive = await loop.run_in_executor(
+            None, _proactive_injury_registration, svc.engine.game_tracker, inputs
+        )
+        if n_proactive:
+            log.info("[InjuryTracker] Proactively registered %d game(s) from injury cache", n_proactive)
+
         # svc.run_scan() processes all markets synchronously
         recs, summary = await loop.run_in_executor(
             None, lambda: svc.run_scan(inputs, portfolio=_portfolio)
@@ -646,18 +917,39 @@ async def _run_scan(bot, notify: bool = True) -> str:
             if tkey not in _alerted_keys:
                 _alerted_keys[tkey] = time.time()
                 if notify and bot:
+                    # Label the alert based on how this game was originally registered
+                    reg_type = getattr(game, "registration_type", "pre_game_lag")
+                    if reg_type == "pre_game_lag":
+                        reg_label = (
+                            "📊 <b>PRE-GAME EDGE</b> — market was underpricing this "
+                            "injury before tip-off. Now it's correcting."
+                        )
+                        signal_tag = "INJURY_MOMENTUM_REVERSAL (lag confirmed)"
+                    else:
+                        reg_label = (
+                            "🏈 <b>INJURY FADE WINDOW</b> — star player is Out on one "
+                            "side. The injured team outperformed early — healthy team "
+                            "odds have improved beyond fair value."
+                        )
+                        signal_tag = "INJURY_MOMENTUM_REVERSAL (proactive injury watch)"
+
                     await _broadcast(
                         bot,
                         (
                             f"🔥 <b>GAME TRACKER TRIGGER FIRED</b>\n"
                             f"<i>{_e(game.question[:80])}</i>\n\n"
+                            f"{reg_label}\n\n"
                             f"Phase: <code>{_e(game.phase.value)}</code>\n"
                             f"Pre-game: {game.reference_prob:.1%} → Now: {game.trigger_prob:.1%}\n"
                             f"Drop: {game.reference_prob - game.trigger_prob:.1%}\n\n"
-                            f"Signal: <code>INJURY_MOMENTUM_REVERSAL</code>"
+                            f"Signal: <code>{signal_tag}</code>"
                         ),
                         parse_mode=ParseMode.HTML,
                     )
+
+        # Persist alerted keys after processing all alerts this cycle
+        if new_alerts > 0:
+            _save_alerted_keys()
 
         tracker_text = svc.game_tracker_summary()
 
@@ -820,12 +1112,20 @@ async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         "/standings mls|epl|laliga|bundesliga|seriea|ligue1|ucl — soccer tables\n"
         "/standings f1 — F1 driver + constructor standings\n"
         "/standings pga — PGA Tour current leaderboard\n\n"
+        "<b>🌤️ Specialist Scanners</b>\n"
+        "/weatherscan — weather market gaps vs Open-Meteo 7-day forecast\n"
+        "/cryptoscan — crypto market gaps vs Binance lognormal model\n"
+        "/fedscan — Fed/econ market gaps vs NY Fed + Treasury yield curve\n\n"
+        "<b>🔍 Insider Alerts</b>\n"
+        "/insider — recent insider alert log (fresh wallet + large bet signals)\n\n"
         "<b>⚙️ Settings</b>\n"
+        "/profile — see what EDGE knows about you\n"
+        "/forget &lt;key&gt; — remove stored info (e.g. /forget city)\n"
         "/approvals — manage alert signal filters\n"
         "/help — show this message\n\n"
         f"{filter_note}\n"
         f"⏱ Auto-scan every {SCAN_INTERVAL_MIN // 60}h | "
-        "Injury refresh: 9am, 1:30pm, 4:30pm PT\n\n"
+        "Injury refresh: 9am, 1:30pm, 4:30pm PT | Specialist scan: every 4h\n\n"
         "💬 <b>Chat with me anytime</b> — ask about markets, platform setup, "
         "how to deposit USDC, Kalshi fees, or anything prediction market related.",
         parse_mode=ParseMode.HTML,
@@ -834,6 +1134,76 @@ async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
 
 async def cmd_help(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     await cmd_start(update, ctx)
+
+
+async def cmd_profile(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    """Show what EDGE knows about the user."""
+    user_id = update.effective_user.id
+    facts = _profiles.get_facts(user_id)
+    if not facts:
+        await update.message.reply_text("I don't have any stored info about you yet.")
+        return
+    lines = ["🧠 <b>What I know about you:</b>\n"]
+    # Friendly key labels
+    _LABELS = {
+        "fav_nba_teams": "❤️ Fav NBA team(s)",
+        "fav_nfl_teams": "❤️ Fav NFL team(s)",
+        "fav_mlb_teams": "❤️ Fav MLB team(s)",
+        "fav_nhl_teams": "❤️ Fav NHL team(s)",
+        "fav_cfb_teams": "❤️ Fav CFB team(s)",
+        "fav_cbb_teams": "❤️ Fav CBB team(s)",
+        "fav_mls_teams": "❤️ Fav MLS team(s)",
+        "fav_players": "⭐ Fav player(s)",
+        "city": "📍 City",
+        "rival_teams": "😤 Rival team(s)",
+        "rival_players": "😠 Rival player(s)",
+        "sports": "🏀 Sports",
+        "interests": "📊 Interests",
+        "platforms": "💻 Platforms",
+        "risk_style": "📈 Trading style",
+        "experience_level": "🎓 Experience",
+        "family": "👨‍👩‍👧 Family",
+        "market_prefs": "🎯 Market prefs",
+        "alert_threshold": "🔔 Alert pref",
+        "plays_fantasy": "🏈 Fantasy/DFS",
+    }
+    for key, values in sorted(facts.items()):
+        label = _LABELS.get(key, key)
+        val_str = ", ".join(values) if isinstance(values, list) else str(values)
+        lines.append(f"  {label}: {val_str}")
+    lines.append(
+        "\nUse <code>/forget &lt;key&gt;</code> to remove something "
+        "(e.g. <code>/forget city</code>)"
+    )
+    await update.message.reply_text("\n".join(lines), parse_mode=ParseMode.HTML)
+
+
+async def cmd_forget(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    """Let the user remove a specific stored fact."""
+    user_id = update.effective_user.id
+    args = (update.message.text or "").split(maxsplit=1)
+    if len(args) < 2:
+        facts = _profiles.get_facts(user_id)
+        if not facts:
+            await update.message.reply_text("Nothing stored — nothing to forget!")
+            return
+        keys = ", ".join(f"<code>{k}</code>" for k in sorted(facts.keys()))
+        await update.message.reply_text(
+            f"Usage: <code>/forget &lt;key&gt;</code>\n\n"
+            f"Available keys: {keys}\n\n"
+            f"Example: <code>/forget city</code>",
+            parse_mode=ParseMode.HTML,
+        )
+        return
+    fact_key = args[1].strip().lower()
+    removed = _profiles.remove_fact(user_id, fact_key)
+    if removed:
+        await update.message.reply_text(f"✅ Done — forgot your '{fact_key}' info.")
+    else:
+        await update.message.reply_text(
+            f"I don't have any '{fact_key}' stored for you. "
+            f"Use /profile to see what I know."
+        )
 
 
 async def cmd_scan(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
@@ -939,7 +1309,7 @@ async def cmd_traders(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
             async def _background_rescore():
                 try:
                     client = _TraderClient()
-                    fresh = await asyncio.get_event_loop().run_in_executor(
+                    fresh = await asyncio.get_running_loop().run_in_executor(
                         None, lambda: client.get_hot_traders(limit=20, category=category)
                     )
                     log.info("Background rescore complete — %d traders cached.", len(fresh))
@@ -954,7 +1324,7 @@ async def cmd_traders(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         )
         try:
             client = _TraderClient()
-            scores = await asyncio.get_event_loop().run_in_executor(
+            scores = await asyncio.get_running_loop().run_in_executor(
                 None, lambda: client.get_hot_traders(limit=20, category=category)
             )
         except Exception as exc:
@@ -1012,8 +1382,17 @@ async def cmd_traders(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         for w in wl_rows:
             addr      = w.get("wallet_address", "")
             disp      = w.get("display_name") or addr[:10] + "…"
-            raw_score = w.get("current_score") or w.get("latest_score")
-            score_str = f"<code>{int(raw_score)}/100</code>" if raw_score else "<i>pending vet</i>"
+            raw_score      = w.get("current_score") or w.get("latest_score") or 0
+            last_vetted_at = w.get("last_vetted_at") or 0
+            # Guard: if score was stored on old 0.0–1.0 scale, upscale it
+            if 0 < raw_score <= 1.0:
+                raw_score = raw_score * 100
+            if last_vetted_at == 0:
+                score_str = "<i>pending vet</i>"
+            elif raw_score:
+                score_str = f"<code>{int(raw_score)}/100</code>"
+            else:
+                score_str = "<code>0/100</code> <i>(no data)</i>"
             bot_warn  = " ⚠️ Bot" if w.get("current_bot_flag") else ""
             note      = f" — {_e(w['note'])}" if w.get("note") else ""
             lines.append(f"  • <b>{_e(disp)}</b> {score_str}{bot_warn}{note}")
@@ -1043,7 +1422,7 @@ async def cmd_wallet(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     await update.message.reply_text(f"⏳ Vetting wallet {address[:10]}…{address[-4:]}…")
     try:
         client = _TraderClient()
-        ts = await asyncio.get_event_loop().run_in_executor(
+        ts = await asyncio.get_running_loop().run_in_executor(
             None, lambda: client.score_trader(address)
         )
     except Exception as exc:
@@ -1133,7 +1512,7 @@ async def cmd_performance(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> Non
 
     try:
         from edge_agent.memory.scan_log import ScanLog
-        data = await asyncio.get_event_loop().run_in_executor(
+        data = await asyncio.get_running_loop().run_in_executor(
             None, lambda: ScanLog().get_summary(days=days)
         )
     except Exception as exc:
@@ -1247,11 +1626,13 @@ async def cmd_performance(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> Non
     await _send_chunked(update.message.reply_text, "\n".join(lines), parse_mode=ParseMode.HTML)
 
 
+# ── Dev Tracker commands ──────────────────────────────────────────────────
+
 async def outcome_resolution_job(ctx: ContextTypes.DEFAULT_TYPE) -> None:
     """Every 2h — check pending signals against Polymarket/Kalshi APIs and resolve."""
     log.info("Outcome resolution job triggered.")
     try:
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
         result = await loop.run_in_executor(None, lambda: _ot.resolve_pending(limit=50))
         log.info(
             "Outcome resolution: %d resolved, %d pending, %d backoff-skipped, "
@@ -1317,7 +1698,7 @@ async def ml_calibration_job(ctx: ContextTypes.DEFAULT_TYPE) -> None:
     """
     log.info("[ml_calibration_job] Starting ML calibration refresh.")
     try:
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
 
         def _run_calibration():
             labeled = _ml_store.get_labeled_features(min_samples=0, days=180)
@@ -1438,7 +1819,7 @@ async def trader_refresh_job(ctx: ContextTypes.DEFAULT_TYPE) -> None:
     """Daily 8am PT — warm the trader cache with full top-100 leaderboard scores."""
     log.info("Trader refresh triggered.")
     try:
-        loop   = asyncio.get_event_loop()
+        loop   = asyncio.get_running_loop()
         client = _TraderClient()
         scores = await loop.run_in_executor(
             None, lambda: client.get_hot_traders(limit=100, category="OVERALL")
@@ -1450,13 +1831,14 @@ async def trader_refresh_job(ctx: ContextTypes.DEFAULT_TYPE) -> None:
 
 async def discovery_job(ctx: ContextTypes.DEFAULT_TYPE) -> None:
     """
-    Hourly — sweep 5 leaderboard categories (~500 wallets), fast-score each
-    with zero per-wallet API calls, populate discovery_pool.  Then graduate
-    the top candidates (fast_score >= 40) to Tier-2 full vet (max 15/cycle).
+    Hourly — sweep 4 leaderboard categories (OVERALL/SPORTS/CRYPTO/POLITICS,
+    ~400 wallets), fast-score each with zero per-wallet API calls, populate
+    discovery_pool.  Then graduate the top candidates (fast_score >= 40) to
+    Tier-2 full vet (max 15/cycle).
     """
     log.info("[discovery_job] Starting multi-category sweep.")
     try:
-        loop   = asyncio.get_event_loop()
+        loop   = asyncio.get_running_loop()
         client = _TraderClient()
         summary = await loop.run_in_executor(
             None, lambda: client.discovery_sweep(per_category=100, fast_score_threshold=30.0)
@@ -1512,7 +1894,7 @@ async def watchlist_vet_job(ctx: ContextTypes.DEFAULT_TYPE) -> None:
             return
 
         log.info("[watchlist_vet_job] %d wallet(s) due for re-vet.", len(due))
-        loop   = asyncio.get_event_loop()
+        loop   = asyncio.get_running_loop()
         client = _TraderClient()
         alerts: list[str] = []
 
@@ -1604,7 +1986,7 @@ async def cmd_watch(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     )
 
     # Kick off an immediate background vet so first score appears quickly
-    loop   = asyncio.get_event_loop()
+    loop   = asyncio.get_running_loop()
     client = _TraderClient()
     try:
         ts = await loop.run_in_executor(None, lambda: client.score_trader(addr))
@@ -2011,7 +2393,7 @@ async def _maybe_refresh_injury_cache(sport: str) -> None:
                 return  # fresh enough
         _ONDEMAND_REFRESH_COOLDOWN[sport] = now
         log.info("On-demand cache refresh triggered for %s", sport.upper())
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
         await loop.run_in_executor(None, _InjuryClient().fetch_and_store, sport)
         log.info("On-demand cache refresh complete for %s", sport.upper())
     except Exception as exc:
@@ -2231,10 +2613,23 @@ def _build_smart_money_context(force_refresh: bool = False, sport_filter: str = 
                 continue
 
             # Filter: significant open positions ($100+ size), active markets only
-            sig = [
-                p for p in positions
-                if float(p.get("size", p.get("currentValue", 0)) or 0) >= 100
-            ]
+            sig = []
+            _now_iso = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+            for p in positions:
+                if float(p.get("size", p.get("currentValue", 0)) or 0) < 100:
+                    continue
+                # Skip expired markets (endDate in the past)
+                _end = p.get("endDate", p.get("end_date_iso", ""))
+                if _end and _end[:10] < _now_iso:
+                    continue
+                # Skip spread/prop/total markets — only keep moneyline-equivalent
+                _ptitle = (p.get("title") or p.get("market", "")).lower()
+                if any(kw in _ptitle for kw in (
+                    "spread", "o/u", "over/under", "total", "points",
+                    "(+", "(-", "rebounds", "assists", "1h", "2h", "quarter",
+                )):
+                    continue
+                sig.append(p)
             if not sig:
                 continue
 
@@ -2254,8 +2649,16 @@ def _build_smart_money_context(force_refresh: bool = False, sport_filter: str = 
                 title   = (pos.get("title") or pos.get("market", "Unknown market"))[:55]
                 side    = "YES" if pos.get("outcomeIndex", 0) == 0 else "NO"
                 size    = float(pos.get("size", pos.get("currentValue", 0)) or 0)
-                cur_pct = float(pos.get("curPrice", pos.get("currentPrice", 0.5)) or 0.5)
                 cond_id = pos.get("conditionId", pos.get("market", title[:20]))
+
+                # Fetch real current price from CLOB API instead of defaulting to 0.5
+                token_id = pos.get("asset") or pos.get("tokenId", "")
+                cur_pct = 0.5  # fallback
+                if token_id:
+                    try:
+                        cur_pct = client._fetch_token_price(token_id)
+                    except Exception:
+                        pass
 
                 pos_key = f"{addr}:{cond_id}:{side}"
                 new_pos_keys.add(pos_key)
@@ -2317,6 +2720,7 @@ def _copy_trade_quality_check(pos: dict) -> tuple[bool, str]:
       2. Entry window — price too high (mostly played out) or too low (near-certain)
       3. Position size gate (test trade / noise)
       4. DCA suppression — same wallet already alerted on this market in last 24h
+      5. Stale price check — if cur_pct is exactly 0.5, price fetch likely failed
     """
     score   = pos["score"]
     cur_pct = pos["cur_pct"]
@@ -2328,6 +2732,10 @@ def _copy_trade_quality_check(pos: dict) -> tuple[bool, str]:
 
     if size < _SM_ALERT_MIN_SIZE:
         return False, f"position ${size:.0f} below minimum ${_SM_ALERT_MIN_SIZE}"
+
+    # If price is exactly 0.5, the CLOB fetch likely failed — don't alert with bad data
+    if cur_pct == 0.5:
+        return False, "price exactly 50% — likely stale/unfetched, skipping"
 
     if cur_pct < _SM_ALERT_PRICE_LOW:
         return False, f"price {cur_pct:.0%} — near-certain NO, no entry window"
@@ -2385,6 +2793,43 @@ async def _send_copy_trade_alerts(bot) -> int:
         pnl_all = pos["pnl_all"]
         wr      = pos["win_rate"]
 
+        # Derive position-specific category from the market title
+        _tl = title.lower()
+        _pos_cat = strat  # default to wallet-level strategy tag
+        _POSITION_CATS = [
+            (["nba", "lakers", "celtics", "warriors", "bucks", "nets", "knicks",
+              "nuggets", "suns", "76ers", "heat", "mavericks", "thunder",
+              "grizzlies", "clippers", "rockets", "kings", "bulls", "hawks",
+              "cavaliers", "pacers", "pistons", "hornets", "magic", "jazz",
+              "timberwolves", "spurs", "pelicans", "trail blazers", "wizards",
+              "raptors"], "NBA"),
+            (["nfl", "chiefs", "eagles", "cowboys", "ravens", "bills", "bengals",
+              "dolphins", "steelers", "49ers", "rams", "seahawks", "packers",
+              "lions", "bears", "vikings", "giants", "saints", "buccaneers",
+              "chargers", "raiders", "broncos", "texans", "colts", "titans",
+              "jaguars", "browns", "falcons", "panthers", "cardinals",
+              "commanders"], "NFL"),
+            (["nhl", "bruins", "rangers", "oilers", "flames", "canucks",
+              "maple leafs", "canadiens", "lightning", "penguins", "capitals",
+              "avalanche", "golden knights", "red wings", "blackhawks",
+              "blues", "flyers"], "NHL"),
+            (["fc ", "united", "city", "arsenal", "chelsea", "liverpool",
+              "barcelona", "madrid", "bayern", "juventus", "psg",
+              "paris saint", "inter milan", "ac milan", "dortmund",
+              "atletico", "tottenham", "man utd", "man city", "la liga",
+              "premier league", "serie a", "bundesliga", "ligue 1",
+              "champions league", "europa", "soccer", "football"], "Soccer"),
+            (["bitcoin", "btc", "ethereum", "eth", "crypto", "solana",
+              "token", "coin", "defi"], "Crypto"),
+            (["election", "president", "trump", "biden", "senate", "congress",
+              "governor", "vote", "ballot", "democrat", "republican",
+              "by-election", "parliament"], "Politics"),
+        ]
+        for _keywords, _cat_label in _POSITION_CATS:
+            if any(kw in _tl for kw in _keywords):
+                _pos_cat = _cat_label
+                break
+
         # Upside/downside remaining
         upside_pp  = round((1.0 - cur_pct) * 100, 1) if side == "YES" else round(cur_pct * 100, 1)
         downside_pp = round(cur_pct * 100, 1) if side == "YES" else round((1.0 - cur_pct) * 100, 1)
@@ -2408,7 +2853,7 @@ async def _send_copy_trade_alerts(bot) -> int:
             f"<b>{_e(title)}</b>\n"
             f"→ <b>{side}</b> @ <b>{cur_pct:.0%}</b> | ${size:,.0f} position\n"
             f"📊 Upside: +{upside_pp}pp | Risk: -{downside_pp}pp\n\n"
-            f"<b>Wallet:</b> {addr[:10]}... [{score}/100] — {_e(strat)}"
+            f"<b>Wallet:</b> {addr[:10]}... [{score}/100] — {_e(_pos_cat)}"
             f"{streak_line}\n"
             f"All-time: {wr:.0%} win rate | {pnl_str} PnL\n"
             f"<i>{confidence} — entry window still open</i>\n\n"
@@ -2497,6 +2942,76 @@ async def handle_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None
     }
     _is_correction = any(t in user_msg.lower() for t in _CORRECTION_TRIGGERS)
 
+    # ── Memory correction — auto-remove wrong facts ───────────────────────
+    # Detect "I don't live in X" or "I'm not from X" and remove the wrong city.
+    # Also detect generic "remove my city/team" requests.
+    _city_deny = re.search(
+        r"(?:i )?(?:don'?t|do not) live in\s+([\w\s]{2,25})",
+        user_msg, re.IGNORECASE,
+    )
+    if _city_deny:
+        _denied_city = _city_deny.group(1).strip().title()
+        try:
+            if _profiles.remove_fact(user_id, "city", _denied_city):
+                log.info("[profile] Auto-removed city '%s' for user %s", _denied_city, user_id)
+        except Exception:
+            pass
+
+    _not_from = re.search(
+        r"i(?:'m| am) not (?:from|in|based in)\s+([\w\s]{2,25})",
+        user_msg, re.IGNORECASE,
+    )
+    if _not_from:
+        _denied_city = _not_from.group(1).strip().title()
+        try:
+            if _profiles.remove_fact(user_id, "city", _denied_city):
+                log.info("[profile] Auto-removed city '%s' for user %s", _denied_city, user_id)
+        except Exception:
+            pass
+
+    # Generic "forget my city/location/team" via chat (alternative to /forget command)
+    _forget_chat = re.search(
+        r"(?:remove|delete|forget|clear)\s+(?:my\s+)?(?:city|location)",
+        user_msg, re.IGNORECASE,
+    )
+    if _forget_chat:
+        try:
+            if _profiles.remove_fact(user_id, "city"):
+                log.info("[profile] Cleared all city data for user %s via chat", user_id)
+        except Exception:
+            pass
+
+    # "that's not my city", "wrong city", "incorrect location"
+    _wrong_city = re.search(
+        r"(?:wrong|not my|incorrect|that'?s not)\s+(?:my\s+)?(?:city|location|hometown)",
+        user_msg, re.IGNORECASE,
+    )
+    if _wrong_city:
+        try:
+            if _profiles.remove_fact(user_id, "city"):
+                log.info("[profile] Removed city for user %s (wrong city correction)", user_id)
+        except Exception:
+            pass
+
+    # "remove X from my profile/memory" — try to match a stored fact value
+    _forget_profile = re.search(
+        r"(?:remove|delete|clear|erase)\s+(.{1,40}?)\s+(?:from|in)\s+(?:my\s+)?(?:profile|memory|data)",
+        user_msg, re.IGNORECASE,
+    )
+    if _forget_profile:
+        _target = _forget_profile.group(1).strip().lower()
+        try:
+            facts = _profiles.get_facts(user_id)
+            for key, values in facts.items():
+                if isinstance(values, list):
+                    for v in values:
+                        if v.lower() in _target or _target in v.lower():
+                            _profiles.remove_fact(user_id, key, v)
+                            log.info("[profile] Removed %s='%s' for user %s via chat", key, v, user_id)
+                            break
+        except Exception:
+            pass
+
     # 1. Knowledge base context
     kb_context = _kb.get_context_for_question(user_msg)
 
@@ -2505,6 +3020,19 @@ async def handle_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None
 
     # 2. Session memory context (today's conversation, per user)
     session_context = _mem_user.get_session_context(max_exchanges=4)
+
+    # 2b. Detect short affirmative replies ("yes", "yeah", "sure") and inject
+    #     continuation context so the AI follows up on its own question.
+    _SHORT_AFFIRM = {"yes", "yeah", "yep", "yea", "sure", "ok", "okay",
+                     "definitely", "absolutely", "do it", "go ahead", "please"}
+    if user_msg.strip().lower().rstrip("!.") in _SHORT_AFFIRM:
+        _last_q = _mem_user.get_last_bot_question()
+        if _last_q:
+            user_msg = (
+                f"(User replied '{user_msg}' to your previous message: "
+                f"\"{_last_q[:300]}\")\n"
+                f"Follow up on YOUR question — do not change topics."
+            )
 
     # 3. Live market context (on-demand, only for market questions)
     # ── Team name → canonical search tokens (Polymarket uses full city names) ──
@@ -2522,6 +3050,9 @@ async def handle_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None
         "pistons": "Pistons", "hornets": "Hornets", "magic": "Magic",
         "hawks": "Hawks", "pacers": "Pacers", "cavaliers": "Cavaliers",
         "cavs": "Cavaliers", "wizards": "Wizards", "blazers": "Trail Blazers",
+        "trailblazers": "Trail Blazers", "trail blazers": "Trail Blazers",
+        "portland": "Trail Blazers", "okc": "Thunder",
+        "brooklyn": "Nets", "minnesota": "Timberwolves",
         # NFL
         "chiefs": "Chiefs", "eagles": "Eagles", "cowboys": "Cowboys",
         "ravens": "Ravens", "bills": "Bills", "bengals": "Bengals",
@@ -2536,7 +3067,7 @@ async def handle_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None
         # NHL
         "bruins": "Bruins", "maple leafs": "Maple Leafs", "leafs": "Maple Leafs",
         "canadiens": "Canadiens", "habs": "Canadiens", "lightning": "Lightning",
-        "panthers": "Panthers", "capitals": "Capitals", "rangers": "Rangers",
+        "florida panthers": "Panthers", "capitals": "Capitals", "rangers": "Rangers",
         "flyers": "Flyers", "penguins": "Penguins", "red wings": "Red Wings",
         "blackhawks": "Blackhawks", "blues": "Blues", "avalanche": "Avalanche",
         "golden knights": "Golden Knights", "oilers": "Oilers",
@@ -2545,7 +3076,7 @@ async def handle_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None
         "yankees": "Yankees", "red sox": "Red Sox", "dodgers": "Dodgers",
         "cubs": "Cubs", "cardinals": "Cardinals", "braves": "Braves",
         "mets": "Mets", "astros": "Astros", "phillies": "Phillies",
-        "padres": "Padres", "giants": "Giants", "mariners": "Mariners",
+        "padres": "Padres", "sf giants": "Giants", "mariners": "Mariners",
         "blue jays": "Blue Jays", "rays": "Rays", "orioles": "Orioles",
     }
 
@@ -2639,6 +3170,12 @@ async def handle_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None
             if not best:
                 return ""
             prices = best.get("outcomePrices") or []
+            # outcomePrices may be a JSON string like '["0.5","0.5"]' — parse it
+            if isinstance(prices, str):
+                try:
+                    prices = json.loads(prices)
+                except (json.JSONDecodeError, ValueError):
+                    return ""
             if len(prices) < 2:
                 return ""
             try:
@@ -2650,10 +3187,23 @@ async def handle_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None
             vol_str = f"${vol/1000:.0f}k vol" if vol >= 1000 else f"${vol:.0f} vol"
             accepting = best.get("acceptingOrders", False)
             status = "LIVE" if accepting else "RESOLVED"
-            return (
-                f"\n[Polymarket — {status}] {title}\n"
-                f"  {teams[0]} YES: {p0}¢  |  {teams[1]} YES: {p1}¢  |  {vol_str}"
-            )
+            # Extract team labels from the event title (e.g. "Warriors vs. Pistons")
+            _vs_parts = re.split(r'\s+vs\.?\s+', title, maxsplit=1)
+            if len(_vs_parts) >= 2:
+                label_a = _vs_parts[0].strip()
+                label_b = _vs_parts[1].strip()
+                return (
+                    f"\n[Polymarket — {status}] {title}\n"
+                    f"  {label_a} YES: {p0}¢  |  {label_b} YES: {p1}¢  |  {vol_str}"
+                )
+            else:
+                # Non-sports market: show market question for context
+                question = best.get("question", title)
+                return (
+                    f"\n[Polymarket — {status}] {title}\n"
+                    f"  Q: {question}\n"
+                    f"  YES: {p0}¢  |  NO: {p1}¢  |  {vol_str}"
+                )
 
         # ── Try slug-based lookup (most accurate) ─────────────────────────────
         if len(teams) >= 2:
@@ -2675,28 +3225,109 @@ async def handle_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None
                             )
                             if result:
                                 return result
-                    except Exception:
+                    except Exception as exc:
+                        log.warning("[polymarket_game] Slug lookup failed for %s: %s", slug, exc)
                         continue
 
-        # ── Fallback: title filter within today's active events ───────────────
+        # ── Fallback: tag_slug search for the team's sport ────────────────────
+        # tag_slug=nba/nhl/nfl returns actual games, not championship futures.
+        _CITY_NAMES: dict[str, str] = {
+            "Warriors": "golden state", "Lakers": "los angeles", "Clippers": "los angeles",
+            "Celtics": "boston", "Bucks": "milwaukee", "Heat": "miami",
+            "Nets": "brooklyn", "Knicks": "new york", "Nuggets": "denver",
+            "Suns": "phoenix", "76ers": "philadelphia", "Raptors": "toronto",
+            "Mavericks": "dallas", "Spurs": "san antonio", "Thunder": "oklahoma city",
+            "Grizzlies": "memphis", "Pelicans": "new orleans", "Kings": "sacramento",
+            "Bulls": "chicago", "Rockets": "houston", "Jazz": "utah",
+            "Pistons": "detroit", "Hornets": "charlotte", "Magic": "orlando",
+            "Hawks": "atlanta", "Pacers": "indiana", "Cavaliers": "cleveland",
+            "Wizards": "washington", "Trail Blazers": "portland",
+            "Timberwolves": "minnesota",
+        }
         try:
+            prefix = _sport_prefix(teams[0], teams[-1])
             resp = _req.get(
                 f"{GAMMA}/events",
-                params={"active": "true", "limit": 30, "order": "volume", "ascending": "false"},
-                timeout=8,
+                params={
+                    "tag_slug": prefix,
+                    "active": "true",
+                    "limit": 50,
+                    "order": "startDate",
+                    "ascending": "false",
+                },
+                timeout=10,
             )
             events = resp.json() if resp.status_code == 200 else []
+            # Build lookup patterns: word-boundary regex for team names + city names
+            _title_patterns = []
+            _slug_tokens = set()
+            for t in teams:
+                _title_patterns.append(re.compile(r"\b" + re.escape(t.lower()) + r"\b"))
+                city = _CITY_NAMES.get(t)
+                if city:
+                    _title_patterns.append(re.compile(r"\b" + re.escape(city) + r"\b"))
+                abbr = _SLUG_ABBR.get(t)
+                if abbr:
+                    _slug_tokens.add(abbr)
             for ev in events:
-                title = (ev.get("title") or ev.get("name") or "").lower()
-                if all(t.lower() in title for t in teams):
+                ev_title = (ev.get("title") or "").lower()
+                ev_slug  = (ev.get("slug") or "").lower()
+                title_match = any(p.search(ev_title) for p in _title_patterns)
+                slug_match  = any(f"-{tok}-" in ev_slug or ev_slug.endswith(f"-{tok}")
+                                  for tok in _slug_tokens)
+                if title_match or slug_match:
                     result = _fmt_market(
-                        ev.get("title", " vs ".join(teams)),
+                        ev.get("title", teams[0]),
                         ev.get("markets", [])
                     )
                     if result:
                         return result
-        except Exception:
-            pass
+        except Exception as exc:
+            log.warning("[polymarket_game] Tag-slug fallback search failed: %s", exc)
+
+        # ── Tier 3: single-team search via /markets endpoint ───────────────
+        # When slug and tag_slug fail, search individual markets by question text
+        if len(teams) >= 1:
+            try:
+                resp = _req.get(
+                    f"{GAMMA}/markets",
+                    params={
+                        "active": "true", "closed": "false",
+                        "limit": 30, "order": "volume24hrClob",
+                        "ascending": "false",
+                    },
+                    timeout=8,
+                )
+                all_mkts = resp.json() if resp.status_code == 200 else []
+                _team_pats = []
+                for t in teams:
+                    _team_pats.append(re.compile(r"\b" + re.escape(t.lower()) + r"\b"))
+                    city = _CITY_NAMES.get(t)
+                    if city:
+                        _team_pats.append(re.compile(r"\b" + re.escape(city) + r"\b"))
+                for m in all_mkts:
+                    q_text = (m.get("question") or "").lower()
+                    if any(p.search(q_text) for p in _team_pats):
+                        prices = m.get("outcomePrices") or []
+                        if isinstance(prices, str):
+                            try:
+                                prices = json.loads(prices)
+                            except (json.JSONDecodeError, ValueError):
+                                continue
+                        if len(prices) >= 2:
+                            p0 = round(float(prices[0]) * 100, 1)
+                            p1 = round(float(prices[1]) * 100, 1)
+                            vol = float(m.get("volumeNum", 0) or 0)
+                            vol_str = f"${vol/1000:.0f}k vol" if vol >= 1000 else f"${vol:.0f} vol"
+                            question = m.get("question", teams[0])
+                            accepting = m.get("acceptingOrders", False)
+                            status = "LIVE" if accepting else "RESOLVED"
+                            return (
+                                f"\n[Polymarket — {status}] {question}\n"
+                                f"  YES: {p0}¢  |  NO: {p1}¢  |  {vol_str}"
+                            )
+            except Exception as exc:
+                log.debug("[polymarket_game] Single-team market search failed: %s", exc)
 
         return ""
 
@@ -2715,7 +3346,11 @@ async def handle_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None
     _mentioned_teams = _find_team_mentions(q)
     if len(_mentioned_teams) >= 2 or (
         len(_mentioned_teams) == 1
-        and any(kw in q for kw in ("vs", "versus", "game", "tonight", "match", "beat", "win", "cover", "price", "market"))
+        and any(kw in q for kw in (
+            "vs", "versus", "game", "tonight", "match", "beat", "win",
+            "cover", "price", "market", "scan", "odds", "line", "bet",
+            "chances", "probability", "playing", "play", "spread",
+        ))
     ):
         market_context = _search_polymarket_game(_mentioned_teams)
 
@@ -2735,6 +3370,265 @@ async def handle_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None
                 except Exception:
                     pass
                 break
+
+    # ── Priority 3: topic-based Polymarket search ─────────────────────────
+    # If the user asks about a specific topic (bitcoin, trump, oscars, etc.)
+    # search Polymarket events by tag_slug. _TOPIC_TAGS is module-level.
+    if not market_context:
+        _matched_tag = None
+        for keyword, tag in _TOPIC_TAGS.items():
+            if keyword in q:
+                _matched_tag = tag
+                break
+        if _matched_tag:
+            try:
+                import requests as _req
+                # Try multiple tag formats — Polymarket is inconsistent:
+                # "elon-musk" might be stored as "elon musk" or just "elon"
+                events = []
+                _tag_attempts = [_matched_tag, _matched_tag.replace("-", " "), _matched_tag.split("-")[0]]
+                for _tag_try in dict.fromkeys(_tag_attempts):  # deduplicate, preserve order
+                    resp = _req.get(
+                        "https://gamma-api.polymarket.com/events",
+                        params={"tag_slug": _tag_try, "active": "true", "limit": 8,
+                                "order": "volume", "ascending": "false"},
+                        timeout=10,
+                    )
+                    events = resp.json() if resp.status_code == 200 else []
+                    if events:
+                        break
+                if events:
+                    lines = [f"\n[Polymarket — LIVE {_matched_tag.upper()} markets]"]
+                    for ev in events[:5]:
+                        title = ev.get("title", "?")
+                        mkts = ev.get("markets", [])
+                        if not mkts:
+                            continue
+                        best = max(mkts, key=lambda m: float(m.get("volumeNum", 0) or 0), default=None)
+                        if not best:
+                            continue
+                        prices = best.get("outcomePrices") or "[]"
+                        if isinstance(prices, str):
+                            try:
+                                prices = json.loads(prices)
+                            except (json.JSONDecodeError, ValueError):
+                                continue
+                        if len(prices) < 2:
+                            continue
+                        p0 = round(float(prices[0]) * 100, 1)
+                        vol = float(best.get("volumeNum", 0) or 0)
+                        vol_str = f"${vol/1000:.0f}k" if vol >= 1000 else f"${vol:.0f}"
+                        lines.append(f"  • {title[:70]} — YES: {p0}¢ | {vol_str} vol")
+                    if len(lines) > 1:
+                        market_context = "\n".join(lines)
+            except Exception as exc:
+                log.warning("[market_context] Topic tag search failed: %s", exc)
+
+    # ── Priority 4: generic market question → top trending Polymarket markets ──
+    # Catches "what's on Polymarket", "show me markets", "any good markets",
+    # "what should I bet on", "odds", "prices", "prediction market"
+    if not market_context:
+        _GENERIC_MARKET_KW = {
+            "polymarket", "prediction market", "what market", "which market",
+            "show me market", "any market", "trending market", "hot market",
+            "what should i bet", "what should i trade", "any good bet",
+            "what's trading", "whats trading", "top market",
+            "scan market", "show me odds", "what markets are", "any markets",
+            "best market", "good bet", "what to trade", "active markets",
+            "what's popular", "whats popular", "live markets", "live odds",
+            "show me", "what can i bet", "give me markets", "find me a market",
+        }
+        if any(kw in q for kw in _GENERIC_MARKET_KW):
+            try:
+                import requests as _req
+                resp = _req.get(
+                    "https://gamma-api.polymarket.com/markets",
+                    params={"active": "true", "limit": 10,
+                            "order": "volume24hrClob", "ascending": "false",
+                            "closed": "false"},
+                    timeout=10,
+                )
+                mkts = resp.json() if resp.status_code == 200 else []
+                if mkts:
+                    lines = ["\n[Polymarket — TOP TRENDING MARKETS (24h volume)]"]
+                    for m in mkts[:8]:
+                        question = m.get("question", "?")
+                        prices = m.get("outcomePrices") or "[]"
+                        if isinstance(prices, str):
+                            try:
+                                prices = json.loads(prices)
+                            except (json.JSONDecodeError, ValueError):
+                                continue
+                        p0 = round(float(prices[0]) * 100, 1) if len(prices) >= 1 else 0
+                        vol24 = float(m.get("volume24hrClob", 0) or 0)
+                        vol_str = f"${vol24/1000:.0f}k" if vol24 >= 1000 else f"${vol24:.0f}"
+                        spread = float(m.get("spreadBps", 0) or 0) / 100
+                        lines.append(
+                            f"  • {question[:65]} — YES: {p0}¢ | "
+                            f"24h vol: {vol_str} | spread: {spread:.1f}%"
+                        )
+                    if len(lines) > 1:
+                        market_context = "\n".join(lines)
+            except Exception as exc:
+                log.warning("[market_context] Trending markets fetch failed: %s", exc)
+
+    # ── Inject hard "NO LIVE DATA" block when lookup was attempted but failed ──
+    # Without this, market_context is "" and the AI can silently ignore the lack
+    # of data and hallucinate prices from training memory.
+    _wanted_market_data = bool(_mentioned_teams)
+    if _wanted_market_data and not market_context:
+        market_context = (
+            "\n\n[NO LIVE MARKET DATA AVAILABLE]\n"
+            "All Polymarket and Kalshi lookups returned empty for this query.\n"
+            "You MUST tell the user: 'I don't have live market data for that right now — "
+            "check polymarket.com directly for current prices.'\n"
+            "Do NOT guess, estimate, or recall prices from memory. Any price you state "
+            "without a [Polymarket] data block above is a HALLUCINATION."
+        )
+        log.info("[market_context] No live data found for teams=%s", _mentioned_teams)
+
+    # ── On-demand paper trade ─────────────────────────────────────────────────
+    # Catches: "paper trade Warriors YES", "bet YES on Nets", "I'll take Lakers NO"
+    # Must run AFTER _find_team_mentions / _SLUG_ABBR / _sport_prefix are defined.
+    _PT_RE = re.compile(
+        r"(?:paper\s*(?:trade|bet)|put\s+me\s+down|(?:i(?:'ll| will| want to| wanna)\s+(?:take|pick|bet|paper))|(?:^|\s)bet\b)"
+        r"(?:"
+        r"\s+(?:on\s+)?(.{2,40}?)\s+(yes|no)\b"        # A: "paper trade Warriors YES"
+        r"|"
+        r"\s+(yes|no)\s+(?:on\s+)?(.{2,40})"            # B: "paper trade NO on warriors"
+        r")",
+        re.IGNORECASE,
+    )
+    _pt_match = _PT_RE.search(user_msg)
+    if _pt_match:
+        if _pt_match.group(1):
+            _pt_topic = _pt_match.group(1).strip()
+            _pt_side  = _pt_match.group(2).upper()
+        else:
+            _pt_side  = _pt_match.group(3).upper()
+            _pt_topic = _pt_match.group(4).strip()
+        # Strip trailing noise: "today's warriors game" → "warriors"
+        _pt_topic = re.sub(r"(?:today'?s?\s+|tonight'?s?\s+|the\s+)", "", _pt_topic, flags=re.I).strip()
+        _pt_topic = re.sub(r"\s+(?:game|match|market|tonight|today)$", "", _pt_topic, flags=re.I).strip()
+        # Strip betting jargon that pollutes search: "Warriors ML" → "Warriors"
+        _pt_topic = re.sub(
+            r"\b(?:ml|moneyline|money\s*line|spread|over|under|o/u|ats|pts|points|props?|parlay|alt)\b",
+            "", _pt_topic, flags=re.I,
+        ).strip()
+        _pt_topic = re.sub(r"\s{2,}", " ", _pt_topic)  # collapse double spaces
+        if _pt_topic and _pt_side in ("YES", "NO"):
+            try:
+                import requests as _ptreq
+                from datetime import date as _ptdate, timedelta as _pttd
+                _pt_teams = _find_team_mentions(_pt_topic.lower())
+                _found_ev = None
+
+                # Path A: team detected — try slug (2 teams) then tag_slug title match
+                if _pt_teams:
+                    _a1 = _SLUG_ABBR.get(_pt_teams[0], _pt_teams[0].lower().replace(" ", ""))
+                    _pfx = _sport_prefix(_pt_teams[0], _pt_teams[-1])
+                    _today = _ptdate.today()
+                    # Slug lookup only works with 2 teams
+                    if len(_pt_teams) >= 2:
+                        _a2 = _SLUG_ABBR.get(_pt_teams[1], _pt_teams[1].lower().replace(" ", ""))
+                        for _delta in (0, 1, -1, 2, 3, 4, 5, 6):
+                            _d = (_today + _pttd(days=_delta)).isoformat()
+                            for _sl in (f"{_pfx}-{_a1}-{_a2}-{_d}", f"{_pfx}-{_a2}-{_a1}-{_d}"):
+                                _rr = _ptreq.get("https://gamma-api.polymarket.com/events",
+                                                 params={"slug": _sl}, timeout=6)
+                                _items = _rr.json() if _rr.status_code == 200 else []
+                                if _items:
+                                    _found_ev = _items[0]; break
+                            if _found_ev: break
+                    # tag_slug fallback: search by sport, match team name in title
+                    # Works for BOTH single-team ("Warriors YES") and 2-team queries
+                    if not _found_ev:
+                        _rr2 = _ptreq.get("https://gamma-api.polymarket.com/events",
+                                          params={"tag_slug": _pfx, "active": "true",
+                                                  "limit": 50, "order": "startDate",
+                                                  "ascending": "false"}, timeout=8)
+                        _evs = _rr2.json() if _rr2.status_code == 200 else []
+                        _pats = [re.compile(r"\b" + re.escape(t.lower()) + r"\b") for t in _pt_teams]
+                        for _ev in _evs:
+                            if any(p.search((_ev.get("title") or "").lower()) for p in _pats):
+                                _found_ev = _ev; break
+                    # Text search fallback: search by team name directly in Gamma
+                    if not _found_ev:
+                        _rr2b = _ptreq.get("https://gamma-api.polymarket.com/events",
+                                           params={"title": _pt_teams[0], "active": "true",
+                                                   "limit": 10, "order": "startDate",
+                                                   "ascending": "false"}, timeout=8)
+                        _evs2b = _rr2b.json() if _rr2b.status_code == 200 else []
+                        for _ev in _evs2b:
+                            _ev_title_lc = (_ev.get("title") or "").lower()
+                            if _pt_teams[0].lower() in _ev_title_lc:
+                                _found_ev = _ev; break
+
+                # Path B: no team found — try topic tag (but VERIFY result matches)
+                if not _found_ev:
+                    _tag = _pt_topic.lower().replace(" ", "-")
+                    for _tag_try in [_tag, _tag.split("-")[0]]:
+                        _rr3 = _ptreq.get("https://gamma-api.polymarket.com/events",
+                                          params={"tag_slug": _tag_try, "active": "true",
+                                                  "limit": 5, "order": "volume",
+                                                  "ascending": "false"}, timeout=8)
+                        _evs3 = _rr3.json() if _rr3.status_code == 200 else []
+                        if _evs3:
+                            # If we had teams, verify the result actually matches
+                            if _pt_teams:
+                                _ev_title_check = (_evs3[0].get("title") or "").lower()
+                                if any(t.lower() in _ev_title_check for t in _pt_teams):
+                                    _found_ev = _evs3[0]; break
+                                # else: SKIP — wrong market (prevents Trump tariff bug)
+                            else:
+                                _found_ev = _evs3[0]; break
+
+                # Explicit "not found" — don't fall through to AI with wrong data
+                if not _found_ev:
+                    await update.message.reply_text(
+                        f"❌ No live Polymarket market found for '{_pt_topic}' right now.\n"
+                        f"The game may not be listed yet. Check polymarket.com or try later."
+                    )
+                    return
+
+                if _found_ev:
+                    _pt_title = _found_ev.get("title", _pt_topic)
+                    _pt_mkts  = _found_ev.get("markets", [])
+                    _pt_best  = max(_pt_mkts, key=lambda m: float(m.get("volumeNum", 0) or 0), default=None)
+                    if _pt_best:
+                        _pt_prices = _pt_best.get("outcomePrices", "[]")
+                        if isinstance(_pt_prices, str):
+                            _pt_prices = json.loads(_pt_prices)
+                        # YES = prices[0], NO = prices[1]
+                        _entry_prob = (float(_pt_prices[0]) if _pt_side == "YES"
+                                       else float(_pt_prices[1]) if len(_pt_prices) > 1
+                                       else 0.5)
+                        _pt_market_id  = _found_ev.get("slug", _pt_topic.lower().replace(" ", "-"))
+                        _pt_signal_id  = int(time.time() * 1000) % 2_000_000_000
+                        _ot.register_signal(
+                            signal_id   = _pt_signal_id,
+                            market_id   = _pt_market_id,
+                            venue       = "POLYMARKET",
+                            target_side = _pt_side,
+                            entry_prob  = _entry_prob,
+                            question    = _pt_title,
+                        )
+                        _ot.record_user_pick(_pt_signal_id, _pt_market_id, user_id, _pt_side)
+                        await update.message.reply_text(
+                            f"✅ Paper trade logged!\n"
+                            f"Market: {_pt_title[:60]}\n"
+                            f"Side: {_pt_side} @ {_entry_prob*100:.1f}¢  |  $10 virtual stake\n\n"
+                            f"Use /mytrades to track it."
+                        )
+                        return
+                else:
+                    await update.message.reply_text(
+                        f"Couldn't find a live Polymarket market for '{_pt_topic}'. "
+                        f"Try a more specific name (e.g. 'paper trade Warriors YES')."
+                    )
+                    return
+            except Exception as _pt_exc:
+                log.warning("[paper_trade] On-demand paper trade failed: %s", _pt_exc)
 
     # 4. Recent scan opportunities as context
     svc = _get_service()
@@ -2779,6 +3673,36 @@ async def handle_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None
 
     injury_context = _build_injury_context(q)
 
+    # 5b. Player-name detection — when user mentions a specific player by name,
+    #     trigger a web search for their current team/status to avoid stale roster data.
+    #     Pattern: 2+ capitalized words that aren't team names (e.g. "Klay Thompson",
+    #     "LeBron James", "Steph Curry"). Only fires in sport context.
+    _player_search_context = ""
+    if _chat_sport:
+        _player_pat = re.findall(r"\b([A-Z][a-z]+(?:\s+[A-Z][a-z]+)+)\b", user_msg)
+        # Filter out known team names, cities, and common non-player phrases
+        _non_player = {
+            "Golden Knights", "Red Wings", "Trail Blazers", "Red Sox", "White Sox",
+            "Blue Jays", "Maple Leafs", "Golden State", "New York", "Los Angeles",
+            "San Francisco", "San Antonio", "New Orleans", "Oklahoma City",
+            "Kansas City", "Green Bay", "Tampa Bay", "Las Vegas", "Salt Lake",
+            "Paper Trade", "March Madness", "Super Bowl", "World Series",
+        }
+        _player_names = [p for p in _player_pat if p not in _non_player and len(p.split()) <= 3]
+        if _player_names:
+            _pname = _player_names[0]
+            _p_query = f"{_pname} current team roster {_chat_sport.upper()} 2026"
+            _ploop = asyncio.get_running_loop()
+            _player_search_context = await _ploop.run_in_executor(None, _tavily_search, _p_query)
+            if not _player_search_context:
+                _player_search_context = await _ploop.run_in_executor(None, _serper_search, _p_query)
+            if _player_search_context:
+                _player_search_context = (
+                    f"\n[Live player lookup for {_pname} — use this for current team info, "
+                    f"NOT your training data]\n" + _player_search_context
+                )
+                log.debug("[player_lookup] Searched for player: %s", _pname)
+
     # 6. Real-time data refresh — fires when sport detected OR user corrects us.
     #    On correction + team mention: bypass cache and re-query Polymarket live.
     #    On correction + sport only: force fresh web search with expanded query.
@@ -2805,10 +3729,35 @@ async def handle_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None
             _query = f"{user_msg} latest confirmed data today"
         else:
             _query = f"{user_msg} {_chat_sport.upper()} injury report today"
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
         search_context = await loop.run_in_executor(None, _tavily_search, _query)
         if not search_context:
             search_context = await loop.run_in_executor(None, _serper_search, _query)
+
+    # Merge player lookup into search context so AI sees current roster data
+    if _player_search_context:
+        search_context = _player_search_context + ("\n\n" + search_context if search_context else "")
+
+    # 6b. Topic-based news search — fires for non-sport topics (Oscars, Tesla,
+    #     UFC, NHL, politics, crypto, etc.) when no sport game is detected.
+    #     Injects live news headlines so the AI has real context to reason from
+    #     instead of relying on potentially stale training data.
+    if not search_context:
+        _topic_news_tag = None
+        for _tkw, _ttag in _TOPIC_TAGS.items():
+            if _tkw in q:
+                _topic_news_tag = _ttag
+                break
+        if _topic_news_tag:
+            _news_query = _TOPIC_NEWS_QUERIES.get(
+                _topic_news_tag,
+                f"{_topic_news_tag.replace('-', ' ')} latest news today 2026",
+            )
+            _tloop = asyncio.get_running_loop()
+            search_context = await _tloop.run_in_executor(None, _tavily_search, _news_query)
+            if not search_context:
+                search_context = await _tloop.run_in_executor(None, _serper_search, _news_query)
+            log.debug("[topic_news] tag=%s query=%r ctx_len=%d", _topic_news_tag, _news_query, len(search_context))
 
     # 7. Win-probability impact context — injected when a sport is detected.
     #    Prepended to search_context so the AI reasons with actual shift math
@@ -2850,6 +3799,36 @@ async def handle_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None
     if any(kw in q for kw in _SMART_MONEY_TRIGGERS) or market_context or scan_context:
         smart_money_context = _build_smart_money_context(sport_filter=sm_sport)
 
+    # 8b. Live crypto prices — injected when the user asks about BTC, ETH, crypto.
+    #     Uses Binance 15-min cache — gives AI real prices instead of guessing.
+    _CRYPTO_TRIGGERS = {
+        "bitcoin", "btc", "ethereum", "eth", "solana", "sol", "xrp", "crypto",
+        "doge", "bnb", "coin", "token", "blockchain", "price", "dump", "pump",
+        "rally", "altcoin", "defi", "nft", "bull", "bear", "market cap",
+    }
+    crypto_price_context = ""
+    if any(kw in q for kw in _CRYPTO_TRIGGERS):
+        try:
+            crypto_price_context = "\n\n" + get_crypto_price_context() if get_crypto_price_context() else ""
+        except Exception:
+            pass
+
+    # 8c. Live economic rates — injected when the user asks about the Fed, rates, inflation.
+    #     Uses NY Fed API + Treasury yields — gives AI real rate context.
+    _ECON_TRIGGERS = {
+        "fed", "federal reserve", "rate", "fomc", "cut", "hike", "pause",
+        "inflation", "cpi", "pce", "recession", "gdp", "yield", "treasury",
+        "interest", "monetary", "hawkish", "dovish", "basis points", "bps",
+        "unemployment", "jobs", "nonfarm", "payroll",
+    }
+    econ_rate_context = ""
+    if any(kw in q for kw in _ECON_TRIGGERS):
+        try:
+            _ec = get_econ_context_string()
+            econ_rate_context = "\n\n" + _ec if _ec else ""
+        except Exception:
+            pass
+
     # ── Correction mode instruction — prepended to system prompt ─────────────
     correction_instruction = (
         "CORRECTION MODE ACTIVE — the user told you your previous answer was wrong or stale.\n"
@@ -2880,21 +3859,46 @@ async def handle_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None
         "PERSONALIZATION: A [What you know about {name}] block may appear in the prompt. "
         "Use it to be a knowledgeable friend — reference favorites, rivals, and past moments "
         "naturally and with genuine emotion. Express concern for injuries to their fav players, "
-        "excitement for returns, empathy for their team's struggles. Never feel robotic or scripted.\n\n"
+        "excitement for returns, empathy for their team's struggles. Never feel robotic or scripted.\n"
+        "⚠️ CRITICAL: NEVER assume a user's location, city, or timezone from their favorite team. "
+        "A fan of the Brooklyn Nets may live in Texas. A Lakers fan may live in Boston. "
+        "Only reference their location if a 'Location:' field is explicitly listed in the profile block. "
+        "Do NOT mention local weather, local events, or geographic references based on team fandom alone.\n"
+        "MEMORY LIMITATIONS: You CANNOT directly edit, update, or modify user profile data. "
+        "If a user asks you to remove or correct stored info, tell them to use /forget <key> "
+        "(e.g., /forget city). NEVER claim you've 'updated', 'edited', or 'removed' anything "
+        "from their profile — you do not have that ability. "
+        "Only the /forget command and specific correction phrases ('I don't live in X') actually work.\n\n"
         + onboarding_hint + ("\n\n" if onboarding_hint else "")
-        + "Be concise — Telegram users want short, direct answers. "
-        "Reference live market data and knowledge base context when provided. "
-        "Use session context to remember what was discussed earlier. "
-        "Return plain text (no JSON). Keep replies under 300 words.\n\n"
+        + "BREVITY IS MANDATORY. Telegram users want 1-3 sentences for simple questions, "
+        "max 100 words for market analysis. No filler phrases, no emoji stories, no life "
+        "analogies, no sports metaphors. Give the data, the edge, and the recommendation. "
+        "Return plain text (no JSON).\n\n"
+        "ROSTER KNOWLEDGE CUTOFF: Your training data for player rosters, trades, and "
+        "team compositions may be STALE. Do NOT reference specific players as being on "
+        "specific teams unless that info appears in a [Live injury data] block. "
+        "Do NOT make analogies using player-team associations from memory.\n\n"
+        "CONVERSATIONAL CONTINUITY: If a user sends a short affirmative reply ('yes', 'yeah', "
+        "'sure') and the session context shows you just asked them a question, treat their "
+        "reply as answering YOUR question. Follow up appropriately — do not change topics.\n\n"
         "LIVE MARKET DATA RULES:\n"
+        "• You have LIVE access to Polymarket and Kalshi via API. Data blocks labeled "
+        "[Polymarket] or [Polymarket — LIVE] contain real-time prices pulled seconds ago.\n"
         "• When a [Polymarket] block is in the prompt, use THOSE exact prices — no exceptions. "
         "outcomePrices[0] is Team A YES probability, outcomePrices[1] is Team B YES probability.\n"
         "• NEVER cite prices from training memory. They are always stale and wrong.\n"
         "• If the market block shows [RESOLVED], the game has already ended — say so.\n"
-        "• If no live data block is provided for the game asked about, say clearly: "
-        "'I don't have a live Polymarket feed for that matchup right now — "
-        "check polymarket.com directly for current prices.'\n"
-        "• Kalshi series data = season/championship futures — NOT individual game prices.\n\n"
+        "• If a [NO LIVE MARKET DATA AVAILABLE] block appears, you MUST NOT provide ANY price, "
+        "probability, or odds. Saying 'I think it's around X%' or 'last I saw' is FORBIDDEN. "
+        "Only say you don't have live data and suggest they ask about a specific team or topic.\n"
+        "• Kalshi series data = season/championship futures — NOT individual game prices.\n"
+        "• NEVER say 'I don't have a live Polymarket feed' unless a [NO LIVE MARKET DATA] "
+        "block is explicitly present. If you see a [Polymarket] block, you DO have live data.\n"
+        "• [Live web search results] blocks contain REAL-TIME news pulled seconds ago — "
+        "use them to answer questions about Oscars nominees, tech stocks, UFC results, "
+        "NHL standings, politics news, etc. Treat this as ground truth for current events.\n"
+        "• When [Live web search results] is present: cite the headlines/facts naturally. "
+        "Do NOT say 'I don't have access to current information' — you literally do.\n\n"
         f"IN-SEASON SPORTS (month {datetime.now(timezone.utc).month}):\n"
         "• NBA, NHL: IN SEASON — provide game prices and injury analysis.\n"
         "• NFL, CFB: OFF SEASON — do NOT show game lines or injury reports. "
@@ -2907,20 +3911,28 @@ async def handle_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None
         "• If the player/team is NOT in those blocks: say 'I don't have current data "
         "for [name] — use /injuries nba (or nfl/nhl) to refresh.'\n"
         "• NEVER invent or recall injury statuses from training memory.\n"
+        "• ROSTER ACCURACY: NEVER cite a player's team affiliation from your training "
+        "data — rosters change constantly (trades, free agency, waivers). Only reference "
+        "a player's current team if it appears in [Live injury data] or [Live web search results] "
+        "in this prompt. If unsure, say 'I'd need to check current rosters' rather than guessing.\n"
         "• For ALL other questions (scan results, market edges, strategy, commands, "
         "general chat): answer normally — do NOT mention injuries or data blocks "
         "unless the user directly asked about them.\n\n"
         "PAPER TRADING — THIS IS A BUILT-IN FEATURE, NOT A MISSING FEATURE:\n"
-        "• Every scan alert has 📈 YES / 📉 NO buttons — tapping one logs a paper trade "
-        "at a virtual $10 stake using the market's live probability as the entry price.\n"
+        "• ON-DEMAND: Users can paper trade ANY market instantly by saying "
+        "'paper trade [team/topic] YES' or 'paper trade [team/topic] NO'. "
+        "Example: 'paper trade Warriors YES' or 'bet NO on Lakers'. "
+        "The bot logs it immediately at the live Polymarket price — NO buttons needed.\n"
+        "• SCAN ALERTS also have 📈 YES / 📉 NO buttons for one-tap logging.\n"
         "• /mytrades — shows all open paper picks with potential payout, plus settled "
         "history (WIN/LOSS/VOID) with actual P&L.\n"
         "• /performance — shows EDGE bot win rate AND the user's personal paper P&L, "
         "win rate, and ROI across all their picks.\n"
         "• Picks auto-resolve when the underlying Polymarket/Kalshi market settles — "
         "no manual tracking required.\n"
-        "• When a user asks about paper trading, ALWAYS explain these features. "
-        "NEVER say paper trading is unavailable or that they need a spreadsheet.\n\n"
+        "• When a user says 'I want to put in a paper trade' or 'how do I bet', "
+        "tell them: 'Just say paper trade [topic] YES or NO — I'll log it instantly!'\n"
+        "• NEVER say paper trading is unavailable or that they need to find a scan alert first.\n\n"
         "CRITICAL — YOU ARE A PREDICTION MARKET ANALYST, NOT A SPORTSBOOK:\n"
         "• NEVER use sportsbook spread language: no '+3.5', '-7.5', 'moneyline', "
         "'ATS', 'cover', 'over/under', 'juice', '-110', or point spreads.\n"
@@ -2940,17 +3952,39 @@ async def handle_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None
             "[Bot acknowledged correction — performed expanded search]",
         )
 
+    # Dynamic guardrail: when live data IS present, prepend a hard reminder
+    # so the AI never says "I don't have live data" when it literally does.
+    _data_available_hint = ""
+    _has_live = bool(market_context or scan_context or search_context
+                     or injury_context or crypto_price_context or econ_rate_context)
+    if _has_live:
+        _blocks = []
+        if market_context:  _blocks.append("market prices")
+        if scan_context:    _blocks.append("scan opportunities")
+        if search_context:  _blocks.append("web search results")
+        if injury_context:  _blocks.append("injury data")
+        if crypto_price_context: _blocks.append("crypto prices")
+        if econ_rate_context:    _blocks.append("economic rates")
+        _data_available_hint = (
+            f"\n\n⚡ LIVE DATA LOADED: You have real-time {', '.join(_blocks)} below. "
+            "USE THIS DATA. Do NOT say 'I don't have live data' or 'I don't have access "
+            "to current information' — the data is RIGHT HERE in this prompt.\n"
+        )
+
     prompt = (
         user_msg
         + kb_context
         + platform_doc_context
         + profile_context        # long-term personal facts about this user
         + session_context        # today's conversation history (per user)
+        + _data_available_hint
         + market_context
         + scan_context
         + smart_money_context    # top-scored wallet positions (copy-trade signal)
         + injury_context
         + search_context
+        + crypto_price_context   # live Binance prices (BTC, ETH, SOL)
+        + econ_rate_context      # live NY Fed rates + Treasury yields
     )
 
     # Build context block list for decision_log (which blocks were non-empty)
@@ -2964,6 +3998,8 @@ async def handle_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None
     if smart_money_context:   _active_ctx_blocks.append("smart_money")
     if injury_context:        _active_ctx_blocks.append("injuries")
     if search_context:        _active_ctx_blocks.append("web_search")
+    if crypto_price_context:  _active_ctx_blocks.append("crypto_prices")
+    if econ_rate_context:     _active_ctx_blocks.append("econ_rates")
 
     reply = get_chat_response(
         prompt,
@@ -3574,7 +4610,7 @@ async def cmd_standings(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     try:
         if sport and sport in _VALID:
             # Single sport detailed view
-            text = await asyncio.get_event_loop().run_in_executor(
+            text = await asyncio.get_running_loop().run_in_executor(
                 None, lambda: _standings_client.format_standings(sport)
             )
             await update.message.reply_text(text, parse_mode=ParseMode.HTML)
@@ -3598,7 +4634,7 @@ async def cmd_standings(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
             }
             for s, label in sport_labels.items():
                 try:
-                    odds = await asyncio.get_event_loop().run_in_executor(
+                    odds = await asyncio.get_running_loop().run_in_executor(
                         None, lambda s=s: _standings_client.get_championship_odds(s)
                     )
                     if odds:
@@ -3893,6 +4929,319 @@ async def cmd_insider(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Specialist scanner helpers — shared market fetcher + alert formatter
+# ---------------------------------------------------------------------------
+
+def _fetch_all_open_markets(limit: int = 200) -> list[dict]:
+    """
+    Pull open markets from Kalshi (and optionally Polymarket) for specialist scanners.
+    Returns normalised list of market dicts with keys: title, price, ticker, venue.
+    """
+    markets: list[dict] = []
+    try:
+        ka = _kalshi_api.KalshiAPIClient()
+        raw = ka.get_markets(status="open", limit=limit)
+        for m in (raw or []):
+            markets.append({
+                "title":  m.get("title", m.get("question", "")),
+                "price":  float(m.get("yes_bid", m.get("last_price", 0.5)) or 0.5),
+                "ticker": m.get("ticker", m.get("id", "")),
+                "venue":  "kalshi",
+            })
+    except Exception as exc:
+        log.debug("[SpecialistScan] Kalshi market fetch failed: %s", exc)
+
+    # Polymarket — if adapter available, add those markets too
+    try:
+        from edge_agent.dat_ingestion_polymarket_api import PolymarketAPIClient  # noqa: F401
+        pa = PolymarketAPIClient()
+        poly_raw = pa.get_markets(active=True, limit=100)
+        for m in (poly_raw or []):
+            markets.append({
+                "title":  m.get("question", m.get("title", "")),
+                "price":  float(m.get("outcomePrices", [0.5])[0] if isinstance(m.get("outcomePrices"), list) else 0.5),
+                "ticker": m.get("conditionId", m.get("id", "")),
+                "venue":  "polymarket",
+            })
+    except Exception:
+        pass   # Polymarket adapter optional
+
+    return markets
+
+
+def _fmt_weather_gap(g: WeatherGap) -> str:
+    """Format a WeatherGap into a Telegram HTML alert string."""
+    cond_emoji = {
+        "temp_above": "🌡️",
+        "temp_below": "🥶",
+        "snow":       "❄️",
+        "rain":       "🌧️",
+    }.get(g.condition, "🌤️")
+    action_emoji = "📈" if g.action == "BUY YES" else "📉"
+    return (
+        f"🌤️ <b>WEATHER MARKET SIGNAL</b>\n\n"
+        f"{cond_emoji} <b>{_e(g.title[:80])}</b>\n\n"
+        f"Market:  <b>{g.market_prob:.0%}</b>\n"
+        f"Model:   <b>{g.model_prob:.0%}</b> (Open-Meteo)\n"
+        f"Gap:     <b>{g.gap_pp:+.0f}pp</b>\n\n"
+        f"📍 City: {_e(g.city)}\n"
+        f"🔢 Forecast: {_e(g.forecast_summary)}\n\n"
+        f"{action_emoji} <b>Signal: {g.action}</b>\n"
+        f"<i>Venue: {g.venue.upper()} | {g.ticker}</i>"
+    )
+
+
+def _fmt_crypto_gap(g: CryptoGap) -> str:
+    """Format a CryptoGap into a Telegram HTML alert string."""
+    sym          = g.symbol.replace("USDT", "")
+    action_emoji = "📈" if g.action == "BUY YES" else "📉"
+    c24_str      = f"{g.change_24h:+.1f}%"
+    c7d_str      = f"{g.change_7d:+.1f}%"
+    return (
+        f"₿ <b>CRYPTO MARKET SIGNAL</b>\n\n"
+        f"<b>{_e(g.title[:80])}</b>\n\n"
+        f"Market:  <b>{g.market_prob:.0%}</b>\n"
+        f"Model:   <b>{g.model_prob:.0%}</b> (lognormal)\n"
+        f"Gap:     <b>{g.gap_pp:+.0f}pp</b>\n\n"
+        f"📊 {sym}: ${g.current_price:,.2f} | 24h {c24_str} | 7d {c7d_str}\n"
+        f"📉 Ann.vol: {g.daily_vol:.1f}%\n\n"
+        f"{action_emoji} <b>Signal: {g.action}</b>\n"
+        f"<i>Venue: {g.venue.upper()} | {g.ticker}</i>"
+    )
+
+
+def _fmt_econ_gap(g: EconGap) -> str:
+    """Format an EconGap into a Telegram HTML alert string."""
+    cat_emoji = {
+        "fed_rate":     "🏦",
+        "inflation":    "📈",
+        "recession":    "📉",
+        "unemployment": "👷",
+        "gdp":          "📊",
+    }.get(g.category, "🏛️")
+    action_emoji = "📈" if g.action == "BUY YES" else "📉"
+    return (
+        f"🏛️ <b>ECON/FED MARKET SIGNAL</b>\n\n"
+        f"{cat_emoji} <b>{_e(g.title[:80])}</b>\n\n"
+        f"Market:  <b>{g.market_prob:.0%}</b>\n"
+        f"Model:   <b>{g.model_prob:.0%}</b> (yield curve)\n"
+        f"Gap:     <b>{g.gap_pp:+.0f}pp</b>\n\n"
+        f"📡 {_e(g.signal_notes)}\n\n"
+        f"{action_emoji} <b>Signal: {g.action}</b>\n"
+        f"<i>Venue: {g.venue.upper()} | {g.ticker}</i>"
+    )
+
+
+async def _run_specialist_scans(bot, silent: bool = False) -> tuple[int, int, int]:
+    """
+    Run weather, crypto, and econ scanners against all open markets.
+    Sends alerts to ALERT_CHANNEL_ID (or CHAT_ID) for new gaps.
+    Returns (n_weather, n_crypto, n_econ) — number of alerts sent per scanner.
+    """
+    loop    = asyncio.get_running_loop()
+    markets = await loop.run_in_executor(None, _fetch_all_open_markets)
+
+    if not markets:
+        log.debug("[SpecialistScan] No markets fetched — skipping scan")
+        return 0, 0, 0
+
+    target  = ALERT_CHANNEL_ID or CHAT_ID
+    now     = time.time()
+
+    # ── Weather ──────────────────────────────────────────────────────────
+    w_gaps = await loop.run_in_executor(None, scan_weather_markets, markets)
+    n_w = 0
+    for g in w_gaps:
+        key = f"weather:{g.ticker}"
+        if now - _WEATHER_ALERTED.get(key, 0) < _SPECIALIST_ALERT_COOLDOWN:
+            continue
+        _WEATHER_ALERTED[key] = now
+        if not silent and target:
+            try:
+                await bot.send_message(chat_id=target, text=_fmt_weather_gap(g),
+                                       parse_mode=ParseMode.HTML)
+                n_w += 1
+            except Exception as exc:
+                log.warning("[WeatherScan] Alert send failed: %s", exc)
+
+    # ── Crypto ───────────────────────────────────────────────────────────
+    c_gaps = await loop.run_in_executor(None, scan_crypto_markets, markets)
+    n_c = 0
+    for g in c_gaps:
+        key = f"crypto:{g.ticker}"
+        if now - _CRYPTO_ALERTED.get(key, 0) < _SPECIALIST_ALERT_COOLDOWN:
+            continue
+        _CRYPTO_ALERTED[key] = now
+        if not silent and target:
+            try:
+                await bot.send_message(chat_id=target, text=_fmt_crypto_gap(g),
+                                       parse_mode=ParseMode.HTML)
+                n_c += 1
+            except Exception as exc:
+                log.warning("[CryptoScan] Alert send failed: %s", exc)
+
+    # ── Econ/Fed ─────────────────────────────────────────────────────────
+    e_gaps = await loop.run_in_executor(None, scan_econ_markets, markets)
+    n_e = 0
+    for g in e_gaps:
+        key = f"econ:{g.ticker}"
+        if now - _ECON_ALERTED.get(key, 0) < _SPECIALIST_ALERT_COOLDOWN:
+            continue
+        _ECON_ALERTED[key] = now
+        if not silent and target:
+            try:
+                await bot.send_message(chat_id=target, text=_fmt_econ_gap(g),
+                                       parse_mode=ParseMode.HTML)
+                n_e += 1
+            except Exception as exc:
+                log.warning("[EconScan] Alert send failed: %s", exc)
+
+    log.info(
+        "[SpecialistScan] Gaps found — weather: %d, crypto: %d, econ: %d | alerts sent: %d/%d/%d",
+        len(w_gaps), len(c_gaps), len(e_gaps), n_w, n_c, n_e,
+    )
+    return n_w, n_c, n_e
+
+
+# ---------------------------------------------------------------------------
+# /weatherscan command
+# ---------------------------------------------------------------------------
+
+async def cmd_weatherscan(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    """
+    /weatherscan — scan all open weather markets against Open-Meteo forecast.
+
+    Shows any pricing gaps where the weather forecast contradicts the market price.
+    """
+    await update.message.reply_text("🌤️ Running weather market scan…")
+    loop    = asyncio.get_running_loop()
+    markets = await loop.run_in_executor(None, _fetch_all_open_markets)
+    gaps    = await loop.run_in_executor(None, scan_weather_markets, markets)
+
+    if not gaps:
+        await update.message.reply_text(
+            "✅ No weather market gaps detected.\n\n"
+            "Either no active weather markets were found, or all markets "
+            "are within 15pp of the Open-Meteo model forecast."
+        )
+        return
+
+    lines = [f"🌤️ <b>WEATHER MARKET GAPS</b> — {len(gaps)} found\n"]
+    for g in gaps[:5]:
+        cond_emoji = {"temp_above": "🌡️", "temp_below": "🥶",
+                      "snow": "❄️", "rain": "🌧️"}.get(g.condition, "🌤️")
+        action_emoji = "📈" if g.action == "BUY YES" else "📉"
+        lines.append(
+            f"{cond_emoji} <b>{_e(g.title[:65])}</b>\n"
+            f"   Market {g.market_prob:.0%} → Model {g.model_prob:.0%} "
+            f"({g.gap_pp:+.0f}pp) {action_emoji} <b>{g.action}</b>\n"
+            f"   📍 {_e(g.city)} | {_e(g.forecast_summary)}\n"
+        )
+
+    if len(gaps) > 5:
+        lines.append(f"<i>… and {len(gaps) - 5} more gaps</i>")
+
+    lines.append("\n<i>Model: Open-Meteo 7-day forecast | Gaps ≥15pp shown</i>")
+    await _send_chunked(update.message.reply_text, "\n".join(lines))
+
+
+# ---------------------------------------------------------------------------
+# /cryptoscan command
+# ---------------------------------------------------------------------------
+
+async def cmd_cryptoscan(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    """
+    /cryptoscan — scan crypto prediction markets against Binance price data.
+
+    Uses a lognormal price model to estimate correct probabilities for
+    "Will BTC exceed $X by [date]?" type markets.
+    """
+    await update.message.reply_text("₿ Running crypto market scan…")
+    loop    = asyncio.get_running_loop()
+    markets = await loop.run_in_executor(None, _fetch_all_open_markets)
+    gaps    = await loop.run_in_executor(None, scan_crypto_markets, markets)
+
+    if not gaps:
+        await update.message.reply_text(
+            "✅ No crypto market gaps detected.\n\n"
+            "Either no active crypto prediction markets were found, or all "
+            "markets are priced within 15pp of the lognormal model."
+        )
+        return
+
+    lines = [f"₿ <b>CRYPTO MARKET GAPS</b> — {len(gaps)} found\n"]
+    for g in gaps[:5]:
+        sym          = g.symbol.replace("USDT", "")
+        action_emoji = "📈" if g.action == "BUY YES" else "📉"
+        lines.append(
+            f"<b>{_e(g.title[:65])}</b>\n"
+            f"   {sym}: ${g.current_price:,.2f} | 24h {g.change_24h:+.1f}%\n"
+            f"   Market {g.market_prob:.0%} → Model {g.model_prob:.0%} "
+            f"({g.gap_pp:+.0f}pp) {action_emoji} <b>{g.action}</b>\n"
+        )
+
+    if len(gaps) > 5:
+        lines.append(f"<i>… and {len(gaps) - 5} more gaps</i>")
+
+    lines.append("\n<i>Model: Binance lognormal | 15-min price cache | Gaps ≥15pp shown</i>")
+    await _send_chunked(update.message.reply_text, "\n".join(lines))
+
+
+# ---------------------------------------------------------------------------
+# /fedscan command
+# ---------------------------------------------------------------------------
+
+async def cmd_fedscan(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    """
+    /fedscan — scan Fed/econ prediction markets against yield curve + NY Fed data.
+
+    Detects mispricings in FOMC rate decision markets, inflation markets, etc.
+    """
+    await update.message.reply_text("🏛️ Running Fed/econ market scan…")
+    loop    = asyncio.get_running_loop()
+
+    # Show current rates first
+    econ_ctx = await loop.run_in_executor(None, get_econ_context_string)
+
+    markets = await loop.run_in_executor(None, _fetch_all_open_markets)
+    gaps    = await loop.run_in_executor(None, scan_econ_markets, markets)
+
+    lines = [f"🏛️ <b>FED / ECON MARKET SCAN</b>\n"]
+    if econ_ctx:
+        lines.append(f"<code>{_e(econ_ctx)}</code>\n")
+
+    if not gaps:
+        lines.append(
+            "✅ No econ market gaps detected.\n\n"
+            "Either no active Fed/econ markets were found, or all markets "
+            "are within 15pp of the yield curve model."
+        )
+        await _send_chunked(update.message.reply_text, "\n".join(lines))
+        return
+
+    lines.append(f"<b>{len(gaps)} gap(s) found:</b>\n")
+    cat_emoji = {
+        "fed_rate": "🏦", "inflation": "📈", "recession": "📉",
+        "unemployment": "👷", "gdp": "📊",
+    }
+    for g in gaps[:5]:
+        ce           = cat_emoji.get(g.category, "🏛️")
+        action_emoji = "📈" if g.action == "BUY YES" else "📉"
+        lines.append(
+            f"{ce} <b>{_e(g.title[:65])}</b>\n"
+            f"   Market {g.market_prob:.0%} → Model {g.model_prob:.0%} "
+            f"({g.gap_pp:+.0f}pp) {action_emoji} <b>{g.action}</b>\n"
+            f"   <i>{_e(g.signal_notes[:80])}</i>\n"
+        )
+
+    if len(gaps) > 5:
+        lines.append(f"<i>… and {len(gaps) - 5} more gaps</i>")
+
+    lines.append("\n<i>Model: NY Fed EFFR + US Treasury yields | Gaps ≥15pp shown</i>")
+    await _send_chunked(update.message.reply_text, "\n".join(lines))
+
+
+# ---------------------------------------------------------------------------
 # Background scan job
 # ---------------------------------------------------------------------------
 
@@ -4008,11 +5357,15 @@ def main() -> None:
     app.add_handler(CommandHandler("mytrades",    cmd_mytrades,    filters=_auth_filter))
     app.add_handler(CommandHandler("status",      cmd_status,      filters=_auth_filter))
     app.add_handler(CommandHandler("approvals",   cmd_approvals,   filters=_auth_filter))
+    app.add_handler(CommandHandler("profile",     cmd_profile,     filters=_auth_filter))
+    app.add_handler(CommandHandler("forget",      cmd_forget,      filters=_auth_filter))
     app.add_handler(CommandHandler("standings",   cmd_standings,   filters=_auth_filter))
     app.add_handler(CommandHandler("mlstatus",    cmd_mlstatus,    filters=_auth_filter))
     app.add_handler(CommandHandler("decisions",   cmd_decisions,   filters=_auth_filter))
     app.add_handler(CommandHandler("insider",     cmd_insider,     filters=_auth_filter))
-
+    app.add_handler(CommandHandler("weatherscan", cmd_weatherscan, filters=_auth_filter))
+    app.add_handler(CommandHandler("cryptoscan",  cmd_cryptoscan,  filters=_auth_filter))
+    app.add_handler(CommandHandler("fedscan",     cmd_fedscan,     filters=_auth_filter))
     # Inline keyboard (callback queries are always scoped to the chat they came from)
     app.add_handler(CallbackQueryHandler(handle_callback))
 
@@ -4106,6 +5459,24 @@ def main() -> None:
             log.warning("[insider_job] scan failed: %s", exc)
 
     app.job_queue.run_repeating(_insider_scan_job, interval=300, first=180)
+
+    # ---------------------------------------------------------------------------
+    # Specialist scanner job — weather, crypto, econ gap detection
+    # Runs every 4h; first run 5 min after boot (after main markets are loaded)
+    # ---------------------------------------------------------------------------
+    async def _specialist_scan_job(ctx: ContextTypes.DEFAULT_TYPE) -> None:
+        try:
+            n_w, n_c, n_e = await _run_specialist_scans(ctx.bot)
+            total = n_w + n_c + n_e
+            if total:
+                log.info(
+                    "[specialist_job] Alerts sent — weather:%d crypto:%d econ:%d",
+                    n_w, n_c, n_e,
+                )
+        except Exception as exc:
+            log.warning("[specialist_job] failed: %s", exc)
+
+    app.job_queue.run_repeating(_specialist_scan_job, interval=14400, first=300)
 
     # Outcome resolution — check pending signals every 2h, first run 5 min after boot
     app.job_queue.run_repeating(outcome_resolution_job, interval=7200, first=300)

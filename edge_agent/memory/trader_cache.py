@@ -86,6 +86,8 @@ def _init_db(conn: sqlite3.Connection) -> None:
             consistency_score      REAL NOT NULL DEFAULT 0,
             fade_score             REAL NOT NULL DEFAULT 0,
             sizing_discipline      REAL NOT NULL DEFAULT 0,
+            gl_ratio               REAL NOT NULL DEFAULT 0,
+            copyable_win_rate      REAL NOT NULL DEFAULT 0,
             -- on-chain wallet signals (Polygon RPC + Goldsky subgraph)
             wallet_nonce           INTEGER NOT NULL DEFAULT -1,
             is_fresh_wallet        INTEGER NOT NULL DEFAULT 0,
@@ -104,6 +106,8 @@ def _init_db(conn: sqlite3.Connection) -> None:
         ("consistency_score",   "REAL NOT NULL DEFAULT 0"),
         ("fade_score",          "REAL NOT NULL DEFAULT 0"),
         ("sizing_discipline",   "REAL NOT NULL DEFAULT 0"),
+        ("gl_ratio",            "REAL NOT NULL DEFAULT 0"),
+        ("copyable_win_rate",   "REAL NOT NULL DEFAULT 0"),
         ("wallet_nonce",        "INTEGER NOT NULL DEFAULT -1"),
         ("is_fresh_wallet",     "INTEGER NOT NULL DEFAULT 0"),
         ("onchain_trade_count", "INTEGER NOT NULL DEFAULT 0"),
@@ -196,6 +200,26 @@ def _init_db(conn: sqlite3.Connection) -> None:
     )
 
     conn.commit()
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Singleton accessor — avoids creating a new SQLite connection on every call
+# ──────────────────────────────────────────────────────────────────────────────
+
+_instance: "TraderCache | None" = None
+
+
+def get_trader_cache() -> "TraderCache":
+    """Return the module-level TraderCache singleton.
+
+    This avoids creating a new SQLite connection + running all migrations
+    on every score_trader() call — important when ThreadPoolExecutor runs
+    25 wallets concurrently.
+    """
+    global _instance
+    if _instance is None:
+        _instance = TraderCache()
+    return _instance
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -443,8 +467,11 @@ class TraderCache:
         Return all watchlist entries, optionally filtered by who added them.
         Joined with latest score from trader_profiles if available.
         """
-        filter_clause = "WHERE w.added_by = ?" if added_by else ""
-        params: list[Any] = [added_by] if added_by else []
+        filter_clause = "AND w.added_by = ?" if added_by else ""
+        now = time.time()
+        params: list[Any] = [now]
+        if added_by:
+            params.append(added_by)
 
         rows = self._conn.execute(
             f"""
@@ -457,7 +484,8 @@ class TraderCache:
             FROM watchlist w
             LEFT JOIN trader_profiles tp
                 ON  tp.wallet_address = w.wallet_address
-                AND tp.expires_at > {time.time()}
+                AND tp.expires_at > ?
+            WHERE 1=1
             {filter_clause}
             ORDER BY w.added_at DESC
             """,

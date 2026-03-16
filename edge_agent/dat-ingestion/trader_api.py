@@ -68,6 +68,19 @@ _LOW_TRADE_PENALTY_N  = 20     # trades < this → scale performance score down
 _SESS = requests.Session()
 _SESS.headers.update({"Accept": "application/json", "User-Agent": "EdgeBot/1.0"})
 
+
+def _api_retry(func, *args, retries: int = 3, **kwargs):
+    """Retry an API call with exponential backoff. Returns result or raises last exception."""
+    last_exc: Exception | None = None
+    for attempt in range(retries):
+        try:
+            return func(*args, **kwargs)
+        except (requests.RequestException, ValueError) as exc:
+            last_exc = exc
+            if attempt < retries - 1:
+                time.sleep(2 ** attempt)  # 1s, 2s
+    raise last_exc  # type: ignore[misc]
+
 # ---------------------------------------------------------------------------
 # In-memory bot address cache  (survives the process lifetime, 24 h TTL)
 # ---------------------------------------------------------------------------
@@ -130,6 +143,10 @@ class TraderScore:
     fade_score:            float = 0.0
     # sizing discipline — bets bigger on wins than losses (0–1)
     sizing_discipline:     float = 0.0
+    # gain/loss ratio — avg win size ÷ avg loss size (>1.0 = wins bigger than losses)
+    gl_ratio:              float = 0.0
+    # copyable win rate — win rate weighted by position size (liquid market proxy)
+    copyable_win_rate:     float = 0.0
     # on-chain wallet signals (from Polygon RPC via wallet_chain.py)
     wallet_nonce:          int   = -1   # total Polygon tx count (-1 = unknown)
     is_fresh_wallet:       int   = 0    # 1 = new/throwaway wallet flag
@@ -230,13 +247,16 @@ class TraderAPIClient:
         if cached is not None:
             return cached
         try:
-            r = _SESS.get(
-                f"{_DATA_API}/v1/leaderboard",
-                params={"category": category, "limit": limit},
-                timeout=10,
-            )
-            r.raise_for_status()
-            data = r.json()
+            def _do_fetch():
+                r = _SESS.get(
+                    f"{_DATA_API}/v1/leaderboard",
+                    params={"category": category, "limit": limit},
+                    timeout=10,
+                )
+                r.raise_for_status()
+                return r.json()
+
+            data = _api_retry(_do_fetch)
             # API returns list directly or wrapped in {"leaderboard": [...]}
             if isinstance(data, list):
                 result = data
@@ -245,7 +265,7 @@ class TraderAPIClient:
             _save_cache(cache_key, result)
             return result
         except Exception as exc:
-            log.warning("Leaderboard fetch failed: %s", exc)
+            log.warning("Leaderboard fetch failed after retries: %s", exc)
             return []
 
     def fetch_wallet_trades(self, address: str, limit: int = 500) -> list[dict]:
@@ -259,34 +279,40 @@ class TraderAPIClient:
         all_records: list[dict] = []
         try:
             for offset in (0, 500):
-                r = _SESS.get(
-                    f"{_DATA_API}/v1/activity",
-                    params={"user": address.lower(), "limit": limit, "offset": offset},
-                    timeout=15,
-                )
-                r.raise_for_status()
-                data = r.json()
+                def _do_fetch(ofs=offset):
+                    r = _SESS.get(
+                        f"{_DATA_API}/v1/activity",
+                        params={"user": address.lower(), "limit": limit, "offset": ofs},
+                        timeout=15,
+                    )
+                    r.raise_for_status()
+                    return r.json()
+
+                data = _api_retry(_do_fetch)
                 page = data if isinstance(data, list) else data.get("data", [])
                 all_records.extend(page)
                 if len(page) < limit:
                     break   # no more pages
             return all_records
         except Exception as exc:
-            log.debug("Activity fetch failed for %s: %s", address[:10], exc)
+            log.debug("Activity fetch failed for %s after retries: %s", address[:10], exc)
             return all_records  # return whatever we got before the error
 
     def fetch_wallet_positions(self, address: str) -> list[dict]:
         try:
-            r = _SESS.get(
-                f"{_DATA_API}/v1/positions",
-                params={"user": address.lower()},
-                timeout=10,
-            )
-            r.raise_for_status()
-            data = r.json()
+            def _do_fetch():
+                r = _SESS.get(
+                    f"{_DATA_API}/v1/positions",
+                    params={"user": address.lower()},
+                    timeout=10,
+                )
+                r.raise_for_status()
+                return r.json()
+
+            data = _api_retry(_do_fetch)
             return data if isinstance(data, list) else data.get("data", [])
         except Exception as exc:
-            log.debug("Positions fetch failed for %s: %s", address[:10], exc)
+            log.debug("Positions fetch failed for %s after retries: %s", address[:10], exc)
             return []
 
     def _fetch_market_meta(self, condition_id: str) -> dict:
@@ -294,13 +320,16 @@ class TraderAPIClient:
         if cached is not None:
             return cached
         try:
-            r = _SESS.get(
-                f"{_GAMMA_API}/markets",
-                params={"conditionId": condition_id},
-                timeout=8,
-            )
-            r.raise_for_status()
-            data = r.json()
+            def _do_fetch():
+                r = _SESS.get(
+                    f"{_GAMMA_API}/markets",
+                    params={"conditionId": condition_id},
+                    timeout=8,
+                )
+                r.raise_for_status()
+                return r.json()
+
+            data = _api_retry(_do_fetch)
             meta = data[0] if isinstance(data, list) and data else (data or {})
             _save_cache(f"market_{condition_id}", meta)
             return meta
@@ -309,9 +338,13 @@ class TraderAPIClient:
 
     def _fetch_token_price(self, token_id: str) -> float:
         try:
-            r = _SESS.get(f"{_CLOB_API}/price/{token_id}", timeout=6)
-            r.raise_for_status()
-            return float(r.json().get("price", 0.5))
+            def _do_fetch():
+                r = _SESS.get(f"{_CLOB_API}/price/{token_id}", timeout=6)
+                r.raise_for_status()
+                return r.json()
+
+            data = _api_retry(_do_fetch)
+            return float(data.get("price", 0.5))
         except Exception:
             return 0.5  # unknown → assume mid
 
@@ -691,6 +724,64 @@ class TraderAPIClient:
         avg_pos     = effective_vol / max(n_activity, 1)
         size_factor = min(avg_pos / 20.0, 1.0)   # full credit at $20+ avg
 
+        # ── Gain/Loss ratio ───────────────────────────────────────────────────
+        # Avg profit per winning market ÷ avg loss per losing market.
+        # A wallet winning $200 avg and losing $50 avg has GL=4.0 — real edge.
+        # A wallet winning $50 avg and losing $200 avg has GL=0.25 — gambling.
+        win_amounts  = [market_receipts.get(c, 0.0) - market_costs[c]
+                        for c in countable_markets
+                        if market_receipts.get(c, 0.0) > market_costs[c]]
+        loss_amounts = [market_costs[c] - market_receipts.get(c, 0.0)
+                        for c in countable_markets
+                        if market_receipts.get(c, 0.0) <= market_costs[c] and c in market_receipts]
+        avg_win_size  = sum(win_amounts)  / len(win_amounts)  if win_amounts  else 0.0
+        avg_loss_size = sum(loss_amounts) / len(loss_amounts) if loss_amounts else 1.0
+        gl_ratio      = avg_win_size / max(avg_loss_size, 0.01)
+        # Normalise: GL=1.0 → 0.33 score | GL=2.0 → 0.67 | GL=3.0+ → 1.0
+        gl_score      = round(min(gl_ratio / 3.0, 1.0), 4)
+
+        # ── Consistency score ────────────────────────────────────────────────
+        # Low coefficient of variation in per-market PnL = steady earner (good).
+        # High CV = gambler who got lucky on a few big bets (bad).
+        all_pnl_values = (
+            [market_receipts.get(c, 0.0) - market_costs[c] for c in countable_markets]
+        )
+        if len(all_pnl_values) >= 5:
+            pnl_mean = sum(all_pnl_values) / len(all_pnl_values)
+            pnl_var  = sum((x - pnl_mean) ** 2 for x in all_pnl_values) / (len(all_pnl_values) - 1)
+            pnl_std  = math.sqrt(pnl_var) if pnl_var > 0 else 0.0
+            cv_pnl   = pnl_std / max(abs(pnl_mean), 0.01)
+            consistency_score = round(max(0.0, 1.0 - min(cv_pnl / 2.0, 1.0)), 4)
+        else:
+            consistency_score = 0.0
+
+        # ── Sizing discipline ────────────────────────────────────────────────
+        # Do they bet bigger on wins than losses?  avg_win_stake / avg_loss_stake
+        # Ratio > 1.0 = Kelly-like behaviour — sizing up when confident.
+        # Ratio < 1.0 = sizing up on losers (martingale / tilt).
+        win_stakes  = [market_costs[c] for c in countable_markets
+                       if market_receipts.get(c, 0.0) > market_costs[c]]
+        loss_stakes = [market_costs[c] for c in countable_markets
+                       if market_receipts.get(c, 0.0) <= market_costs[c] and c in market_receipts]
+        avg_win_stake  = sum(win_stakes)  / len(win_stakes)  if win_stakes  else 0.0
+        avg_loss_stake = sum(loss_stakes) / len(loss_stakes) if loss_stakes else 1.0
+        sizing_ratio    = avg_win_stake / max(avg_loss_stake, 0.01)
+        sizing_discipline = round(min(sizing_ratio / 2.0, 1.0), 4)
+
+        # ── Liquid / copyable market weighting ───────────────────────────────
+        # Wins from large positions (>$50 staked) count as fully copyable.
+        # Wins from micro positions (<$5) count near-zero — too thin to follow.
+        # This penalises wallets that farm tiny illiquid markets where the user
+        # can't enter at a reasonable price even if they wanted to copy.
+        _COPY_FLOOR = 5.0    # below this stake = essentially uncopyable
+        _COPY_FULL  = 50.0   # at/above this stake = fully copyable
+        weighted_wins = sum(
+            min(max(market_costs[c] - _COPY_FLOOR, 0.0) / (_COPY_FULL - _COPY_FLOOR), 1.0)
+            for c in countable_markets
+            if market_receipts.get(c, 0.0) > market_costs[c]
+        )
+        copyable_win_rate = round(weighted_wins / max(n_settled, 1), 4)
+
         # ── Low-trade penalty (ltp) — fixed floor so lb-verified traders ─────
         # aren't crushed just because our 500-record activity sample is thin.
         # Floor: lb_vol / $100k → a $100k+ leaderboard trader gets ltp ≥ 0.5
@@ -698,9 +789,19 @@ class TraderAPIClient:
         ltp_from_volume   = min(effective_vol / 100_000, 0.7)
         ltp = max(ltp_from_activity, ltp_from_volume)
 
-        perf_raw = (win_rate   * 0.40
-                    + min(max(roi + 0.5, 0), 1) * 0.40
-                    + size_factor              * 0.20)
+        perf_raw = (win_rate          * 0.40   # consistency — must win regularly
+                    + gl_score          * 0.20   # win bigger than you lose (new)
+                    + copyable_win_rate * 0.15   # wins in liquid copyable markets (new)
+                    + min(max(roi + 0.5, 0), 1) * 0.15   # overall ROI
+                    + size_factor       * 0.10)  # position discipline
+
+        # Hard win-rate gate: sub-55% with enough sample = no consistent edge
+        # Big PnL from a few lucky wins doesn't make someone smart money
+        _MIN_WIN_RATE   = 0.55
+        _MIN_SAMPLE     = 15          # need at least 15 settled trades to apply gate
+        if win_rate < _MIN_WIN_RATE and n_settled >= _MIN_SAMPLE:
+            perf_raw *= 0.50          # 50% penalty — dragged well below passing grade
+
         perf_score = min(perf_raw * max(ltp, 0.15), 1.0)   # hard floor of 0.15 on ltp
 
         # ── Category specialization ───────────────────────────────────────────
@@ -754,8 +855,29 @@ class TraderAPIClient:
             "volume": round(effective_vol, 2),
             "n_countable_markets": n_settled,          # denominator used for win rate
         }
-        d30_stats = {"wins": 0, "losses": 0, "win_rate": 0.0, "pnl": 0.0, "volume": vol_30d}
-        d7_stats  = {"wins": 0, "losses": 0, "win_rate": 0.0, "pnl": 0.0, "volume": vol_7d}
+        # ── 30d / 7d windowed win rates ─────────────────────────────────────
+        # Re-filter countable markets by close timestamp for time-windowed stats.
+        # Enables momentum detection: alltime 70% but 30d 45% = declining wallet.
+        def _windowed_wr(cutoff_ms: float) -> dict:
+            w_markets = {
+                c for c in countable_markets
+                if market_close_ts.get(c, market_oldest_ts.get(c, 0.0)) >= cutoff_ms
+            }
+            if not w_markets:
+                return {"wins": 0, "losses": 0, "win_rate": 0.0}
+            w_wins = sum(1 for c in w_markets
+                         if market_receipts.get(c, 0.0) > market_costs[c])
+            w_total = len(w_markets)
+            return {
+                "wins": w_wins,
+                "losses": w_total - w_wins,
+                "win_rate": round(w_wins / w_total, 4),
+            }
+
+        wr_30d = _windowed_wr(day30)
+        wr_7d  = _windowed_wr(day7)
+        d30_stats = {**wr_30d, "pnl": 0.0, "volume": vol_30d}
+        d7_stats  = {**wr_7d,  "pnl": 0.0, "volume": vol_7d}
 
         return {
             "alltime":           all_stats,
@@ -771,9 +893,11 @@ class TraderAPIClient:
             "avg_pos_size":      round(avg_pos, 2),
             "top_categories":    top_cats,
             "timing_score":      timing_score,
-            "consistency_score": 0.0,
+            "consistency_score": consistency_score,
             "fade_score":        fade_score,
-            "sizing_discipline": 0.0,
+            "sizing_discipline": sizing_discipline,
+            "gl_ratio":          round(gl_ratio, 4),
+            "copyable_win_rate": copyable_win_rate,
             "strategy_tag":      strategy_tag,
         }
 
@@ -799,7 +923,7 @@ class TraderAPIClient:
         Full wallet vet.  Fetches trades + positions, computes all sub-scores,
         persists to TraderCache, and returns a TraderScore.
         """
-        from edge_agent.memory.trader_cache import TraderCache
+        from edge_agent.memory.trader_cache import get_trader_cache
 
         address = address.lower().strip()
         profile = profile or {}
@@ -838,6 +962,7 @@ class TraderAPIClient:
             bot_sc = max(0.0, bot_sc - 0.20)
             log.debug("Goldsky burst flag applied for %s…", address[:10])
 
+        # ── Base composite score ──────────────────────────────────────────
         final = (bot_sc * 0.25 + perf["perf_score"] * 0.50 + rel_sc * 0.25)
 
         # Fresh-wallet penalty: new throwaway wallets get trust deducted
@@ -870,6 +995,8 @@ class TraderAPIClient:
             consistency_score      = perf["consistency_score"],
             fade_score             = perf["fade_score"],
             sizing_discipline      = perf["sizing_discipline"],
+            gl_ratio               = perf["gl_ratio"],
+            copyable_win_rate      = perf["copyable_win_rate"],
             # on-chain wallet signals
             wallet_nonce           = chain["nonce"],
             is_fresh_wallet        = int(chain["is_fresh"]),
@@ -883,7 +1010,7 @@ class TraderAPIClient:
             _mark_bot(address)
 
         try:
-            TraderCache().upsert(ts.to_dict())
+            get_trader_cache().upsert(ts.to_dict())
         except Exception as exc:
             log.debug("TraderCache upsert failed: %s", exc)
 
@@ -905,8 +1032,8 @@ class TraderAPIClient:
         lb = self.fetch_leaderboard(category=category, limit=100)
         if not lb:
             # Fall back to cached results
-            from edge_agent.memory.trader_cache import TraderCache
-            cached = TraderCache().get_top(limit)
+            from edge_agent.memory.trader_cache import get_trader_cache
+            cached = get_trader_cache().get_top(limit)
             return [TraderScore(**{k: v for k, v in r.items()
                                    if k in TraderScore.__dataclass_fields__})
                     for r in cached]
@@ -956,12 +1083,13 @@ class TraderAPIClient:
     # ------------------------------------------------------------------
 
     # Leaderboard categories to sweep — maps our internal name → API param value
+    # Updated 2026-03-15: Polymarket retired PROFIT/VOLUME/MONTHLY/WEEKLY/DAILY.
+    # Current valid categories: OVERALL, SPORTS, CRYPTO, POLITICS (case-insensitive).
     _SWEEP_CATEGORIES: dict[str, str] = {
-        "profit":   "PROFIT",
-        "volume":   "VOLUME",
-        "monthly":  "MONTHLY",
-        "weekly":   "WEEKLY",
-        "daily":    "DAILY",
+        "overall":  "OVERALL",
+        "sports":   "SPORTS",
+        "crypto":   "CRYPTO",
+        "politics": "POLITICS",
     }
 
     def discovery_sweep(
@@ -986,8 +1114,8 @@ class TraderAPIClient:
 
         Returns summary dict: {category: count_added, ...}
         """
-        from edge_agent.memory.trader_cache import TraderCache
-        cache = TraderCache()
+        from edge_agent.memory.trader_cache import get_trader_cache
+        cache = get_trader_cache()
         summary: dict[str, Any] = {}
         seen: set[str] = set()   # deduplicate across categories
 

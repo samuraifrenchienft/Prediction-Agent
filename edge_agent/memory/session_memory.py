@@ -162,7 +162,7 @@ class SessionMemory:
         exchange = {
             "time": datetime.now(timezone.utc).strftime("%H:%M"),
             "q": question[:300],   # cap length for storage
-            "a": answer[:600],
+            "a": answer[:1000],
         }
         if topics:
             exchange["topics"] = topics
@@ -209,14 +209,25 @@ class SessionMemory:
             for ex in exchanges:
                 parts.append(f"  [{ex['time']}] User: {ex['q']}")
                 parts.append(
-                    f"           Edge: {ex['a'][:200]}"
-                    f"{'...' if len(ex['a']) > 200 else ''}"
+                    f"           Edge: {ex['a'][:400]}"
+                    f"{'...' if len(ex['a']) > 400 else ''}"
                 )
 
         if not parts:
             return ""
 
         return "\n\nSession context:\n" + "\n".join(parts)
+
+    def get_last_bot_question(self) -> str | None:
+        """Return the last bot answer if it contained a question mark, else None."""
+        data = self._get_today()
+        exchanges = data["exchanges"]
+        if not exchanges:
+            return None
+        last_a = exchanges[-1].get("a", "")
+        if "?" in last_a:
+            return last_a
+        return None
 
     def get_markets_discussed(self) -> list[str]:
         return self._get_today()["markets"]

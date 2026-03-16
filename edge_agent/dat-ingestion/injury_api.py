@@ -452,9 +452,23 @@ class InjuryAPIClient:
         else:
             url = _ESPN_NFL
 
-        resp = requests.get(url, headers=_HEADERS, timeout=15)
-        resp.raise_for_status()
-        raw = resp.json()
+        # Retry with exponential backoff — ESPN API is occasionally flaky
+        raw = None
+        last_exc: Exception | None = None
+        for attempt in range(3):
+            try:
+                resp = requests.get(url, headers=_HEADERS, timeout=15)
+                resp.raise_for_status()
+                raw = resp.json()
+                break
+            except (requests.RequestException, ValueError) as exc:
+                last_exc = exc
+                if attempt < 2:
+                    time.sleep(2 ** attempt)  # 1s, 2s
+                    log.debug("[InjuryAPI] ESPN %s attempt %d failed: %s — retrying", sport, attempt + 1, exc)
+        if raw is None:
+            log.warning("[InjuryAPI] ESPN %s: all 3 attempts failed: %s", sport, last_exc)
+            return []
 
         records: list[dict] = []
         for team_block in raw.get("injuries", []):
@@ -583,12 +597,20 @@ class InjuryAPIClient:
                 pass
 
         url = _SLEEPER_NFL if sport_lower == "nfl" else _SLEEPER_NBA
-        try:
-            resp = requests.get(url, headers=_HEADERS, timeout=25)
-            resp.raise_for_status()
-            raw = resp.json()
-        except Exception as exc:
-            log.warning("[InjuryAPI] Sleeper %s fetch failed: %s", sport.upper(), exc)
+        raw = None
+        for attempt in range(3):
+            try:
+                resp = requests.get(url, headers=_HEADERS, timeout=25)
+                resp.raise_for_status()
+                raw = resp.json()
+                break
+            except Exception as exc:
+                if attempt < 2:
+                    time.sleep(2 ** attempt)
+                    log.debug("[InjuryAPI] Sleeper %s attempt %d failed: %s — retrying", sport.upper(), attempt + 1, exc)
+                else:
+                    log.warning("[InjuryAPI] Sleeper %s: all 3 attempts failed: %s", sport.upper(), exc)
+        if raw is None:
             return {}
 
         result: dict[str, dict] = {}

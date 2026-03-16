@@ -7,6 +7,7 @@ CLOB (order book):     https://clob.polymarket.com
 
 from __future__ import annotations
 
+import json as _json
 import requests
 
 GAMMA_BASE = "https://gamma-api.polymarket.com"
@@ -52,13 +53,20 @@ def parse_market_prob(market: dict) -> float:
     """
     try:
         prices = market.get("outcomePrices", [])
+        # Gamma API returns outcomePrices as a JSON-encoded string like
+        # '["0.45","0.55"]' — must parse before indexing.
+        if isinstance(prices, str):
+            try:
+                prices = _json.loads(prices)
+            except (_json.JSONDecodeError, ValueError):
+                prices = []
         if prices:
             return round(float(prices[0]), 4)
         # Fallback only if outcomePrices missing entirely
         last = market.get("lastTradePrice")
         if last is not None:
             return round(float(last), 4)
-    except (ValueError, TypeError):
+    except (ValueError, TypeError, IndexError):
         pass
     return 0.5
 
@@ -70,10 +78,16 @@ def parse_spread_bps(market: dict) -> float:
         if spread is not None:
             return round(float(spread) * 10000, 1)
         prices = market.get("outcomePrices", [])
+        # Gamma API returns outcomePrices as a JSON-encoded string
+        if isinstance(prices, str):
+            try:
+                prices = _json.loads(prices)
+            except (_json.JSONDecodeError, ValueError):
+                prices = []
         if len(prices) >= 2:
             spread_raw = abs(1.0 - (float(prices[0]) + float(prices[1])))
             return round(spread_raw * 10000, 1)
-    except (ValueError, TypeError):
+    except (ValueError, TypeError, IndexError):
         pass
     return 150.0
 

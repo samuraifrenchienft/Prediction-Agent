@@ -385,8 +385,14 @@ _FACT_PATTERNS: list[tuple[str, str, Any]] = [
     ),
 
     # ── Location / city ───────────────────────────────────────────────────────
+    # IMPORTANT: Requires a locational intent phrase BEFORE the city name.
+    # Without this, "Brooklyn Nets" would store "Brooklyn" as the user's city,
+    # "Los Angeles Lakers" would store "Los Angeles", etc.
     (
-        r"\b(new york|brooklyn|los angeles|chicago|houston|phoenix|dallas|"
+        r"(?:i(?:'m| am) (?:from|in|based in)|i live in|"
+        r"(?:i )?(?:live|based|located) in|moved to|"
+        r"i(?:'m| am) out of|born in|grew up in|stay in|reside in)\s+"
+        r"(new york|brooklyn|los angeles|chicago|houston|phoenix|dallas|"
         r"san francisco|miami|boston|seattle|denver|atlanta|"
         r"philadelphia|toronto|portland|minneapolis|oklahoma city|"
         r"memphis|new orleans|sacramento|san antonio|orlando|"
@@ -692,6 +698,55 @@ class UserProfileStore:
                 (json.dumps(prefs), user_id),
             )
 
+    # ── Fact management ──────────────────────────────────────────────────────
+
+    def get_facts(self, user_id: int) -> dict[str, list[str]]:
+        """Return the raw facts dict for a user (empty dict if unknown)."""
+        profile = self.get_or_create(user_id)
+        return profile.get("facts", {})
+
+    def remove_fact(
+        self, user_id: int, fact_key: str, value: str | None = None
+    ) -> bool:
+        """
+        Remove a specific value from a fact list, or clear the entire key.
+
+        Args:
+            user_id:  Telegram user ID
+            fact_key: e.g. "city", "fav_nba_teams", "fav_players"
+            value:    specific value to remove (case-insensitive match).
+                      If None, removes the entire key.
+        Returns:
+            True if something was removed, False if key/value not found.
+        """
+        profile = self.get_or_create(user_id)
+        facts = profile["facts"]
+        if fact_key not in facts:
+            return False
+
+        if value is None:
+            # Remove entire key
+            del facts[fact_key]
+        else:
+            existing = facts[fact_key]
+            # Case-insensitive match
+            match = [v for v in existing if v.lower() == value.lower()]
+            if not match:
+                return False
+            for v in match:
+                existing.remove(v)
+            if not existing:
+                del facts[fact_key]
+            else:
+                facts[fact_key] = existing
+
+        with self._conn:
+            self._conn.execute(
+                "UPDATE user_profiles SET facts = ? WHERE user_id = ?",
+                (json.dumps(facts), user_id),
+            )
+        return True
+
     # ── Context for AI prompt ─────────────────────────────────────────────────
 
     def get_profile_context(self, user_id: int) -> str:
@@ -871,12 +926,25 @@ class UserProfileStore:
                     "do not ask them all at once."
                 )
 
+        # Add location inference guard if teams are known but city is not
+        has_teams = any(facts.get(k) for k in (
+            "fav_nba_teams", "fav_nfl_teams", "fav_mlb_teams", "fav_nhl_teams",
+            "fav_cfb_teams", "fav_cbb_teams", "fav_mls_teams",
+        ))
+        location_guard = ""
+        if has_teams and not cities:
+            location_guard = (
+                "\n⚠️ You do NOT know where this user lives. "
+                "Do NOT assume their city or timezone from their favorite team."
+            )
+
         return (
             f"\n\n[What you know about {name}]\n"
             + "\n".join(lines)
             + "\nReference these naturally, like a knowledgeable friend would — "
             "not like reading from a file. Express genuine emotion when relevant "
             "(concern for their fav player's injury, excitement for their team's win)."
+            + location_guard
             + onboard_hint
         )
 

@@ -86,10 +86,21 @@ def _encode_signal_type(signal_type: str) -> int:
 
 
 def _to_feature_vector(row: dict[str, Any]) -> list[float]:
+    """
+    Convert a feature dict to a numeric vector for XGBoost.
+
+    Missing probability features use float('nan') so XGBoost's native
+    missing-value handling kicks in (treats NaN as "missing" and learns
+    optimal split directions automatically). This is better than a sentinel
+    like -1.0 which the tree would treat as a real value, or 0.5 which
+    biases toward mid-probability.
+    """
+    import math
+    _nan = float("nan")
     return [
-        float(row.get("raw_confidence", 0.5)),
+        float(row["raw_confidence"]) if row.get("raw_confidence") is not None else _nan,
         float(row.get("ev_net", 0.0)),
-        float(row.get("market_prob", 0.5)),
+        float(row["market_prob"]) if row.get("market_prob") is not None else _nan,
         float(row.get("depth_usd", 0.0)),
         float(row.get("spread_bps", 0.0)),
         float(row.get("ttr_hours", 0.0)),

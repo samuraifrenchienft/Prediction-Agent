@@ -175,6 +175,28 @@ def _get_scanner():
     return _scanner
 
 
+def _fetch_all_open_markets_discord(limit: int = 200) -> list[dict]:
+    """
+    Fetch open markets from Kalshi for specialist scanners (weather/crypto/econ).
+    Returns normalised list of dicts: {title, price, ticker, venue}.
+    """
+    markets: list[dict] = []
+    try:
+        _kalshi = importlib.import_module("edge_agent.dat-ingestion.kalshi_api")
+        ka      = _kalshi.KalshiAPIClient()
+        raw     = ka.get_markets(status="open", limit=limit)
+        for m in (raw or []):
+            markets.append({
+                "title":  m.get("title", m.get("question", "")),
+                "price":  float(m.get("yes_bid", m.get("last_price", 0.5)) or 0.5),
+                "ticker": m.get("ticker", m.get("id", "")),
+                "venue":  "kalshi",
+            })
+    except Exception as exc:
+        log.debug("[Discord/SpecialistScan] Market fetch failed: %s", exc)
+    return markets
+
+
 # ---------------------------------------------------------------------------
 # Discord embed formatters
 # ---------------------------------------------------------------------------
@@ -345,7 +367,7 @@ async def _ai_reply(
     """Build context and get an AI response — full feature parity with Telegram."""
     import time as _time
     t_start = _time.time()
-    loop = asyncio.get_event_loop()
+    loop = asyncio.get_running_loop()
 
     mem      = _get_session(user_id)
     kb_ctx   = _kb.get_context_for_question(user_msg)
@@ -435,7 +457,7 @@ async def _run_scan(bot: discord.Client, notify: bool = True) -> str:
     if scanner is None:
         return "Scanner not available"
 
-    loop = asyncio.get_event_loop()
+    loop = asyncio.get_running_loop()
     try:
         inputs       = await loop.run_in_executor(None, scanner.collect)
         recs, summary = await loop.run_in_executor(
@@ -499,26 +521,55 @@ class _AlertView(discord.ui.View):
     async def no_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
         await self._handle(interaction, "NO")
 
-    async def _handle(self, interaction: discord.Interaction, side: str):
+    @discord.ui.button(label="🔄 Fade", style=discord.ButtonStyle.secondary, custom_id="pt_fade")
+    async def fade_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        """Take the opposite side of what the bot recommended."""
+        rec       = self._rec
+        bot_side  = "YES" if "YES" in (rec.action or "").upper() else "NO"
+        fade_side = "NO"  if bot_side == "YES" else "YES"
+        await self._handle(interaction, f"FADE_{fade_side}", fade_side=fade_side, bot_side=bot_side)
+
+    @discord.ui.button(label="⏭ Skip", style=discord.ButtonStyle.secondary, custom_id="pt_skip")
+    async def skip_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.send_message("Skipped — no pick recorded.", ephemeral=True)
+
+    async def _handle(
+        self,
+        interaction: discord.Interaction,
+        side: str,
+        fade_side: str | None = None,
+        bot_side:  str | None = None,
+    ):
         uid   = interaction.user.id
         rec   = self._rec
-        prob  = rec.market_prob
+        prob  = rec.market_prob or 0.5
         stake = 10.0
         ok    = _ot.record_user_pick(
             user_id      = uid,
             signal_id    = rec.market_id,
             market_id    = rec.market_id,
-            side         = side,
+            side         = side,           # "YES" | "NO" | "FADE_YES" | "FADE_NO"
             paper_stake  = stake,
             entry_prob   = prob,
         )
         if ok:
-            payout = round(stake * (1 / prob - 1), 2) if side == "YES" else round(stake * (1 / (1 - prob) - 1), 2)
-            await interaction.response.send_message(
-                f"📝 Paper trade logged — **{side}** $10 @ {prob:.0%}\n"
-                f"Potential payout: **${payout:.2f}**",
-                ephemeral=True,
-            )
+            if fade_side:
+                # Fade: price flips to the opposite side
+                f_prob = (1 - prob) if fade_side == "YES" else prob
+                payout = round(stake * (1 / max(f_prob, 0.01) - 1), 2)
+                await interaction.response.send_message(
+                    f"🔄 **Fade logged** — you took **{fade_side}** against the bot's {bot_side}\n"
+                    f"Paper $10 @ {f_prob:.0%} — Win = **+${payout:.2f}** | Loss = -$10.00\n"
+                    f"EDGE will track resolution automatically.",
+                    ephemeral=True,
+                )
+            else:
+                payout = round(stake * (1 / prob - 1), 2) if side == "YES" else round(stake * (1 / (1 - prob) - 1), 2)
+                await interaction.response.send_message(
+                    f"📝 Paper trade logged — **{side}** $10 @ {prob:.0%}\n"
+                    f"Potential payout: **${payout:.2f}**",
+                    ephemeral=True,
+                )
         else:
             await interaction.response.send_message(
                 "You already picked this one!", ephemeral=True
@@ -608,7 +659,7 @@ async def injury_job():
 
         for sport in sports:
             try:
-                fresh = await asyncio.get_event_loop().run_in_executor(
+                fresh = await asyncio.get_running_loop().run_in_executor(
                     None, lambda s=sport: _injury_api.fetch_and_store(s)
                 )
                 if not fresh:
@@ -640,7 +691,7 @@ async def injury_job():
 async def resolution_job():
     """Resolve pending paper trade picks."""
     try:
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
         await loop.run_in_executor(None, _ot.resolve_pending)
     except Exception as exc:
         log.warning("resolution_job error: %s", exc)
@@ -656,7 +707,7 @@ async def smart_money_job():
         if not traders:
             return
         _trader_api = importlib.import_module("edge_agent.dat-ingestion.trader_api")
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
         new_positions: dict = {}
         for t in traders:
             addr  = t.get("wallet_address", "")
@@ -1008,7 +1059,7 @@ async def cmd_wallet(interaction: discord.Interaction, address: str):
     await interaction.response.defer()
     try:
         _trader_mod = importlib.import_module("edge_agent.dat-ingestion.trader_api")
-        loop   = asyncio.get_event_loop()
+        loop   = asyncio.get_running_loop()
         result = await loop.run_in_executor(
             None, lambda: _trader_mod.vet_wallet(address)
         )
@@ -1113,7 +1164,7 @@ async def cmd_standings(interaction: discord.Interaction, sport: str = "nba"):
         await interaction.followup.send("Standings module not available.")
         return
     try:
-        loop    = asyncio.get_event_loop()
+        loop    = asyncio.get_running_loop()
         client  = _standings_mod.StandingsClient()
         text    = await loop.run_in_executor(None, lambda: client.format_standings(sport.lower()))
         if len(text) > 1900:
@@ -1207,7 +1258,7 @@ async def cmd_tracking(interaction: discord.Interaction):
     await interaction.response.defer()
     try:
         from edge_agent.game_tracker import GameTracker
-        loop    = asyncio.get_event_loop()
+        loop    = asyncio.get_running_loop()
         tracker = GameTracker()
         games   = await loop.run_in_executor(None, tracker.get_tracked_games)
         if not games:
@@ -1287,7 +1338,7 @@ async def cmd_mlstatus(interaction: discord.Interaction):
         return
     await interaction.response.defer(ephemeral=True)
     try:
-        loop    = asyncio.get_event_loop()
+        loop    = asyncio.get_running_loop()
         labeled = await loop.run_in_executor(
             None, lambda: _ml_store.get_labeled_features(min_samples=0, days=180)
         )
@@ -1384,6 +1435,97 @@ async def cmd_approvals(interaction: discord.Interaction, action: str = "list", 
         )
 
 
+@bot.tree.command(name="weatherscan", description="Scan weather markets vs Open-Meteo 7-day forecast")
+async def cmd_weatherscan(interaction: discord.Interaction):
+    if not _registry.is_allowed(interaction.user.id):
+        await interaction.response.send_message("❌ Not authorised.", ephemeral=True)
+        return
+    await interaction.response.defer()
+    try:
+        from edge_agent.scanners.weather_scanner import scan_weather_markets
+        markets = await asyncio.get_running_loop().run_in_executor(None, _fetch_all_open_markets_discord)
+        gaps    = await asyncio.get_running_loop().run_in_executor(None, scan_weather_markets, markets)
+        if not gaps:
+            await interaction.followup.send(
+                "✅ No weather market gaps detected (all within 15pp of Open-Meteo model)."
+            )
+            return
+        lines = [f"**🌤️ Weather Market Gaps — {len(gaps)} found**\n"]
+        for g in gaps[:5]:
+            cond = {"temp_above": "🌡️", "temp_below": "🥶", "snow": "❄️", "rain": "🌧️"}.get(g.condition, "🌤️")
+            act  = "📈 BUY YES" if g.action == "BUY YES" else "📉 BUY NO"
+            lines.append(
+                f"{cond} **{g.title[:65]}**\n"
+                f"  Market {g.market_prob:.0%} → Model {g.model_prob:.0%} ({g.gap_pp:+.0f}pp) → {act}\n"
+                f"  📍 {g.city} | {g.forecast_summary}\n"
+            )
+        await interaction.followup.send("\n".join(lines)[:1900])
+    except Exception as exc:
+        await interaction.followup.send(f"⚠️ Weather scan error: {exc}")
+
+
+@bot.tree.command(name="cryptoscan", description="Scan crypto markets vs Binance lognormal model")
+async def cmd_cryptoscan(interaction: discord.Interaction):
+    if not _registry.is_allowed(interaction.user.id):
+        await interaction.response.send_message("❌ Not authorised.", ephemeral=True)
+        return
+    await interaction.response.defer()
+    try:
+        from edge_agent.scanners.crypto_scanner import scan_crypto_markets
+        markets = await asyncio.get_running_loop().run_in_executor(None, _fetch_all_open_markets_discord)
+        gaps    = await asyncio.get_running_loop().run_in_executor(None, scan_crypto_markets, markets)
+        if not gaps:
+            await interaction.followup.send(
+                "✅ No crypto market gaps detected (all within 15pp of lognormal model)."
+            )
+            return
+        lines = [f"**₿ Crypto Market Gaps — {len(gaps)} found**\n"]
+        for g in gaps[:5]:
+            sym = g.symbol.replace("USDT", "")
+            act = "📈 BUY YES" if g.action == "BUY YES" else "📉 BUY NO"
+            lines.append(
+                f"**{g.title[:65]}**\n"
+                f"  {sym}: ${g.current_price:,.2f} | 24h {g.change_24h:+.1f}%\n"
+                f"  Market {g.market_prob:.0%} → Model {g.model_prob:.0%} ({g.gap_pp:+.0f}pp) → {act}\n"
+            )
+        await interaction.followup.send("\n".join(lines)[:1900])
+    except Exception as exc:
+        await interaction.followup.send(f"⚠️ Crypto scan error: {exc}")
+
+
+@bot.tree.command(name="fedscan", description="Scan Fed/econ markets vs NY Fed + Treasury yield curve")
+async def cmd_fedscan(interaction: discord.Interaction):
+    if not _registry.is_allowed(interaction.user.id):
+        await interaction.response.send_message("❌ Not authorised.", ephemeral=True)
+        return
+    await interaction.response.defer()
+    try:
+        from edge_agent.scanners.econ_scanner import scan_econ_markets, get_econ_context_string
+        econ_ctx = await asyncio.get_running_loop().run_in_executor(None, get_econ_context_string)
+        markets  = await asyncio.get_running_loop().run_in_executor(None, _fetch_all_open_markets_discord)
+        gaps     = await asyncio.get_running_loop().run_in_executor(None, scan_econ_markets, markets)
+        cat_emoji = {"fed_rate": "🏦", "inflation": "📈", "recession": "📉",
+                     "unemployment": "👷", "gdp": "📊"}
+        lines = ["**🏛️ Fed / Econ Market Scan**\n"]
+        if econ_ctx:
+            lines.append(f"```\n{econ_ctx}\n```\n")
+        if not gaps:
+            lines.append("✅ No econ market gaps detected (all within 15pp of yield curve model).")
+        else:
+            lines.append(f"**{len(gaps)} gap(s) found:**\n")
+            for g in gaps[:5]:
+                ce  = cat_emoji.get(g.category, "🏛️")
+                act = "📈 BUY YES" if g.action == "BUY YES" else "📉 BUY NO"
+                lines.append(
+                    f"{ce} **{g.title[:65]}**\n"
+                    f"  Market {g.market_prob:.0%} → Model {g.model_prob:.0%} ({g.gap_pp:+.0f}pp) → {act}\n"
+                    f"  *{g.signal_notes[:80]}*\n"
+                )
+        await interaction.followup.send("\n".join(lines)[:1900])
+    except Exception as exc:
+        await interaction.followup.send(f"⚠️ Fed scan error: {exc}")
+
+
 @bot.tree.command(name="help", description="Show all available commands")
 async def cmd_help(interaction: discord.Interaction):
     embed = discord.Embed(
@@ -1423,6 +1565,16 @@ async def cmd_help(interaction: discord.Interaction):
         inline=False,
     )
     embed.add_field(
+        name  = "🌤️ Specialist Scanners",
+        value = (
+            "`/weatherscan` — weather markets vs Open-Meteo forecast\n"
+            "`/cryptoscan` — crypto markets vs Binance lognormal model\n"
+            "`/fedscan` — Fed/econ markets vs NY Fed + yield curve\n"
+            "Auto-scan runs every 4h and alerts to this channel"
+        ),
+        inline=False,
+    )
+    embed.add_field(
         name  = "🚨 Insider Alerts",
         value = (
             "`/insider` — recent whale/insider bet alerts\n"
@@ -1440,7 +1592,7 @@ async def cmd_help(interaction: discord.Interaction):
         value = "Just type anything in this channel — EDGE is always listening",
         inline=False,
     )
-    embed.set_footer(text="Copy-trade + insider alerts auto-fire to your channel")
+    embed.set_footer(text="Copy-trade + insider + specialist alerts auto-fire to your channel")
     await interaction.response.send_message(embed=embed)
 
 
