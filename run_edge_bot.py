@@ -69,9 +69,11 @@ from pathlib import Path
 
 try:
     from zoneinfo import ZoneInfo
+
     _PACIFIC = ZoneInfo("America/Los_Angeles")
 except ImportError:
     import datetime as _dt
+
     _PACIFIC = _dt.timezone(_dt.timedelta(hours=-8))  # PST fallback (no DST)
 
 from dotenv import load_dotenv
@@ -101,14 +103,14 @@ from edge_agent.memory import KnowledgeBase, SessionMemory
 from edge_agent.game_tracker import TrackedGame
 from edge_agent.models import Recommendation
 
-_kalshi_api      = importlib.import_module(".dat-ingestion.kalshi_api",   "edge_agent")
-_injury_mod      = importlib.import_module(".dat-ingestion.injury_api",   "edge_agent")
-_InjuryClient    = _injury_mod.InjuryAPIClient
-_standings_mod   = importlib.import_module(".dat-ingestion.standings_api", "edge_agent")
+_kalshi_api = importlib.import_module(".dat-ingestion.kalshi_api", "edge_agent")
+_injury_mod = importlib.import_module(".dat-ingestion.injury_api", "edge_agent")
+_InjuryClient = _injury_mod.InjuryAPIClient
+_standings_mod = importlib.import_module(".dat-ingestion.standings_api", "edge_agent")
 _StandingsClient = _standings_mod.StandingsClient
-_standings_client = _StandingsClient()   # singleton
+_standings_client = _StandingsClient()  # singleton
 
-_trader_mod   = importlib.import_module(".dat-ingestion.trader_api", "edge_agent")
+_trader_mod = importlib.import_module(".dat-ingestion.trader_api", "edge_agent")
 _TraderClient = _trader_mod.TraderAPIClient
 
 # ---------------------------------------------------------------------------
@@ -131,10 +133,10 @@ from edge_agent.scanners.econ_scanner import (
 )
 
 # Scanner alert dedup keys — prevents re-alerting same gap within cooldown window
-_WEATHER_ALERTED: dict[str, float] = {}   # ticker → last_alerted unix ts
-_CRYPTO_ALERTED:  dict[str, float] = {}
-_ECON_ALERTED:    dict[str, float] = {}
-_SPECIALIST_ALERT_COOLDOWN = 14400        # 4 hours — same gap won't re-fire
+_WEATHER_ALERTED: dict[str, float] = {}  # ticker → last_alerted unix ts
+_CRYPTO_ALERTED: dict[str, float] = {}
+_ECON_ALERTED: dict[str, float] = {}
+_SPECIALIST_ALERT_COOLDOWN = 14400  # 4 hours — same gap won't re-fire
 
 # Per-sport on-demand refresh rate limiter (unix timestamp of last trigger)
 _ONDEMAND_REFRESH_COOLDOWN: dict[str, float] = {}
@@ -145,42 +147,90 @@ _ONDEMAND_REFRESH_COOLDOWN: dict[str, float] = {}
 # ---------------------------------------------------------------------------
 _TOPIC_TAGS: dict[str, str] = {
     # Crypto
-    "bitcoin": "bitcoin", "btc": "bitcoin", "crypto": "crypto",
-    "ethereum": "ethereum", "eth": "ethereum", "solana": "solana",
-    "xrp": "xrp", "dogecoin": "dogecoin", "doge": "dogecoin",
+    "bitcoin": "bitcoin",
+    "btc": "bitcoin",
+    "crypto": "crypto",
+    "ethereum": "ethereum",
+    "eth": "ethereum",
+    "solana": "solana",
+    "xrp": "xrp",
+    "dogecoin": "dogecoin",
+    "doge": "dogecoin",
     # Politics / World
-    "trump": "trump", "biden": "biden", "election": "elections",
-    "democrat": "elections", "republican": "elections",
-    "congress": "congress", "senate": "senate", "tariff": "tariffs",
-    "ukraine": "ukraine", "russia": "russia", "china": "china",
-    "israel": "israel", "iran": "iran", "gaza": "gaza",
-    "nato": "nato", "war": "geopolitics",
+    "trump": "trump",
+    "biden": "biden",
+    "election": "elections",
+    "democrat": "elections",
+    "republican": "elections",
+    "congress": "congress",
+    "senate": "senate",
+    "tariff": "tariffs",
+    "ukraine": "ukraine",
+    "russia": "russia",
+    "china": "china",
+    "israel": "israel",
+    "iran": "iran",
+    "gaza": "gaza",
+    "nato": "nato",
+    "war": "geopolitics",
     # Economics
-    "fed": "fed-funds-rate", "fomc": "fed-funds-rate",
-    "fed chair": "fed-chair", "inflation": "inflation",
-    "recession": "recession", "gdp": "gdp",
+    "fed": "fed-funds-rate",
+    "fomc": "fed-funds-rate",
+    "fed chair": "fed-chair",
+    "inflation": "inflation",
+    "recession": "recession",
+    "gdp": "gdp",
     # Tech / Business
-    "tesla": "tesla", "elon": "elon-musk", "musk": "elon-musk",
-    "spacex": "spacex", "apple": "apple", "nvidia": "nvidia",
-    "amazon": "amazon", "google": "google", "meta": "meta",
-    "microsoft": "microsoft", "openai": "openai",
+    "tesla": "tesla",
+    "elon": "elon-musk",
+    "musk": "elon-musk",
+    "spacex": "spacex",
+    "apple": "apple",
+    "nvidia": "nvidia",
+    "amazon": "amazon",
+    "google": "google",
+    "meta": "meta",
+    "microsoft": "microsoft",
+    "openai": "openai",
     "artificial intelligence": "ai",
-    "ipo": "ipo", "stock market": "stocks",
+    "ipo": "ipo",
+    "stock market": "stocks",
     # Entertainment / Awards
-    "oscar": "oscars", "oscars": "oscars", "academy award": "oscars",
-    "emmy": "emmys", "grammy": "grammys", "golden globe": "golden-globes",
-    "box office": "movies", "movie": "movies", "film": "movies",
-    "celebrity": "celebrities", "taylor swift": "taylor-swift",
+    "oscar": "oscars",
+    "oscars": "oscars",
+    "academy award": "oscars",
+    "emmy": "emmys",
+    "grammy": "grammys",
+    "golden globe": "golden-globes",
+    "box office": "movies",
+    "movie": "movies",
+    "film": "movies",
+    "celebrity": "celebrities",
+    "taylor swift": "taylor-swift",
     # Sports expanded
-    "nhl": "nhl", "hockey": "nhl", "stanley cup": "stanley-cup",
-    "nfl": "nfl", "mlb": "mlb", "baseball": "mlb",
-    "ufc": "ufc", "mma": "ufc", "boxing": "boxing",
-    "golf": "golf", "pga": "golf", "tennis": "tennis",
-    "soccer": "soccer", "mls": "mls",
-    "champions league": "champions-league", "premier league": "premier-league",
-    "march madness": "march-madness", "ncaa": "ncaa",
-    "super bowl": "super-bowl", "world cup": "world-cup",
-    "olympics": "olympics", "formula 1": "formula-1", "f1": "formula-1",
+    "nhl": "nhl",
+    "hockey": "nhl",
+    "stanley cup": "stanley-cup",
+    "nfl": "nfl",
+    "mlb": "mlb",
+    "baseball": "mlb",
+    "ufc": "ufc",
+    "mma": "ufc",
+    "boxing": "boxing",
+    "golf": "golf",
+    "pga": "golf",
+    "tennis": "tennis",
+    "soccer": "soccer",
+    "mls": "mls",
+    "champions league": "champions-league",
+    "premier league": "premier-league",
+    "march madness": "march-madness",
+    "ncaa": "ncaa",
+    "super bowl": "super-bowl",
+    "world cup": "world-cup",
+    "olympics": "olympics",
+    "formula 1": "formula-1",
+    "f1": "formula-1",
 }
 
 # Topic → optimized Tavily/Serper search query.
@@ -188,75 +238,75 @@ _TOPIC_TAGS: dict[str, str] = {
 # Falls back to "{tag} latest news today" for any unregistered tag.
 _TOPIC_NEWS_QUERIES: dict[str, str] = {
     # Awards — users need current nominees, frontrunners, critic consensus
-    "oscars":           "2026 Academy Awards Best Picture nominees odds favorite who will win",
-    "emmys":            "Emmy Awards 2026 nominees predictions odds",
-    "grammys":          "Grammy Awards 2026 nominees predictions odds",
-    "golden-globes":    "Golden Globes 2026 nominees odds predictions",
-    "taylor-swift":     "Taylor Swift latest news tour album 2026",
+    "oscars": "2026 Academy Awards Best Picture nominees odds favorite who will win",
+    "emmys": "Emmy Awards 2026 nominees predictions odds",
+    "grammys": "Grammy Awards 2026 nominees predictions odds",
+    "golden-globes": "Golden Globes 2026 nominees odds predictions",
+    "taylor-swift": "Taylor Swift latest news tour album 2026",
     # Tech / Business — stock price + breaking news
-    "tesla":            "Tesla stock news latest today 2026",
-    "elon-musk":        "Elon Musk latest news today DOGE Twitter Tesla",
-    "spacex":           "SpaceX launch news latest 2026",
-    "apple":            "Apple stock earnings news latest today",
-    "nvidia":           "Nvidia stock AI chip news latest today",
-    "openai":           "OpenAI ChatGPT GPT latest news 2026",
-    "amazon":           "Amazon stock AWS news latest today",
-    "google":           "Google Alphabet stock AI news latest today",
-    "meta":             "Meta Facebook Instagram stock news latest today",
-    "microsoft":        "Microsoft stock Azure AI news latest today",
-    "ai":               "artificial intelligence AI news latest today 2026",
-    "ipo":              "IPO market latest filings upcoming IPOs 2026",
-    "stocks":           "stock market news today S&P 500 latest",
-    "fed-chair":        "Federal Reserve chair Powell latest news statements 2026",
+    "tesla": "Tesla stock news latest today 2026",
+    "elon-musk": "Elon Musk latest news today DOGE Twitter Tesla",
+    "spacex": "SpaceX launch news latest 2026",
+    "apple": "Apple stock earnings news latest today",
+    "nvidia": "Nvidia stock AI chip news latest today",
+    "openai": "OpenAI ChatGPT GPT latest news 2026",
+    "amazon": "Amazon stock AWS news latest today",
+    "google": "Google Alphabet stock AI news latest today",
+    "meta": "Meta Facebook Instagram stock news latest today",
+    "microsoft": "Microsoft stock Azure AI news latest today",
+    "ai": "artificial intelligence AI news latest today 2026",
+    "ipo": "IPO market latest filings upcoming IPOs 2026",
+    "stocks": "stock market news today S&P 500 latest",
+    "fed-chair": "Federal Reserve chair Powell latest news statements 2026",
     # Politics / World — breaking news critical
-    "trump":            "Trump latest news today executive order policy 2026",
-    "biden":            "Biden latest news today 2026",
-    "elections":        "US 2026 elections midterm latest polls news",
-    "congress":         "US Congress legislation bills latest news today 2026",
-    "senate":           "US Senate vote legislation latest news today 2026",
-    "tariffs":          "US tariffs trade war Canada Mexico China latest news today",
-    "ukraine":          "Ukraine Russia war ceasefire latest news today",
-    "israel":           "Israel Gaza ceasefire latest news today",
-    "gaza":             "Gaza ceasefire humanitarian latest news today 2026",
-    "nato":             "NATO alliance defense latest news today 2026",
-    "china":            "China US trade relations Taiwan latest news today",
-    "russia":           "Russia Ukraine latest news today",
-    "iran":             "Iran nuclear deal sanctions latest news today",
-    "geopolitics":      "global geopolitics latest breaking news today",
+    "trump": "Trump latest news today executive order policy 2026",
+    "biden": "Biden latest news today 2026",
+    "elections": "US 2026 elections midterm latest polls news",
+    "congress": "US Congress legislation bills latest news today 2026",
+    "senate": "US Senate vote legislation latest news today 2026",
+    "tariffs": "US tariffs trade war Canada Mexico China latest news today",
+    "ukraine": "Ukraine Russia war ceasefire latest news today",
+    "israel": "Israel Gaza ceasefire latest news today",
+    "gaza": "Gaza ceasefire humanitarian latest news today 2026",
+    "nato": "NATO alliance defense latest news today 2026",
+    "china": "China US trade relations Taiwan latest news today",
+    "russia": "Russia Ukraine latest news today",
+    "iran": "Iran nuclear deal sanctions latest news today",
+    "geopolitics": "global geopolitics latest breaking news today",
     # Economics — data releases + Fed decisions
-    "fed-funds-rate":   "Federal Reserve FOMC interest rate decision cut hike latest news",
-    "inflation":        "US CPI inflation report latest news today 2026",
-    "recession":        "US economy recession risk GDP latest news today",
-    "gdp":              "US GDP growth report latest news today",
+    "fed-funds-rate": "Federal Reserve FOMC interest rate decision cut hike latest news",
+    "inflation": "US CPI inflation report latest news today 2026",
+    "recession": "US economy recession risk GDP latest news today",
+    "gdp": "US GDP growth report latest news today",
     # Sports leagues — standings + injury news + results
-    "nhl":              "NHL standings results injury news latest today 2026",
-    "stanley-cup":      "NHL Stanley Cup playoffs bracket odds latest 2026",
-    "nfl":              "NFL draft free agency news latest today 2026",
-    "mlb":              "MLB standings results injury news latest today 2026",
-    "ufc":              "UFC fight results card news latest tonight 2026",
-    "boxing":           "boxing fight results card news latest 2026",
-    "golf":             "PGA Tour golf results leaderboard news latest today",
-    "tennis":           "tennis ATP WTA results news latest today",
-    "formula-1":        "Formula 1 F1 race results standings news latest today",
+    "nhl": "NHL standings results injury news latest today 2026",
+    "stanley-cup": "NHL Stanley Cup playoffs bracket odds latest 2026",
+    "nfl": "NFL draft free agency news latest today 2026",
+    "mlb": "MLB standings results injury news latest today 2026",
+    "ufc": "UFC fight results card news latest tonight 2026",
+    "boxing": "boxing fight results card news latest 2026",
+    "golf": "PGA Tour golf results leaderboard news latest today",
+    "tennis": "tennis ATP WTA results news latest today",
+    "formula-1": "Formula 1 F1 race results standings news latest today",
     "champions-league": "UEFA Champions League results standings news latest",
-    "premier-league":   "Premier League standings results injury news latest today",
-    "march-madness":    "NCAA March Madness tournament bracket results today 2026",
-    "ncaa":             "NCAA basketball tournament results bracket today",
-    "super-bowl":       "Super Bowl 2026 odds predictions latest news",
-    "world-cup":        "FIFA World Cup 2026 qualifying results news latest",
-    "olympics":         "Olympics 2026 news results latest",
-    "mls":              "MLS soccer standings results news latest today",
-    "soccer":           "soccer football results news latest today",
+    "premier-league": "Premier League standings results injury news latest today",
+    "march-madness": "NCAA March Madness tournament bracket results today 2026",
+    "ncaa": "NCAA basketball tournament results bracket today",
+    "super-bowl": "Super Bowl 2026 odds predictions latest news",
+    "world-cup": "FIFA World Cup 2026 qualifying results news latest",
+    "olympics": "Olympics 2026 news results latest",
+    "mls": "MLS soccer standings results news latest today",
+    "soccer": "soccer football results news latest today",
     # Crypto — price action + on-chain news
-    "bitcoin":          "Bitcoin BTC price news today latest 2026",
-    "ethereum":         "Ethereum ETH price news latest today 2026",
-    "solana":           "Solana SOL price news latest today",
-    "xrp":              "XRP Ripple price SEC news latest today",
-    "dogecoin":         "Dogecoin DOGE price news Elon latest today",
-    "crypto":           "crypto market Bitcoin Ethereum price news today",
+    "bitcoin": "Bitcoin BTC price news today latest 2026",
+    "ethereum": "Ethereum ETH price news latest today 2026",
+    "solana": "Solana SOL price news latest today",
+    "xrp": "XRP Ripple price SEC news latest today",
+    "dogecoin": "Dogecoin DOGE price news Elon latest today",
+    "crypto": "crypto market Bitcoin Ethereum price news today",
     # Movies
-    "movies":           "box office results weekend latest movie news 2026",
-    "celebrities":      "celebrity entertainment news latest today",
+    "movies": "box office results weekend latest movie news 2026",
+    "celebrities": "celebrity entertainment news latest today",
 }
 
 load_dotenv()
@@ -264,6 +314,7 @@ load_dotenv()
 # ---------------------------------------------------------------------------
 # Tavily real-time web search
 # ---------------------------------------------------------------------------
+
 
 def _tavily_search(query: str, max_results: int = 5) -> str:
     """
@@ -275,6 +326,7 @@ def _tavily_search(query: str, max_results: int = 5) -> str:
         return ""
     try:
         from tavily import TavilyClient
+
         client = TavilyClient(api_key=api_key)
         response = client.search(
             query=query,
@@ -289,9 +341,9 @@ def _tavily_search(query: str, max_results: int = 5) -> str:
             lines.append(f"Summary: {answer.strip()}")
         # Individual results
         for r in response.get("results", [])[:max_results]:
-            title   = r.get("title", "").strip()
+            title = r.get("title", "").strip()
             content = r.get("content", "").strip()[:200]
-            url     = r.get("url", "")
+            url = r.get("url", "")
             lines.append(f"• {title}: {content}  [{url}]")
         lines.append("[End web search]")
         return "\n".join(lines)
@@ -312,6 +364,7 @@ def _serper_search(query: str, max_results: int = 5) -> str:
         return ""
     try:
         import requests as _req
+
         resp = _req.post(
             "https://google.serper.dev/search",
             headers={"X-API-KEY": api_key, "Content-Type": "application/json"},
@@ -324,9 +377,9 @@ def _serper_search(query: str, max_results: int = 5) -> str:
         if ans := data.get("answerBox", {}).get("answer"):
             lines.append(f"Summary: {ans}")
         for r in data.get("organic", [])[:max_results]:
-            title   = r.get("title", "").strip()
+            title = r.get("title", "").strip()
             snippet = r.get("snippet", "").strip()[:200]
-            url     = r.get("link", "")
+            url = r.get("link", "")
             lines.append(f"• {title}: {snippet}  [{url}]")
         lines.append("[End web search]")
         return "\n".join(lines)
@@ -335,21 +388,31 @@ def _serper_search(query: str, max_results: int = 5) -> str:
         return ""
 
 
-logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
-logging.getLogger("httpx").setLevel(logging.WARNING)   # silence getUpdates poll noise
+logging.basicConfig(
+    level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s"
+)
+logging.getLogger("httpx").setLevel(logging.WARNING)  # silence getUpdates poll noise
 log = logging.getLogger("edge_bot")
 
 # ---------------------------------------------------------------------------
 # Configuration
 # ---------------------------------------------------------------------------
 
-BOT_TOKEN          = os.environ.get("TELEGRAM_BOT_TOKEN", "")
-CHAT_ID            = os.environ.get("TELEGRAM_CHAT_ID", "")
-OWNER_ID           = os.environ.get("TELEGRAM_OWNER_ID", "")   # your personal user ID (from @userinfobot)
-ALERT_CHANNEL_ID   = os.environ.get("ALERT_CHANNEL_ID", CHAT_ID)  # dedicated copy-trade alert channel
-SCAN_INTERVAL_MIN    = int(os.environ.get("SCAN_INTERVAL_MINUTES", "180"))  # default 3 hours
-INJURY_REFRESH_MIN   = int(os.environ.get("INJURY_REFRESH_MINUTES", "240"))  # default 4 hours
-BANKROLL_USD         = float(os.environ.get("BANKROLL_USD", "10000"))
+BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
+CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "")
+OWNER_ID = os.environ.get(
+    "TELEGRAM_OWNER_ID", ""
+)  # your personal user ID (from @userinfobot)
+ALERT_CHANNEL_ID = os.environ.get(
+    "ALERT_CHANNEL_ID", CHAT_ID
+)  # dedicated copy-trade alert channel
+SCAN_INTERVAL_MIN = int(
+    os.environ.get("SCAN_INTERVAL_MINUTES", "180")
+)  # default 3 hours
+INJURY_REFRESH_MIN = int(
+    os.environ.get("INJURY_REFRESH_MINUTES", "240")
+)  # default 4 hours
+BANKROLL_USD = float(os.environ.get("BANKROLL_USD", "10000"))
 
 # BallDontLie — NBA game schedule (free tier: /v1/games endpoint)
 _BALLDONTLIE_API = os.environ.get("BALLDONTLIE_API", "")
@@ -395,6 +458,7 @@ _mem = SessionMemory()
 # ---------------------------------------------------------------------------
 _DOCS_DIR = Path(__file__).parent / "docs"
 
+
 def _load_platform_doc(filename: str) -> str:
     """Load a markdown doc from the docs/ folder. Returns '' on failure."""
     try:
@@ -402,17 +466,42 @@ def _load_platform_doc(filename: str) -> str:
     except Exception:
         return ""
 
+
 _POLYMARKET_DOC = _load_platform_doc("polymarket_guide.md")
-_KALSHI_DOC     = _load_platform_doc("kalshi_guide.md")
+_KALSHI_DOC = _load_platform_doc("kalshi_guide.md")
 
 _ONBOARD_KEYWORDS = {
-    "sign up", "signup", "register", "how to start", "getting started",
-    "deposit", "withdraw", "usdc", "how do i", "how to use",
-    "what is polymarket", "what is kalshi", "how does", "fees",
-    "wallet", "account", "polygon", "matic", "bridge", "swap",
-    "coinbase", "how to buy", "how to trade", "new to", "beginner",
-    "first time", "set up", "setup", "onboard",
+    "sign up",
+    "signup",
+    "register",
+    "how to start",
+    "getting started",
+    "deposit",
+    "withdraw",
+    "usdc",
+    "how do i",
+    "how to use",
+    "what is polymarket",
+    "what is kalshi",
+    "how does",
+    "fees",
+    "wallet",
+    "account",
+    "polygon",
+    "matic",
+    "bridge",
+    "swap",
+    "coinbase",
+    "how to buy",
+    "how to trade",
+    "new to",
+    "beginner",
+    "first time",
+    "set up",
+    "setup",
+    "onboard",
 }
+
 
 def _get_platform_doc_context(user_msg: str) -> str:
     """Return relevant platform doc snippets when user asks onboarding questions."""
@@ -432,6 +521,7 @@ def _get_platform_doc_context(user_msg: str) -> str:
         if _KALSHI_DOC:
             ctx += "\n\n=== KALSHI ===\n" + _KALSHI_DOC[:1500]
     return ctx
+
 
 # Tracks already-alerted market keys to avoid duplicate alerts per scan cycle.
 # Dict format: {key: first_alerted_timestamp} — entries expire after 24h so
@@ -481,42 +571,48 @@ def _prune_alerted_keys() -> None:
     if expired:
         _save_alerted_keys()  # persist after cleanup
 
+
 # Approved signal types — only markets matching these signals will trigger alerts.
 # Empty set means "alert on all" (bootstrapping mode until user approves something).
 _approved_signals: set[str] = _load_approved_signals()
 
 # Outcome tracker — resolution engine + paper trading DB
 from edge_agent.memory.outcome_tracker import OutcomeTracker as _OutcomeTracker
+
 _ot = _OutcomeTracker()
 
 # ── ML overlay singletons ─────────────────────────────────────────────────────
 # All ML modules are lazy-loaded and fail-safe: if xgboost/sklearn are not
 # installed the system degrades gracefully to pure rule-based mode.
-from edge_agent.ml.ml_store            import MLStore            as _MLStore
-from edge_agent.ml.confidence_calibrator import ConfidenceCalibrator as _ConfidenceCalibrator
-from edge_agent.ml.signal_scorer       import SignalScorer        as _SignalScorer
-from edge_agent.ml.trader_features     import TraderFeatureExtractor as _TraderFeatureExtractor
-from edge_agent.ml.regime_detector     import RegimeDetector      as _RegimeDetector
+from edge_agent.ml.ml_store import MLStore as _MLStore
+from edge_agent.ml.confidence_calibrator import (
+    ConfidenceCalibrator as _ConfidenceCalibrator,
+)
+from edge_agent.ml.signal_scorer import SignalScorer as _SignalScorer
+from edge_agent.ml.trader_features import (
+    TraderFeatureExtractor as _TraderFeatureExtractor,
+)
+from edge_agent.ml.regime_detector import RegimeDetector as _RegimeDetector
 import edge_agent.nodes as _nodes_mod
 
-_ml_store    = _MLStore()
-_calibrator  = _ConfidenceCalibrator(_ml_store)
-_scorer      = _SignalScorer()
-_regime      = _RegimeDetector(_ml_store)
+_ml_store = _MLStore()
+_calibrator = _ConfidenceCalibrator(_ml_store)
+_scorer = _SignalScorer()
+_regime = _RegimeDetector(_ml_store)
 
 # Load saved calibration + model from disk (no-ops if not yet trained)
 _calibrator.load()
 _scorer.load()
-_nodes_mod.set_calibrator(_calibrator)   # inject into probability_node
+_nodes_mod.set_calibrator(_calibrator)  # inject into probability_node
 
 # ── Decision log + Prompt registry ───────────────────────────────────────────
 # decision_log audits every AI call: model used, prompt version, latency, context blocks
 # prompt_registry provides versioned templates so we can trace why the AI said what it said
-from edge_agent.memory.decision_log  import DecisionLog   as _DecisionLog
-from edge_agent.prompt_registry      import get_registry   as _get_prompt_registry
+from edge_agent.memory.decision_log import DecisionLog as _DecisionLog
+from edge_agent.prompt_registry import get_registry as _get_prompt_registry
 import edge_agent.ai_service as _ai_svc_mod
 
-_decision_log   = _DecisionLog()
+_decision_log = _DecisionLog()
 _prompt_registry = _get_prompt_registry()
 
 # Wire DecisionLog into ai_service so every call is automatically audited
@@ -526,24 +622,28 @@ _ai_svc_mod.set_decision_log(_decision_log)
 # spawning a new DB connection on every /traders, /wallet, /watch invocation
 from edge_agent.memory.trader_cache import TraderCache as _TraderCache
 from edge_agent.insider_alerts import InsiderAlertEngine as _InsiderAlertEngine
+
 _trader_cache: "_TraderCache | None" = None
 
 # Smart money positions cache — refreshed every 30 min by background job.
 # Stores open positions from top-scored watchlist wallets so the AI can
 # reference what real traders are currently betting on without per-message latency.
 _sm_positions_cache: dict = {
-    "lines":         [],
-    "fetched_at":    0.0,
+    "lines": [],
+    "fetched_at": 0.0,
     "position_keys": set(),  # "addr:condId:side" keys seen in last cycle (for new-position diff)
-    "alertable":     [],     # list[dict] of new positions that passed quality filters this cycle
+    "alertable": [],  # list[dict] of new positions that passed quality filters this cycle
 }
-_sm_alerted_24h: dict[str, float] = {}   # "addr:condId" → Unix timestamp of last alert sent
-_SM_CACHE_TTL = 1800   # 30 minutes
+_sm_alerted_24h: dict[
+    str, float
+] = {}  # "addr:condId" → Unix timestamp of last alert sent
+_SM_CACHE_TTL = 1800  # 30 minutes
 
 # ---------------------------------------------------------------------------
 # Insider alert engine — singleton, initialised lazily in main()
 # ---------------------------------------------------------------------------
 _insider_engine: "_InsiderAlertEngine | None" = None
+
 
 def _get_insider_engine() -> "_InsiderAlertEngine":
     global _insider_engine
@@ -554,6 +654,7 @@ def _get_insider_engine() -> "_InsiderAlertEngine":
             if not result:
                 result = _serper_search(query, max_results=max_results)
             return result
+
         _insider_engine = _InsiderAlertEngine(search_fn=_search_wrapper)
     return _insider_engine
 
@@ -565,19 +666,23 @@ def _get_trader_cache() -> "_TraderCache":
         _trader_cache = _TraderCache()
     return _trader_cache
 
+
 # Long-term per-user profile store (facts, moments, trading prefs)
 from edge_agent.memory.user_profile import UserProfileStore as _UserProfileStore
+
 _profiles = _UserProfileStore()
 
 # Per-user SessionMemory instances — keyed by Telegram user_id
 # Initialized on first message from each user, reused within the process lifetime
 _user_sessions: dict[int, "SessionMemory"] = {}
 
+
 def _get_session(user_id: int) -> "SessionMemory":
     """Return (or create) a per-user SessionMemory instance."""
     if user_id not in _user_sessions:
         _user_sessions[user_id] = SessionMemory(user_id=user_id)
     return _user_sessions[user_id]
+
 
 # Per-user conversation history for multi-turn AI chat {user_id: [messages]}
 _chat_history: dict[int, list[dict]] = {}
@@ -612,10 +717,12 @@ def _get_service() -> EdgeService:
 def _get_scanner() -> EdgeScanner:
     global _scanner
     if _scanner is None:
-        _scanner = EdgeScanner(adapters=[
-            KalshiAdapter(),
-            PolymarketAdapter(),
-        ])
+        _scanner = EdgeScanner(
+            adapters=[
+                KalshiAdapter(),
+                PolymarketAdapter(),
+            ]
+        )
     return _scanner
 
 
@@ -625,16 +732,16 @@ def _get_scanner() -> EdgeScanner:
 
 _SIGNAL_EMOJI = {
     "INJURY_MOMENTUM_REVERSAL": "🔥",
-    "PRE_GAME_INJURY_LAG":      "🏥",
-    "NEWS_LAG":                 "📰",
-    "FAVORITE_LONGSHOT_BIAS":   "📈",
-    "NONE":                     "📊",
+    "PRE_GAME_INJURY_LAG": "🏥",
+    "NEWS_LAG": "📰",
+    "FAVORITE_LONGSHOT_BIAS": "📈",
+    "NONE": "📊",
 }
 
 _QUAL_EMOJI = {
     "qualified": "🟢",
     "watchlist": "🟡",
-    "rejected":  "🔴",
+    "rejected": "🔴",
 }
 
 
@@ -733,15 +840,15 @@ def _fmt_details(rec: Recommendation) -> str:
 
 
 def _fmt_game(g: TrackedGame) -> str:
-    drop     = g.current_drop
-    flag     = "🔥 TRIGGERED" if g.triggered else f"drop {drop:+.1%}"
+    drop = g.current_drop
+    flag = "🔥 TRIGGERED" if g.triggered else f"drop {drop:+.1%}"
     reg_type = getattr(g, "registration_type", "pre_game_lag")
     if g.triggered:
         type_icon = "🔥"
     elif reg_type == "pre_game_lag":
-        type_icon = "📌"   # pre-game lag watch (market was underpricing)
+        type_icon = "📌"  # pre-game lag watch (market was underpricing)
     else:
-        type_icon = "👁"    # proactive injury watch
+        type_icon = "👁"  # proactive injury watch
     type_label = "Pre-game lag" if reg_type == "pre_game_lag" else "Star injury watch"
     return (
         f"{type_icon} <b>[{_e(g.phase.value)}]</b> <i>{type_label}</i>\n"
@@ -753,6 +860,7 @@ def _fmt_game(g: TrackedGame) -> str:
 # ---------------------------------------------------------------------------
 # Broadcast helper — sends to the single dev/testing channel
 # ---------------------------------------------------------------------------
+
 
 async def _broadcast(bot, text: str, **kwargs) -> None:
     """Send a message to the configured Telegram dev channel."""
@@ -768,6 +876,7 @@ async def _broadcast(bot, text: str, **kwargs) -> None:
 # ---------------------------------------------------------------------------
 # Proactive injury game registration
 # ---------------------------------------------------------------------------
+
 
 def _proactive_injury_registration(game_tracker, inputs: list) -> int:
     """
@@ -787,8 +896,9 @@ def _proactive_injury_registration(game_tracker, inputs: list) -> int:
     """
     try:
         from edge_agent.memory.injury_cache import InjuryCache
+
         icache = InjuryCache()
-        n_new  = 0
+        n_new = 0
 
         # Collect teams with significant injuries tonight
         injured_teams: set[str] = set()
@@ -822,10 +932,10 @@ def _proactive_injury_registration(game_tracker, inputs: list) -> int:
                 continue
 
             game_tracker.register(
-                snapshot          = snapshot,
-                catalysts         = [f"injury_cache:{matched}"],
-                theme             = "sports",
-                registration_type = "proactive_injury",
+                snapshot=snapshot,
+                catalysts=[f"injury_cache:{matched}"],
+                theme="sports",
+                registration_type="proactive_injury",
             )
             n_new += 1
 
@@ -839,6 +949,7 @@ def _proactive_injury_registration(game_tracker, inputs: list) -> int:
 # ---------------------------------------------------------------------------
 # Scan helpers
 # ---------------------------------------------------------------------------
+
 
 async def _run_scan(bot, notify: bool = True) -> str:
     global _last_status, _alerted_keys
@@ -863,7 +974,10 @@ async def _run_scan(bot, notify: bool = True) -> str:
             None, _proactive_injury_registration, svc.engine.game_tracker, inputs
         )
         if n_proactive:
-            log.info("[InjuryTracker] Proactively registered %d game(s) from injury cache", n_proactive)
+            log.info(
+                "[InjuryTracker] Proactively registered %d game(s) from injury cache",
+                n_proactive,
+            )
 
         # svc.run_scan() processes all markets synchronously
         recs, summary = await loop.run_in_executor(
@@ -891,18 +1005,28 @@ async def _run_scan(bot, notify: bool = True) -> str:
                 slot = _store_rec(rec)
                 # callback_data max = 64 bytes — use short slot key, not raw market_id
                 # Row 1: paper trade picks  |  Row 2: signal management
-                keyboard = InlineKeyboardMarkup([
+                keyboard = InlineKeyboardMarkup(
                     [
-                        InlineKeyboardButton("📈 YES",     callback_data=f"pt:YES:{slot}"),
-                        InlineKeyboardButton("📉 NO",      callback_data=f"pt:NO:{slot}"),
-                        InlineKeyboardButton("🔄 Fade",   callback_data=f"f:{slot}"),
-                    ],
-                    [
-                        InlineKeyboardButton("✅ Approve", callback_data=f"a:{slot}"),
-                        InlineKeyboardButton("❌ Skip",    callback_data=f"s:{slot}"),
-                        InlineKeyboardButton("ℹ️ Details", callback_data=f"d:{slot}"),
-                    ],
-                ])
+                        [
+                            InlineKeyboardButton(
+                                "📈 YES", callback_data=f"pt:YES:{slot}"
+                            ),
+                            InlineKeyboardButton(
+                                "📉 NO", callback_data=f"pt:NO:{slot}"
+                            ),
+                            InlineKeyboardButton("🔄 Fade", callback_data=f"f:{slot}"),
+                        ],
+                        [
+                            InlineKeyboardButton(
+                                "✅ Approve", callback_data=f"a:{slot}"
+                            ),
+                            InlineKeyboardButton("❌ Skip", callback_data=f"s:{slot}"),
+                            InlineKeyboardButton(
+                                "ℹ️ Details", callback_data=f"d:{slot}"
+                            ),
+                        ],
+                    ]
+                )
                 await _broadcast(
                     bot,
                     _fmt_alert(rec),
@@ -955,7 +1079,9 @@ async def _run_scan(bot, notify: bool = True) -> str:
 
         # Build injury alert block — independent of qualification pipeline
         # (calls BallDontLie HTTP + injury cache, so run off the event loop)
-        injury_alert_block = await loop.run_in_executor(None, _build_tonight_injury_alerts)
+        injury_alert_block = await loop.run_in_executor(
+            None, _build_tonight_injury_alerts
+        )
 
         # Fetch sportsbook lines for any sport that has alerts (1 search per sport)
         # Each call hits Tavily/Serper HTTP — run in executor to avoid blocking
@@ -963,13 +1089,16 @@ async def _run_scan(bot, notify: bool = True) -> str:
         if injury_alert_block:
             for _sp in ("nba", "nfl", "nhl"):
                 if _sp in injury_alert_block.lower():
-                    _lines = await loop.run_in_executor(None, _fetch_sportsbook_lines, _sp)
+                    _lines = await loop.run_in_executor(
+                        None, _fetch_sportsbook_lines, _sp
+                    )
                     if _lines:
                         book_lines_block += f"\n\n📊 <b>{_sp.upper()} Sportsbook Lines:</b>\n{html.escape(_lines)}"
 
         # ── Persist scan results to scan_log for /performance ───────────────
         try:
             from edge_agent.memory.scan_log import ScanLog
+
             _sl = ScanLog()
             _run_id = _sl.log_scan(
                 total=summary.total_markets,
@@ -993,7 +1122,10 @@ async def _run_scan(bot, notify: bool = True) -> str:
                     # Register with outcome tracker so resolution is checked later
                     if _sig_id:
                         import re as _re
-                        _side_match = _re.search(r"\b(YES|NO)\b", (_rec.action or "").upper())
+
+                        _side_match = _re.search(
+                            r"\b(YES|NO)\b", (_rec.action or "").upper()
+                        )
                         _target_side = _side_match.group(1) if _side_match else "YES"
                         _ot.register_signal(
                             signal_id=_sig_id,
@@ -1013,24 +1145,36 @@ async def _run_scan(bot, notify: bool = True) -> str:
                                 _rec.market_id, signal_direction=_target_side
                             )
                             _raw_conf = getattr(_rec, "raw_confidence", _rec.confidence)
-                            _cat_str  = getattr(_rec, "catalyst_strength", 0.0)
-                            _xgb_prob  = None
-                            _cal_conf  = None
+                            _cat_str = getattr(_rec, "catalyst_strength", 0.0)
+                            _xgb_prob = None
+                            _cal_conf = None
                             if _regime.is_ml_safe:
-                                _xgb_prob = _scorer.predict({
-                                    "raw_confidence":   _raw_conf,
-                                    "ev_net":           _rec.ev_net,
-                                    "market_prob":      _rec.market_prob or 0.5,
-                                    "depth_usd":        getattr(_rec, "depth_usd", 0),
-                                    "spread_bps":       getattr(_rec, "spread_bps", 0),
-                                    "ttr_hours":        _rec.metadata.get("time_to_resolution_hours", 0),
-                                    "catalyst_strength": _cat_str,
-                                    "smart_money_score": _tf.get("smart_money_score", 0),
-                                    "n_hot_longs":      _tf.get("n_hot_longs", 0),
-                                    "n_hot_shorts":     _tf.get("n_hot_shorts", 0),
-                                    "signal_type":      _rec.metadata.get("signal", "UNKNOWN"),
-                                })
-                                _cal_conf = _calibrator.calibrate(_raw_conf) if _calibrator._active else None
+                                _xgb_prob = _scorer.predict(
+                                    {
+                                        "raw_confidence": _raw_conf,
+                                        "ev_net": _rec.ev_net,
+                                        "market_prob": _rec.market_prob or 0.5,
+                                        "depth_usd": getattr(_rec, "depth_usd", 0),
+                                        "spread_bps": getattr(_rec, "spread_bps", 0),
+                                        "ttr_hours": _rec.metadata.get(
+                                            "time_to_resolution_hours", 0
+                                        ),
+                                        "catalyst_strength": _cat_str,
+                                        "smart_money_score": _tf.get(
+                                            "smart_money_score", 0
+                                        ),
+                                        "n_hot_longs": _tf.get("n_hot_longs", 0),
+                                        "n_hot_shorts": _tf.get("n_hot_shorts", 0),
+                                        "signal_type": _rec.metadata.get(
+                                            "signal", "UNKNOWN"
+                                        ),
+                                    }
+                                )
+                                _cal_conf = (
+                                    _calibrator.calibrate(_raw_conf)
+                                    if _calibrator._active
+                                    else None
+                                )
 
                             _ml_store.log_prediction(
                                 signal_id=_sig_id,
@@ -1042,7 +1186,9 @@ async def _run_scan(bot, notify: bool = True) -> str:
                                 market_prob=_rec.market_prob or 0.5,
                                 depth_usd=getattr(_rec, "depth_usd", 0),
                                 spread_bps=getattr(_rec, "spread_bps", 0),
-                                ttr_hours=_rec.metadata.get("time_to_resolution_hours", 0),
+                                ttr_hours=_rec.metadata.get(
+                                    "time_to_resolution_hours", 0
+                                ),
                                 catalyst_strength=_cat_str,
                                 smart_money_score=_tf.get("smart_money_score", 0),
                                 n_hot_longs=_tf.get("n_hot_longs", 0),
@@ -1077,6 +1223,7 @@ async def _run_scan(bot, notify: bool = True) -> str:
 # ---------------------------------------------------------------------------
 # Command handlers
 # ---------------------------------------------------------------------------
+
 
 async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     approved_count = len(_approved_signals)
@@ -1219,7 +1366,9 @@ async def cmd_tracking(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     svc = _get_service()
     games = svc.engine.game_tracker.active_games()
     if not games:
-        await update.message.reply_text("👁 No games currently in the injury tracking list.")
+        await update.message.reply_text(
+            "👁 No games currently in the injury tracking list."
+        )
         return
     lines = [f"<b>Injury Tracking List</b> — {len(games)} game(s)\n"]
     for g in games:
@@ -1232,6 +1381,7 @@ async def cmd_tracking(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
 
 async def cmd_top(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     from edge_agent.models import QualificationState
+
     svc = _get_service()
     top = svc.engine.top_opportunities(limit=3)
     if top:
@@ -1274,29 +1424,39 @@ async def cmd_traders(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     Falls back to live scoring (~30s) only if cache is empty.
     Category options: OVERALL (default), SPORTS, POLITICS, CRYPTO, CULTURE.
     """
-    args     = (update.message.text or "").split()
+    args = (update.message.text or "").split()
     category = args[1].upper() if len(args) > 1 else "OVERALL"
-    valid_cats = {"OVERALL", "SPORTS", "POLITICS", "CRYPTO", "CULTURE",
-                  "ECONOMICS", "FINANCE", "TECH"}
+    valid_cats = {
+        "OVERALL",
+        "SPORTS",
+        "POLITICS",
+        "CRYPTO",
+        "CULTURE",
+        "ECONOMICS",
+        "FINANCE",
+        "TECH",
+    }
     if category not in valid_cats:
         category = "OVERALL"
 
     _TraderScore = _trader_mod.TraderScore  # already imported via importlib at top
 
     # ── Cache-first: pre-warmed by daily job, instant response ──────────────
-    cache      = _get_trader_cache()
+    cache = _get_trader_cache()
     cache_rows = cache.get_top(20)
 
     if cache_rows:
         # Convert SQLite dicts → TraderScore objects for uniform display
         _fields = _TraderScore.__dataclass_fields__
-        scores  = [_TraderScore(**{k: v for k, v in r.items() if k in _fields})
-                   for r in cache_rows]
-        st      = cache.stats()
+        scores = [
+            _TraderScore(**{k: v for k, v in r.items() if k in _fields})
+            for r in cache_rows
+        ]
+        st = cache.stats()
 
         # How many extra are in cache but filtered out as bots?
         bot_filtered = max(0, st["count"] - len(scores))
-        bot_note     = f" · {bot_filtered} bot-filtered" if bot_filtered else ""
+        bot_note = f" · {bot_filtered} bot-filtered" if bot_filtered else ""
 
         source_note = (
             f"<i>Smart money cache — {len(scores)} legit traders{bot_note} | "
@@ -1306,17 +1466,24 @@ async def cmd_traders(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         # If the legit pool is thin (< 5), kick off a background live rescore
         # so the next /traders call has a richer cache
         if len(scores) < 5:
+
             async def _background_rescore():
                 try:
                     client = _TraderClient()
                     fresh = await asyncio.get_running_loop().run_in_executor(
-                        None, lambda: client.get_hot_traders(limit=20, category=category)
+                        None,
+                        lambda: client.get_hot_traders(limit=20, category=category),
                     )
-                    log.info("Background rescore complete — %d traders cached.", len(fresh))
+                    log.info(
+                        "Background rescore complete — %d traders cached.", len(fresh)
+                    )
                 except Exception as exc:
                     log.warning("Background rescore failed: %s", exc)
+
             asyncio.ensure_future(_background_rescore())
-            source_note += "\n<i>⚙️ Refreshing cache in background — more traders soon.</i>"
+            source_note += (
+                "\n<i>⚙️ Refreshing cache in background — more traders soon.</i>"
+            )
     else:
         # Cache empty — score live (happens on first boot before warmup job runs)
         await update.message.reply_text(
@@ -1339,25 +1506,28 @@ async def cmd_traders(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
 
     lines = [f"<b>🏆 Smart Money — Polymarket {category} (Top {len(scores)})</b>"]
     for i, ts in enumerate(scores, 1):
-        name  = _e(ts.display_name or ts.wallet_address[:10] + "…")
+        name = _e(ts.display_name or ts.wallet_address[:10] + "…")
         badge = " ✅" if ts.verified else ""
         score = int(ts.final_score * 100)
 
         # Alltime PnL from leaderboard (authoritative)
-        pnl_all = (f"+${ts.pnl_alltime:,.0f}" if ts.pnl_alltime >= 0
-                   else f"-${abs(ts.pnl_alltime):,.0f}")
+        pnl_all = (
+            f"+${ts.pnl_alltime:,.0f}"
+            if ts.pnl_alltime >= 0
+            else f"-${abs(ts.pnl_alltime):,.0f}"
+        )
         # Alltime volume — format as $Xk or $XM
         vol = ts.volume_alltime
         if vol >= 1_000_000:
-            vol_str = f"${vol/1_000_000:.1f}M"
+            vol_str = f"${vol / 1_000_000:.1f}M"
         elif vol >= 1_000:
-            vol_str = f"${vol/1_000:.0f}k"
+            vol_str = f"${vol / 1_000:.0f}k"
         else:
             vol_str = f"${vol:.0f}"
 
         # Win rate from positions (best available source)
         wr_all = f"{ts.win_rate_alltime:.0%}" if ts.win_rate_alltime > 0 else "—"
-        risk   = f" ⚠️{ts.unsettled_count} open" if ts.unsettled_count else ""
+        risk = f" ⚠️{ts.unsettled_count} open" if ts.unsettled_count else ""
 
         if score >= 75:
             verdict = "✅"
@@ -1380,9 +1550,9 @@ async def cmd_traders(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     if wl_rows:
         lines.append("\n👀 <b>Your Watchlist</b>")
         for w in wl_rows:
-            addr      = w.get("wallet_address", "")
-            disp      = w.get("display_name") or addr[:10] + "…"
-            raw_score      = w.get("current_score") or w.get("latest_score") or 0
+            addr = w.get("wallet_address", "")
+            disp = w.get("display_name") or addr[:10] + "…"
+            raw_score = w.get("current_score") or w.get("latest_score") or 0
             last_vetted_at = w.get("last_vetted_at") or 0
             # Guard: if score was stored on old 0.0–1.0 scale, upscale it
             if 0 < raw_score <= 1.0:
@@ -1393,14 +1563,16 @@ async def cmd_traders(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
                 score_str = f"<code>{int(raw_score)}/100</code>"
             else:
                 score_str = "<code>0/100</code> <i>(no data)</i>"
-            bot_warn  = " ⚠️ Bot" if w.get("current_bot_flag") else ""
-            note      = f" — {_e(w['note'])}" if w.get("note") else ""
+            bot_warn = " ⚠️ Bot" if w.get("current_bot_flag") else ""
+            note = f" — {_e(w['note'])}" if w.get("note") else ""
             lines.append(f"  • <b>{_e(disp)}</b> {score_str}{bot_warn}{note}")
         lines.append("<i>Run /wallet 0x… to force a fresh vet on any address.</i>")
     else:
         lines.append("<i>Use /wallet 0x… to deep-dive any trader.</i>")
 
-    await _send_chunked(update.message.reply_text, "\n".join(lines), parse_mode=ParseMode.HTML)
+    await _send_chunked(
+        update.message.reply_text, "\n".join(lines), parse_mode=ParseMode.HTML
+    )
 
 
 async def cmd_wallet(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1408,7 +1580,7 @@ async def cmd_wallet(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     /wallet {address}
     Full vet of a specific Polymarket wallet address.
     """
-    parts   = (update.message.text or "").split()
+    parts = (update.message.text or "").split()
     address = parts[1].strip() if len(parts) > 1 else ""
 
     if not re.match(r"^0x[0-9a-fA-F]{40}$", address):
@@ -1429,10 +1601,10 @@ async def cmd_wallet(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         await update.message.reply_text(f"❌ Wallet vet failed: {exc}")
         return
 
-    score  = int(ts.final_score * 100)
-    ab     = int(ts.anti_bot_score    * 100)
-    pf     = int(ts.performance_score * 100)
-    rl     = int(ts.reliability_score * 100)
+    score = int(ts.final_score * 100)
+    ab = int(ts.anti_bot_score * 100)
+    pf = int(ts.performance_score * 100)
+    rl = int(ts.reliability_score * 100)
 
     if ts.bot_flag:
         verdict = "⚠️ LIKELY BOT"
@@ -1443,18 +1615,34 @@ async def cmd_wallet(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     else:
         verdict = "🔴 WEAK RECORD"
 
-    rl_tag  = " ⚠️" if rl < 70 else ""
-    timing  = int(ts.timing_score      * 100)
+    rl_tag = " ⚠️" if rl < 70 else ""
+    timing = int(ts.timing_score * 100)
     consist = int(ts.consistency_score * 100)
-    fade    = int(ts.fade_score        * 100)
-    sizing  = int(ts.sizing_discipline * 100)
+    fade = int(ts.fade_score * 100)
+    sizing = int(ts.sizing_discipline * 100)
 
-    timing_label  = "Early/contrarian" if timing  >= 60 else ("Late to market"  if timing  < 35 else "Average timing")
-    consist_label = "Steady earner"    if consist >= 60 else ("One-hit wonder?" if consist < 35 else "Moderate variance")
-    fade_label    = "Contrarian"       if fade    >= 60 else ("Follows crowd"   if fade    < 35 else "Mixed style")
-    sizing_label  = "Sizes up on edge" if sizing  >= 60 else ("Flat/undisciplined" if sizing < 35 else "Moderate")
+    timing_label = (
+        "Early/contrarian"
+        if timing >= 60
+        else ("Late to market" if timing < 35 else "Average timing")
+    )
+    consist_label = (
+        "Steady earner"
+        if consist >= 60
+        else ("One-hit wonder?" if consist < 35 else "Moderate variance")
+    )
+    fade_label = (
+        "Contrarian"
+        if fade >= 60
+        else ("Follows crowd" if fade < 35 else "Mixed style")
+    )
+    sizing_label = (
+        "Sizes up on edge"
+        if sizing >= 60
+        else ("Flat/undisciplined" if sizing < 35 else "Moderate")
+    )
 
-    lines  = [
+    lines = [
         f"<b>🔍 Wallet Vet: {_e(ts.wallet_address[:10])}…{_e(ts.wallet_address[-4:])}</b>",
         f"Score: <b>{score}/100</b> — {verdict}",
         f"Anti-bot: {ab}  |  Perf: {pf}  |  Reliability: {rl}{rl_tag}",
@@ -1470,8 +1658,11 @@ async def cmd_wallet(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         return f"+${v:,.0f}" if v >= 0 else f"-${abs(v):,.0f}"
 
     if ts.trades_alltime:
-        adj_note = (f" (adj: {_fmt_pnl(ts.pnl_alltime_adj)})"
-                    if ts.hidden_loss_exposure > 0 else "")
+        adj_note = (
+            f" (adj: {_fmt_pnl(ts.pnl_alltime_adj)})"
+            if ts.hidden_loss_exposure > 0
+            else ""
+        )
         lines += [
             f"All-time: {ts.win_rate_alltime:.0%} | {_fmt_pnl(ts.pnl_alltime)}{adj_note}",
             f"30-day:   {ts.win_rate_30d:.0%} | {_fmt_pnl(ts.pnl_30d)}",
@@ -1492,9 +1683,7 @@ async def cmd_wallet(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
             "   Adjusted PnL reflects likely unrealized losses.",
         ]
 
-    await update.message.reply_text(
-        "\n".join(lines), parse_mode=ParseMode.HTML
-    )
+    await update.message.reply_text("\n".join(lines), parse_mode=ParseMode.HTML)
 
 
 async def cmd_performance(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1512,6 +1701,7 @@ async def cmd_performance(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> Non
 
     try:
         from edge_agent.memory.scan_log import ScanLog
+
         data = await asyncio.get_running_loop().run_in_executor(
             None, lambda: ScanLog().get_summary(days=days)
         )
@@ -1519,11 +1709,11 @@ async def cmd_performance(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> Non
         await update.message.reply_text(f"❌ Performance data unavailable: {exc}")
         return
 
-    scans  = data["scans"]
-    qual   = data["total_qualified"]
-    watch  = data["total_watchlist"]
+    scans = data["scans"]
+    qual = data["total_qualified"]
+    watch = data["total_watchlist"]
     alerts = data["total_alerts"]
-    avg_q  = data["avg_qual_per_scan"]
+    avg_q = data["avg_qual_per_scan"]
 
     if scans == 0:
         await update.message.reply_text(
@@ -1545,7 +1735,7 @@ async def cmd_performance(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> Non
     if breakdown:
         lines.append("\n<b>Signal Breakdown:</b>")
         for sig in breakdown:
-            ev_pct = f"{sig['avg_ev']*100:+.1f}%"
+            ev_pct = f"{sig['avg_ev'] * 100:+.1f}%"
             lines.append(
                 f"  <code>{_e(sig['signal'])}</code>: "
                 f"<b>{sig['count']}</b> signals | "
@@ -1559,7 +1749,7 @@ async def cmd_performance(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> Non
             f"\n🏆 <b>Best signal found:</b>\n"
             f"  <code>{_e(best['market_id'][:40])}</code> @ {_e(best['venue'])}\n"
             f"  Signal: {_e(best['signal_type'])} | "
-            f"EV: <b>{best['ev_net']*100:+.1f}%</b> | "
+            f"EV: <b>{best['ev_net'] * 100:+.1f}%</b> | "
             f"Conf: {best['confidence']:.0%}\n"
             f"  Found: {best['ts_str']}"
         )
@@ -1589,7 +1779,7 @@ async def cmd_performance(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> Non
                 wr_str = f"{wr:.0%}" if wr is not None else "n/a"
                 lines.append(
                     f"  Win rate: <b>{wr_str}</b> "
-                    f"({acc['wins']}W / {acc['losses']}L / {acc.get('voids',0)} void)"
+                    f"({acc['wins']}W / {acc['losses']}L / {acc.get('voids', 0)} void)"
                 )
             if pending:
                 lines.append(f"  ⏳ {pending} signals still pending resolution")
@@ -1602,9 +1792,9 @@ async def cmd_performance(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> Non
         pnl = _ot.user_pnl(user_id=user_id, days=days)
         if pnl.get("total_picks", 0):
             settled_u = pnl.get("settled", 0)
-            pnl_val   = pnl.get("total_pnl", 0.0)
-            roi       = pnl.get("roi")
-            wr_u      = pnl.get("win_rate")
+            pnl_val = pnl.get("total_pnl", 0.0)
+            roi = pnl.get("roi")
+            wr_u = pnl.get("win_rate")
             lines.append("\n<b>📊 Your Paper Trading:</b>")
             lines.append(
                 f"  Picks: {pnl['total_picks']} | "
@@ -1623,10 +1813,13 @@ async def cmd_performance(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> Non
     except Exception as _pnl_exc:
         log.debug("user pnl block failed: %s", _pnl_exc)
 
-    await _send_chunked(update.message.reply_text, "\n".join(lines), parse_mode=ParseMode.HTML)
+    await _send_chunked(
+        update.message.reply_text, "\n".join(lines), parse_mode=ParseMode.HTML
+    )
 
 
 # ── Dev Tracker commands ──────────────────────────────────────────────────
+
 
 async def outcome_resolution_job(ctx: ContextTypes.DEFAULT_TYPE) -> None:
     """Every 2h — check pending signals against Polymarket/Kalshi APIs and resolve."""
@@ -1637,8 +1830,11 @@ async def outcome_resolution_job(ctx: ContextTypes.DEFAULT_TYPE) -> None:
         log.info(
             "Outcome resolution: %d resolved, %d pending, %d backoff-skipped, "
             "%d unresolvable, %d errors.",
-            result["resolved"], result["still_pending"], result.get("skipped_backoff", 0),
-            result.get("unresolvable", 0), result["errors"],
+            result["resolved"],
+            result["still_pending"],
+            result.get("skipped_backoff", 0),
+            result.get("unresolvable", 0),
+            result["errors"],
         )
         # Periodic 180-day cleanup of old resolved signals
         await loop.run_in_executor(None, lambda: _ot.cleanup(resolved_max_age_days=180))
@@ -1660,7 +1856,7 @@ async def outcome_resolution_job(ctx: ContextTypes.DEFAULT_TYPE) -> None:
             engine = _get_insider_engine()
             tc = _get_trader_cache()
             for _res in _recent_all:
-                cid     = _res.get("condition_id") or _res.get("market_id") or ""
+                cid = _res.get("condition_id") or _res.get("market_id") or ""
                 outcome = _res.get("outcome", "VOID")
                 if not cid or outcome == "VOID":
                     continue
@@ -1680,11 +1876,19 @@ async def outcome_resolution_job(ctx: ContextTypes.DEFAULT_TYPE) -> None:
                                 vet_interval_sec=21600,  # 6h
                             ),
                         )
-                        log.info("[insider] Auto-watchlisted confirmed wallet: %s", addr[:10])
+                        log.info(
+                            "[insider] Auto-watchlisted confirmed wallet: %s", addr[:10]
+                        )
                     except Exception as _wl_exc:
-                        log.debug("[insider] Watchlist add failed for %s: %s", addr[:10], _wl_exc)
+                        log.debug(
+                            "[insider] Watchlist add failed for %s: %s",
+                            addr[:10],
+                            _wl_exc,
+                        )
         except Exception as _ins_exc:
-            log.debug("[insider] outcome propagation to insider engine failed: %s", _ins_exc)
+            log.debug(
+                "[insider] outcome propagation to insider engine failed: %s", _ins_exc
+            )
 
     except Exception as exc:
         log.warning("Outcome resolution job failed: %s", exc)
@@ -1714,7 +1918,10 @@ async def ml_calibration_job(ctx: ContextTypes.DEFAULT_TYPE) -> None:
             # 2. Retrain XGBoost scorer (Phase 2 threshold: 400 samples)
             score_ok = _scorer.train(labeled)
             if score_ok:
-                log.info("[ml_calibration_job] XGBoost scorer updated (phase=%d).", _scorer._phase)
+                log.info(
+                    "[ml_calibration_job] XGBoost scorer updated (phase=%d).",
+                    _scorer._phase,
+                )
 
             # 3. Update regime detector baseline if training succeeded
             if cal_ok or score_ok:
@@ -1724,7 +1931,9 @@ async def ml_calibration_job(ctx: ContextTypes.DEFAULT_TYPE) -> None:
             recent = _ml_store.get_labeled_features(min_samples=0, days=14)
             drifted = _regime.check(recent)
             if drifted:
-                log.warning("[ml_calibration_job] Regime drift detected — ML overlay disabled.")
+                log.warning(
+                    "[ml_calibration_job] Regime drift detected — ML overlay disabled."
+                )
 
             # 5. Cleanup old ML store rows
             _ml_store.cleanup(max_age_days=180)
@@ -1739,7 +1948,10 @@ async def ml_calibration_job(ctx: ContextTypes.DEFAULT_TYPE) -> None:
         result = await loop.run_in_executor(None, _run_calibration)
         log.info(
             "[ml_calibration_job] Complete — n=%d cal=%s xgb=%s drift=%s",
-            result["n_labeled"], result["cal_ok"], result["score_ok"], result["drifted"],
+            result["n_labeled"],
+            result["cal_ok"],
+            result["score_ok"],
+            result["drifted"],
         )
     except Exception as exc:
         log.warning("[ml_calibration_job] Failed: %s", exc)
@@ -1763,6 +1975,7 @@ async def maintenance_job(ctx: ContextTypes.DEFAULT_TYPE) -> None:
     for db_file in sorted(db_dir.glob("*.db")):
         try:
             import sqlite3 as _sqlite3
+
             conn = _sqlite3.connect(str(db_file))
             conn.execute("VACUUM")
             conn.close()
@@ -1774,21 +1987,24 @@ async def maintenance_job(ctx: ContextTypes.DEFAULT_TYPE) -> None:
     # ── 2. Archive old scan log entries ───────────────────────────────────
     try:
         from edge_agent.memory.scan_log import ScanLog as _ScanLog
+
         sl = _ScanLog()
         result = sl.cleanup(max_age_days=90)
         log.info(
             "[maintenance_job] scan_log: %d runs + %d signals archived.",
-            result["runs_deleted"], result["signals_deleted"],
+            result["runs_deleted"],
+            result["signals_deleted"],
         )
     except Exception as exc:
         log.warning("[maintenance_job] scan_log cleanup failed: %s", exc)
 
     # ── 3. Purge stale .cache/ JSON files (>48h old) ──────────────────────
     import time as _time
+
     cache_dir = _Path(__file__).parent / ".cache"
-    cutoff    = _time.time() - (48 * 3600)  # 48 hours
-    removed   = 0
-    errors    = 0
+    cutoff = _time.time() - (48 * 3600)  # 48 hours
+    removed = 0
+    errors = 0
     if cache_dir.exists():
         for fpath in cache_dir.glob("*.json"):
             try:
@@ -1799,7 +2015,8 @@ async def maintenance_job(ctx: ContextTypes.DEFAULT_TYPE) -> None:
                 errors += 1
     log.info(
         "[maintenance_job] .cache/ cleanup: %d stale files removed (%d errors).",
-        removed, errors,
+        removed,
+        errors,
     )
 
     # ── 4. Purge old decision log entries (>30 days) ──────────────────────
@@ -1819,7 +2036,7 @@ async def trader_refresh_job(ctx: ContextTypes.DEFAULT_TYPE) -> None:
     """Daily 8am PT — warm the trader cache with full top-100 leaderboard scores."""
     log.info("Trader refresh triggered.")
     try:
-        loop   = asyncio.get_running_loop()
+        loop = asyncio.get_running_loop()
         client = _TraderClient()
         scores = await loop.run_in_executor(
             None, lambda: client.get_hot_traders(limit=100, category="OVERALL")
@@ -1838,10 +2055,11 @@ async def discovery_job(ctx: ContextTypes.DEFAULT_TYPE) -> None:
     """
     log.info("[discovery_job] Starting multi-category sweep.")
     try:
-        loop   = asyncio.get_running_loop()
+        loop = asyncio.get_running_loop()
         client = _TraderClient()
         summary = await loop.run_in_executor(
-            None, lambda: client.discovery_sweep(per_category=100, fast_score_threshold=30.0)
+            None,
+            lambda: client.discovery_sweep(per_category=100, fast_score_threshold=30.0),
         )
         log.info(
             "[discovery_job] Sweep complete — %d unique wallets discovered: %s",
@@ -1851,7 +2069,9 @@ async def discovery_job(ctx: ContextTypes.DEFAULT_TYPE) -> None:
 
         # Graduate top candidates to Tier-2 full vet (up to 15 per cycle)
         cache = _get_trader_cache()
-        queue = cache.pool_get_vet_queue(limit=15, min_fast_score=40.0, exclude_done=True)
+        queue = cache.pool_get_vet_queue(
+            limit=15, min_fast_score=40.0, exclude_done=True
+        )
         if queue:
             log.info("[discovery_job] Tier-2 vetting %d top candidates.", len(queue))
             scored = 0
@@ -1860,21 +2080,29 @@ async def discovery_job(ctx: ContextTypes.DEFAULT_TYPE) -> None:
                     addr = entry["wallet_address"]
                     await loop.run_in_executor(
                         None,
-                        lambda a=addr, e=entry: client.score_trader(a, {
-                            "pnl": e.get("pnl_alltime", 0),
-                            "vol": e.get("volume_alltime", 0),
-                            "userName": e.get("display_name", ""),
-                        }),
+                        lambda a=addr, e=entry: client.score_trader(
+                            a,
+                            {
+                                "pnl": e.get("pnl_alltime", 0),
+                                "vol": e.get("volume_alltime", 0),
+                                "userName": e.get("display_name", ""),
+                            },
+                        ),
                     )
                     scored += 1
                 except Exception as exc:
                     log.debug(
                         "[discovery_job] Vet failed for %s: %s",
-                        entry.get("wallet_address", "?")[:10], exc,
+                        entry.get("wallet_address", "?")[:10],
+                        exc,
                     )
-            log.info("[discovery_job] Tier-2 complete — %d/%d vetted.", scored, len(queue))
+            log.info(
+                "[discovery_job] Tier-2 complete — %d/%d vetted.", scored, len(queue)
+            )
         else:
-            log.info("[discovery_job] No new candidates met Tier-2 threshold this cycle.")
+            log.info(
+                "[discovery_job] No new candidates met Tier-2 threshold this cycle."
+            )
 
     except Exception as exc:
         log.warning("[discovery_job] Failed: %s", exc)
@@ -1887,29 +2115,31 @@ async def watchlist_vet_job(ctx: ContextTypes.DEFAULT_TYPE) -> None:
     """
     log.info("[watchlist_vet_job] Checking due wallets.")
     try:
-        cache  = _get_trader_cache()
-        due    = cache.watchlist_due_for_vet()
+        cache = _get_trader_cache()
+        due = cache.watchlist_due_for_vet()
         if not due:
             log.info("[watchlist_vet_job] No wallets due for re-vet.")
             return
 
         log.info("[watchlist_vet_job] %d wallet(s) due for re-vet.", len(due))
-        loop   = asyncio.get_running_loop()
+        loop = asyncio.get_running_loop()
         client = _TraderClient()
         alerts: list[str] = []
 
         for entry in due:
-            addr      = entry["wallet_address"]
+            addr = entry["wallet_address"]
             old_score = float(entry.get("latest_score") or 0)
-            old_bot   = int(entry.get("latest_bot_flag") or 0)
-            name      = entry.get("display_name") or addr[:10] + "…"
+            old_bot = int(entry.get("latest_bot_flag") or 0)
+            name = entry.get("display_name") or addr[:10] + "…"
             try:
                 ts = await loop.run_in_executor(
                     None, lambda a=addr: client.score_trader(a)
                 )
-                cache.watchlist_mark_vetted(addr, score=ts.final_score * 100, bot_flag=ts.bot_flag)
+                cache.watchlist_mark_vetted(
+                    addr, score=ts.final_score * 100, bot_flag=ts.bot_flag
+                )
                 new_score = round(ts.final_score * 100, 1)
-                delta     = new_score - old_score
+                delta = new_score - old_score
 
                 if ts.bot_flag and not old_bot:
                     alerts.append(
@@ -1957,7 +2187,9 @@ async def cmd_watch(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     note = " ".join(args[1:]) if len(args) > 1 else ""
 
     if not addr.startswith("0x") or len(addr) < 10:
-        await update.message.reply_text("⚠️ That doesn't look like a valid wallet address.")
+        await update.message.reply_text(
+            "⚠️ That doesn't look like a valid wallet address."
+        )
         return
 
     cache = _get_trader_cache()
@@ -1986,13 +2218,15 @@ async def cmd_watch(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     )
 
     # Kick off an immediate background vet so first score appears quickly
-    loop   = asyncio.get_running_loop()
+    loop = asyncio.get_running_loop()
     client = _TraderClient()
     try:
         ts = await loop.run_in_executor(None, lambda: client.score_trader(addr))
-        cache.watchlist_mark_vetted(addr, score=ts.final_score * 100, bot_flag=ts.bot_flag)
+        cache.watchlist_mark_vetted(
+            addr, score=ts.final_score * 100, bot_flag=ts.bot_flag
+        )
         score_str = f"{ts.final_score * 100:.0f}/100"
-        bot_str   = " 🚨 <b>BOT FLAGGED</b>" if ts.bot_flag else ""
+        bot_str = " 🚨 <b>BOT FLAGGED</b>" if ts.bot_flag else ""
         await update.message.reply_text(
             f"⚡ Quick vet done: <b>{score_str}</b>{bot_str}\n"
             f"PnL: <b>${ts.pnl_alltime:,.0f}</b> | "
@@ -2015,13 +2249,19 @@ async def cmd_unwatch(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         )
         return
 
-    addr    = args[0].strip().lower()
+    addr = args[0].strip().lower()
     removed = _get_trader_cache().watchlist_remove(addr)
 
     if removed:
-        await update.message.reply_text(f"🗑️ Removed <code>{_e(addr[:14])}…</code> from watchlist.", parse_mode=ParseMode.HTML)
+        await update.message.reply_text(
+            f"🗑️ Removed <code>{_e(addr[:14])}…</code> from watchlist.",
+            parse_mode=ParseMode.HTML,
+        )
     else:
-        await update.message.reply_text(f"❌ <code>{_e(addr[:14])}…</code> wasn't in your watchlist.", parse_mode=ParseMode.HTML)
+        await update.message.reply_text(
+            f"❌ <code>{_e(addr[:14])}…</code> wasn't in your watchlist.",
+            parse_mode=ParseMode.HTML,
+        )
 
 
 async def cmd_watchlist(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
@@ -2029,7 +2269,7 @@ async def cmd_watchlist(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     /watchlist
     Show all watched wallets with their latest scores and last-vet time.
     """
-    cache   = _get_trader_cache()
+    cache = _get_trader_cache()
     entries = cache.watchlist_list()
 
     if not entries:
@@ -2039,17 +2279,19 @@ async def cmd_watchlist(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         )
         return
 
-    lines = [f"👀 <b>WATCHLIST</b> ({len(entries)} wallet{'s' if len(entries) != 1 else ''})\n"]
+    lines = [
+        f"👀 <b>WATCHLIST</b> ({len(entries)} wallet{'s' if len(entries) != 1 else ''})\n"
+    ]
 
     for e in entries:
-        addr      = e.get("wallet_address", "")
-        name      = e.get("display_name") or addr[:10] + "…"
-        score     = float(e.get("current_score") or e.get("latest_score") or 0)
-        bot_flag  = int(e.get("current_bot_flag") or e.get("latest_bot_flag") or 0)
-        last_vet  = _fmt_ts(e.get("last_vetted_at", 0))
-        note      = e.get("note", "")
-        pnl       = float(e.get("tp_pnl") or 0)
-        wr        = float(e.get("tp_win_rate") or 0)
+        addr = e.get("wallet_address", "")
+        name = e.get("display_name") or addr[:10] + "…"
+        score = float(e.get("current_score") or e.get("latest_score") or 0)
+        bot_flag = int(e.get("current_bot_flag") or e.get("latest_bot_flag") or 0)
+        last_vet = _fmt_ts(e.get("last_vetted_at", 0))
+        note = e.get("note", "")
+        pnl = float(e.get("tp_pnl") or 0)
+        wr = float(e.get("tp_win_rate") or 0)
 
         if bot_flag:
             badge = "🚨 BOT"
@@ -2061,7 +2303,7 @@ async def cmd_watchlist(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
             badge = "🔴 WEAK"
 
         pnl_str = f" | PnL: ${pnl:,.0f}" if pnl else ""
-        wr_str  = f" | WR: {wr:.0%}" if wr else ""
+        wr_str = f" | WR: {wr:.0%}" if wr else ""
         note_str = f"\n    📝 {_e(note)}" if note else ""
 
         lines.append(
@@ -2078,7 +2320,9 @@ async def cmd_watchlist(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         f"Avg fast score: {pool_stats['avg_fast_score']:.0f}</i>"
     )
 
-    await _send_chunked(update.message.reply_text, "\n\n".join(lines), parse_mode=ParseMode.HTML)
+    await _send_chunked(
+        update.message.reply_text, "\n\n".join(lines), parse_mode=ParseMode.HTML
+    )
 
 
 def _fmt_ts(ts: float | None) -> str:
@@ -2086,7 +2330,7 @@ def _fmt_ts(ts: float | None) -> str:
     if not ts:
         return "never"
     try:
-        dt  = datetime.fromtimestamp(float(ts), tz=timezone.utc)
+        dt = datetime.fromtimestamp(float(ts), tz=timezone.utc)
         ago = time.time() - float(ts)
         if ago < 3600:
             return f"{int(ago // 60)}m ago"
@@ -2106,7 +2350,7 @@ async def cmd_mytrades(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     /mytrades — show the user's paper trade picks (open + recent settled).
     """
     user_id = update.effective_user.id
-    picks   = _ot.get_user_picks(user_id=user_id, limit=30)
+    picks = _ot.get_user_picks(user_id=user_id, limit=30)
 
     if not picks:
         await update.message.reply_text(
@@ -2117,8 +2361,8 @@ async def cmd_mytrades(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         )
         return
 
-    open_picks     = [p for p in picks if p["pick_outcome"] == "PENDING"]
-    settled_picks  = [p for p in picks if p["pick_outcome"] != "PENDING"]
+    open_picks = [p for p in picks if p["pick_outcome"] == "PENDING"]
+    settled_picks = [p for p in picks if p["pick_outcome"] != "PENDING"]
 
     lines: list[str] = ["<b>📊 My Paper Trades</b>"]
 
@@ -2127,10 +2371,10 @@ async def cmd_mytrades(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         lines.append(f"\n<b>🟡 Open ({len(open_picks)})</b>")
         for p in open_picks:
             side_em = "📈" if p["side"] == "YES" else "📉"
-            prob    = p["entry_prob"] or 0.5
+            prob = p["entry_prob"] or 0.5
             # Potential payout if this side wins
-            payout  = round(p["paper_stake"] * (1 / max(prob, 0.01) - 1), 2)
-            venue   = (p["venue"] or "").upper()
+            payout = round(p["paper_stake"] * (1 / max(prob, 0.01) - 1), 2)
+            venue = (p["venue"] or "").upper()
             venue_tag = f"[{venue[:4]}]" if venue else ""
 
             # Market title — truncate to keep it readable
@@ -2147,14 +2391,14 @@ async def cmd_mytrades(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
 
     # ── Settled history ───────────────────────────────────────────────────────
     if settled_picks:
-        total_pnl  = sum(p["paper_pnl"] or 0 for p in settled_picks)
-        wins       = sum(1 for p in settled_picks if p["pick_outcome"] == "WIN")
-        losses     = sum(1 for p in settled_picks if p["pick_outcome"] == "LOSS")
-        voids      = sum(1 for p in settled_picks if p["pick_outcome"] == "VOID")
+        total_pnl = sum(p["paper_pnl"] or 0 for p in settled_picks)
+        wins = sum(1 for p in settled_picks if p["pick_outcome"] == "WIN")
+        losses = sum(1 for p in settled_picks if p["pick_outcome"] == "LOSS")
+        voids = sum(1 for p in settled_picks if p["pick_outcome"] == "VOID")
         settled_ct = wins + losses
-        wr_str     = f"{wins/settled_ct:.0%}" if settled_ct else "n/a"
-        pnl_sign   = "+" if total_pnl >= 0 else ""
-        pnl_em     = "🟢" if total_pnl >= 0 else "🔴"
+        wr_str = f"{wins / settled_ct:.0%}" if settled_ct else "n/a"
+        pnl_sign = "+" if total_pnl >= 0 else ""
+        pnl_em = "🟢" if total_pnl >= 0 else "🔴"
 
         lines.append(
             f"\n<b>📁 Settled ({len(settled_picks)})</b>  "
@@ -2166,20 +2410,25 @@ async def cmd_mytrades(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
 
         # Show last 5 settled picks detail
         for p in settled_picks[:5]:
-            outcome_em = {"WIN": "✅", "LOSS": "❌", "VOID": "⬜"}.get(p["pick_outcome"], "⬜")
-            pnl_val    = p["paper_pnl"] or 0
-            pnl_str    = f"+${pnl_val:.2f}" if pnl_val >= 0 else f"-${abs(pnl_val):.2f}"
+            outcome_em = {"WIN": "✅", "LOSS": "❌", "VOID": "⬜"}.get(
+                p["pick_outcome"], "⬜"
+            )
+            pnl_val = p["paper_pnl"] or 0
+            pnl_str = f"+${pnl_val:.2f}" if pnl_val >= 0 else f"-${abs(pnl_val):.2f}"
             q = p["question"] or p["market_id"] or "Unknown market"
             q_short = (q[:50] + "…") if len(q) > 50 else q
             lines.append(
-                f"{outcome_em} {p['side']}  <b>{pnl_str}</b>  "
-                f"<i>{_e(q_short)}</i>"
+                f"{outcome_em} {p['side']}  <b>{pnl_str}</b>  <i>{_e(q_short)}</i>"
             )
         if len(settled_picks) > 5:
-            lines.append(f"<i>… and {len(settled_picks) - 5} more. See /performance for full stats.</i>")
+            lines.append(
+                f"<i>… and {len(settled_picks) - 5} more. See /performance for full stats.</i>"
+            )
 
     lines.append("\n<i>Run /performance for full win rate + ROI breakdown.</i>")
-    await _send_chunked(update.message.reply_text, "\n".join(lines), parse_mode=ParseMode.HTML)
+    await _send_chunked(
+        update.message.reply_text, "\n".join(lines), parse_mode=ParseMode.HTML
+    )
 
 
 async def cmd_approvals(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
@@ -2219,6 +2468,7 @@ async def cmd_approvals(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
 # Inline keyboard callbacks (Approve / Skip / Details)
 # ---------------------------------------------------------------------------
 
+
 async def handle_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     query = update.callback_query
     await query.answer()
@@ -2236,7 +2486,9 @@ async def handle_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> Non
             if sig and sig != "NONE" and sig not in _approved_signals:
                 _approved_signals.add(sig)
                 _save_approved_signals(_approved_signals)
-                sig_added = f"\n📌 Signal type <code>{_e(sig)}</code> added to approved list."
+                sig_added = (
+                    f"\n📌 Signal type <code>{_e(sig)}</code> added to approved list."
+                )
 
         await query.edit_message_reply_markup(reply_markup=None)
         await query.message.reply_text(
@@ -2251,7 +2503,9 @@ async def handle_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> Non
         rec = _rec_store.get(slot)
         label = rec.market_id if rec else slot
         await query.edit_message_reply_markup(reply_markup=None)
-        await query.message.reply_text(f"❌ Skipped: <code>{_e(label)}</code>", parse_mode=ParseMode.HTML)
+        await query.message.reply_text(
+            f"❌ Skipped: <code>{_e(label)}</code>", parse_mode=ParseMode.HTML
+        )
 
     elif data.startswith("d:"):
         slot = data[2:]
@@ -2270,12 +2524,12 @@ async def handle_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> Non
     elif data.startswith("f:"):
         # Fade — paper trade the OPPOSITE of the bot's recommendation
         slot = data[2:]
-        rec  = _rec_store.get(slot)
+        rec = _rec_store.get(slot)
         if not rec:
             await query.answer("⚠️ Signal expired — can't record fade.", show_alert=True)
             return
-        bot_side  = "YES" if "YES" in rec.action.upper() else "NO"
-        fade_side = "NO"  if bot_side == "YES" else "YES"
+        bot_side = "YES" if "YES" in rec.action.upper() else "NO"
+        fade_side = "NO" if bot_side == "YES" else "YES"
         # Re-use the pt: handler logic by rewriting data and falling through
         data = f"pt:{fade_side}:{slot}"
         fade_label = f"🔄 Fading bot's {bot_side} → your pick: {fade_side}"
@@ -2288,9 +2542,12 @@ async def handle_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> Non
                 (rec.market_id,),
             ).fetchone()
             if not sig_row:
-                await query.answer("⚠️ Signal not registered yet — try again in a moment.", show_alert=True)
+                await query.answer(
+                    "⚠️ Signal not registered yet — try again in a moment.",
+                    show_alert=True,
+                )
                 return
-            signal_id  = sig_row["signal_id"]
+            signal_id = sig_row["signal_id"]
             entry_prob = sig_row["entry_prob"]
             recorded = _ot.record_user_pick(
                 signal_id=signal_id,
@@ -2301,7 +2558,7 @@ async def handle_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> Non
             if not recorded:
                 await query.answer("You already picked this one.", show_alert=True)
                 return
-            prob   = entry_prob or rec.market_prob or 0.5
+            prob = entry_prob or rec.market_prob or 0.5
             f_prob = (1 - prob) if fade_side == "YES" else prob
             payout = round(10 * (1 / max(f_prob, 0.01) - 1), 2)
             await query.answer(
@@ -2337,10 +2594,13 @@ async def handle_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> Non
             ).fetchone()
 
             if not sig_row:
-                await query.answer("⚠️ Signal not registered yet — try again in a moment.", show_alert=True)
+                await query.answer(
+                    "⚠️ Signal not registered yet — try again in a moment.",
+                    show_alert=True,
+                )
                 return
 
-            signal_id  = sig_row["signal_id"]
+            signal_id = sig_row["signal_id"]
             entry_prob = sig_row["entry_prob"]
 
             recorded = _ot.record_user_pick(
@@ -2356,7 +2616,11 @@ async def handle_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> Non
 
             # Show confirmation with implied payout
             prob = entry_prob or rec.market_prob or 0.5
-            payout = round(10 * (1 / max(prob, 0.01) - 1), 2) if side.upper() == "YES" else round(10 * (1 / max(1 - prob, 0.01) - 1), 2)
+            payout = (
+                round(10 * (1 / max(prob, 0.01) - 1), 2)
+                if side.upper() == "YES"
+                else round(10 * (1 / max(1 - prob, 0.01) - 1), 2)
+            )
             side_emoji = "📈" if side.upper() == "YES" else "📉"
             await query.answer(
                 f"{side_emoji} Picked {side.upper()} — paper $10 @ {prob:.0%}\n"
@@ -2373,6 +2637,7 @@ async def handle_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> Non
 # Injury context builder for free-form chat
 # ---------------------------------------------------------------------------
 
+
 async def _maybe_refresh_injury_cache(sport: str) -> None:
     """
     On-demand freshness gate. If the cache for *sport* is empty or older than
@@ -2381,11 +2646,13 @@ async def _maybe_refresh_injury_cache(sport: str) -> None:
     nothing.  Rate-limited to once per 30 min per sport.
     """
     import time as _t
+
     now = _t.time()
     if now - _ONDEMAND_REFRESH_COOLDOWN.get(sport, 0) < 1800:
         return  # refreshed recently
     try:
         from edge_agent.memory.injury_cache import InjuryCache
+
         records = InjuryCache().get_all(sport)
         if records:
             newest = max(r.get("fetched_at", 0) for r in records)
@@ -2413,23 +2680,81 @@ def _build_injury_context(query: str) -> str:
     """
     try:
         from edge_agent.memory.injury_cache import InjuryCache
-        _injury_detect = importlib.import_module(".dat-ingestion.injury_api", "edge_agent")
-        detect_sport   = _injury_detect.detect_sport
-        _star_keys     = set(_injury_detect._STAR_MULTIPLIERS.keys())
+
+        _injury_detect = importlib.import_module(
+            ".dat-ingestion.injury_api", "edge_agent"
+        )
+        detect_sport = _injury_detect.detect_sport
+        _star_keys = set(_injury_detect._STAR_MULTIPLIERS.keys())
 
         # ── Detect sport ──────────────────────────────────────────────────────
         # Quick bail-out: if none of the sport-indicator words appear, skip.
         _SPORT_TRIGGERS = {
-            "nba": {"nba", "basketball", "lakers", "celtics", "warriors", "bucks",
-                    "heat", "nets", "knicks", "nuggets", "suns", "sixers", "raptors",
-                    "mavericks", "mavs", "spurs", "thunder", "grizzlies", "pelicans"},
-            "nfl": {"nfl", "football", "chiefs", "eagles", "cowboys", "ravens",
-                    "bills", "bengals", "dolphins", "steelers", "49ers", "rams",
-                    "seahawks", "patriots", "packers", "bears", "giants", "saints",
-                    "buccaneers", "chargers", "raiders", "broncos", "texans"},
-            "nhl": {"nhl", "hockey", "oilers", "bruins", "rangers", "leafs",
-                    "canadiens", "penguins", "capitals", "lightning", "golden knights",
-                    "kraken", "avalanche", "flames", "canucks", "senators", "sabres"},
+            "nba": {
+                "nba",
+                "basketball",
+                "lakers",
+                "celtics",
+                "warriors",
+                "bucks",
+                "heat",
+                "nets",
+                "knicks",
+                "nuggets",
+                "suns",
+                "sixers",
+                "raptors",
+                "mavericks",
+                "mavs",
+                "spurs",
+                "thunder",
+                "grizzlies",
+                "pelicans",
+            },
+            "nfl": {
+                "nfl",
+                "football",
+                "chiefs",
+                "eagles",
+                "cowboys",
+                "ravens",
+                "bills",
+                "bengals",
+                "dolphins",
+                "steelers",
+                "49ers",
+                "rams",
+                "seahawks",
+                "patriots",
+                "packers",
+                "bears",
+                "giants",
+                "saints",
+                "buccaneers",
+                "chargers",
+                "raiders",
+                "broncos",
+                "texans",
+            },
+            "nhl": {
+                "nhl",
+                "hockey",
+                "oilers",
+                "bruins",
+                "rangers",
+                "leafs",
+                "canadiens",
+                "penguins",
+                "capitals",
+                "lightning",
+                "golden knights",
+                "kraken",
+                "avalanche",
+                "flames",
+                "canucks",
+                "senators",
+                "sabres",
+            },
         }
         q = query.lower()
         matched_sport = None
@@ -2441,7 +2766,7 @@ def _build_injury_context(query: str) -> str:
         # Also check for player name mentions (covers "is LeBron playing?")
         player_mentioned = next((k for k in _star_keys if k in q), None)
         if player_mentioned and not matched_sport:
-            matched_sport = detect_sport(q)   # let keyword scorer decide
+            matched_sport = detect_sport(q)  # let keyword scorer decide
 
         if not matched_sport:
             return ""
@@ -2455,10 +2780,18 @@ def _build_injury_context(query: str) -> str:
         # If a specific player was mentioned, show just that player + team.
         # Otherwise try to match a team from the query, then fall back to top-10.
         if player_mentioned:
-            relevant = [r for r in all_records if player_mentioned in r.get("player_name", "").lower()]
+            relevant = [
+                r
+                for r in all_records
+                if player_mentioned in r.get("player_name", "").lower()
+            ]
         else:
             # Try substring team match
-            relevant = [r for r in all_records if any(w in q for w in r.get("team", "").lower().split())]
+            relevant = [
+                r
+                for r in all_records
+                if any(w in q for w in r.get("team", "").lower().split())
+            ]
 
         # Fallback: show the most-severe players (top 10) for the detected sport
         if not relevant:
@@ -2466,22 +2799,30 @@ def _build_injury_context(query: str) -> str:
 
         # ── Format — split starters vs role players ───────────────────────────
         _SEV_TAG = {
-            "Out": "OUT", "Injured Reserve": "OUT(IR)", "Suspension": "SUSP",
-            "Doubtful": "DOUBTFUL", "Questionable": "QUEST", "Day-To-Day": "DTD",
+            "Out": "OUT",
+            "Injured Reserve": "OUT(IR)",
+            "Suspension": "SUSP",
+            "Doubtful": "DOUBTFUL",
+            "Questionable": "QUEST",
+            "Day-To-Day": "DTD",
         }
-        src_note = {"nba_official": "(official)", "+sleeper✓": "(confirmed)", "⚠️": "(⚠️ conflicting)"}
+        src_note = {
+            "nba_official": "(official)",
+            "+sleeper✓": "(confirmed)",
+            "⚠️": "(⚠️ conflicting)",
+        }
 
         def _fmt_row(r: dict) -> str:
-            status   = r.get("status", "")
-            tag      = _SEV_TAG.get(status, status)
-            player   = r.get("player_name", "")
-            team     = r.get("team", "")
-            pos      = r.get("position", "")
+            status = r.get("status", "")
+            tag = _SEV_TAG.get(status, status)
+            player = r.get("player_name", "")
+            team = r.get("team", "")
+            pos = r.get("position", "")
             inj_type = r.get("injury_type", "")
-            src      = r.get("source_api", "espn")
-            src_tag  = next((v for k, v in src_note.items() if k in src), "")
-            detail   = f" [{inj_type}]" if inj_type else ""
-            pos_s    = f" ({pos})" if pos else ""
+            src = r.get("source_api", "espn")
+            src_tag = next((v for k, v in src_note.items() if k in src), "")
+            detail = f" [{inj_type}]" if inj_type else ""
+            pos_s = f" ({pos})" if pos else ""
             return f"  {tag}: {player}{pos_s} — {team}{detail}{src_tag}"
 
         starters = [r for r in relevant if r.get("is_starter")]
@@ -2494,14 +2835,19 @@ def _build_injury_context(query: str) -> str:
                 lines.append(_fmt_row(r))
         if role_players:
             lines.append("ROLE PLAYERS:")
-            for r in role_players[:5]:   # condensed — less critical
+            for r in role_players[:5]:  # condensed — less critical
                 lines.append(_fmt_row(r))
 
         import time as _t
+
         newest_ts = max((r.get("fetched_at", 0) for r in relevant), default=0)
         if newest_ts:
             age_min = int((_t.time() - newest_ts) / 60)
-            age_str = f"{age_min}m ago" if age_min < 60 else f"{age_min // 60}h {age_min % 60}m ago"
+            age_str = (
+                f"{age_min}m ago"
+                if age_min < 60
+                else f"{age_min // 60}h {age_min % 60}m ago"
+            )
         else:
             age_str = "unknown"
         sources = "ESPN"
@@ -2509,8 +2855,10 @@ def _build_injury_context(query: str) -> str:
             sources += " + NBA official PDF"
         if matched_sport in ("nba", "nfl"):
             sources += " + Sleeper cross-ref"
-        lines.append(f"[Source: {sources}. Last updated {age_str}. "
-                     f"Use /injuries {matched_sport} to force-refresh.]")
+        lines.append(
+            f"[Source: {sources}. Last updated {age_str}. "
+            f"Use /injuries {matched_sport} to force-refresh.]"
+        )
         return "\n".join(lines)
 
     except Exception as exc:
@@ -2522,16 +2870,17 @@ def _build_injury_context(query: str) -> str:
 # Smart Money context builder
 # ---------------------------------------------------------------------------
 
+
 def _derive_strategy_tag(tw: dict) -> str:
     """
     Derive a human-readable strategy label from stored wallet signals.
     Called in smart money context builder — no extra DB query needed.
     """
-    top_cats   = tw.get("top_categories", "")
-    timing     = float(tw.get("timing_score", 0.0) or 0.0)
-    fade       = float(tw.get("fade_score", 0.0) or 0.0)
+    top_cats = tw.get("top_categories", "")
+    timing = float(tw.get("timing_score", 0.0) or 0.0)
+    fade = float(tw.get("fade_score", 0.0) or 0.0)
     # Rough avg-entry proxy from timing_score: timing = 1 - (avg - 0.10)/0.70
-    avg_entry  = 0.10 + (1.0 - timing) * 0.70 if timing > 0 else 0.5
+    avg_entry = 0.10 + (1.0 - timing) * 0.70 if timing > 0 else 0.5
 
     # Specialist: top category contains a single sport/domain name
     if top_cats:
@@ -2548,7 +2897,9 @@ def _derive_strategy_tag(tw: dict) -> str:
     return "Generalist"
 
 
-def _build_smart_money_context(force_refresh: bool = False, sport_filter: str = "") -> str:
+def _build_smart_money_context(
+    force_refresh: bool = False, sport_filter: str = ""
+) -> str:
     """
     Return a compact [Smart Money] context block showing what top-scored
     watchlist wallets are currently betting on.
@@ -2574,12 +2925,12 @@ def _build_smart_money_context(force_refresh: bool = False, sport_filter: str = 
 
     # ── Refresh: pull top-scored non-bot wallets from cache, fetch positions ──
     try:
-        cache  = _get_trader_cache()
+        cache = _get_trader_cache()
         # Top 8 non-bot wallets by final_score — sport specialists may be ranked lower
-        top    = cache.get_top(limit=8)
+        top = cache.get_top(limit=8)
         client = _TraderClient()
-        new_lines:    list[str]  = []
-        new_pos_keys: set[str]   = set()
+        new_lines: list[str] = []
+        new_pos_keys: set[str] = set()
         new_alertable: list[dict] = []
 
         prev_keys = _sm_positions_cache.get("position_keys", set())
@@ -2599,11 +2950,11 @@ def _build_smart_money_context(force_refresh: bool = False, sport_filter: str = 
         for tw in top:
             if shown >= 5:
                 break
-            addr     = tw.get("wallet_address", "")
-            score    = int(float(tw.get("final_score", 0) or 0) * 100)
-            streak   = int(tw.get("current_streak", 0) or 0)
-            strat    = _derive_strategy_tag(tw)
-            pnl_all  = float(tw.get("pnl_alltime", 0) or 0)
+            addr = tw.get("wallet_address", "")
+            score = int(float(tw.get("final_score", 0) or 0) * 100)
+            streak = int(tw.get("current_streak", 0) or 0)
+            strat = _derive_strategy_tag(tw)
+            pnl_all = float(tw.get("pnl_alltime", 0) or 0)
             win_rate = float(tw.get("win_rate_alltime", 0) or 0)
             if not addr:
                 continue
@@ -2624,10 +2975,23 @@ def _build_smart_money_context(force_refresh: bool = False, sport_filter: str = 
                     continue
                 # Skip spread/prop/total markets — only keep moneyline-equivalent
                 _ptitle = (p.get("title") or p.get("market", "")).lower()
-                if any(kw in _ptitle for kw in (
-                    "spread", "o/u", "over/under", "total", "points",
-                    "(+", "(-", "rebounds", "assists", "1h", "2h", "quarter",
-                )):
+                if any(
+                    kw in _ptitle
+                    for kw in (
+                        "spread",
+                        "o/u",
+                        "over/under",
+                        "total",
+                        "points",
+                        "(+",
+                        "(-",
+                        "rebounds",
+                        "assists",
+                        "1h",
+                        "2h",
+                        "quarter",
+                    )
+                ):
                     continue
                 sig.append(p)
             if not sig:
@@ -2645,10 +3009,10 @@ def _build_smart_money_context(force_refresh: bool = False, sport_filter: str = 
             wallet_header = f"  [{score}/100]{streak_badge} {addr[:8]}... | {strat}"
             new_lines.append(wallet_header)
 
-            for pos in sig[:3]:   # max 3 positions per wallet
-                title   = (pos.get("title") or pos.get("market", "Unknown market"))[:55]
-                side    = "YES" if pos.get("outcomeIndex", 0) == 0 else "NO"
-                size    = float(pos.get("size", pos.get("currentValue", 0)) or 0)
+            for pos in sig[:3]:  # max 3 positions per wallet
+                title = (pos.get("title") or pos.get("market", "Unknown market"))[:55]
+                side = "YES" if pos.get("outcomeIndex", 0) == 0 else "NO"
+                size = float(pos.get("size", pos.get("currentValue", 0)) or 0)
                 cond_id = pos.get("conditionId", pos.get("market", title[:20]))
 
                 # Fetch real current price from CLOB API instead of defaulting to 0.5
@@ -2665,29 +3029,31 @@ def _build_smart_money_context(force_refresh: bool = False, sport_filter: str = 
 
                 # Detect new positions (not seen in previous cycle) for alert candidates
                 if pos_key not in prev_keys:
-                    new_alertable.append({
-                        "addr":     addr,
-                        "score":    score,
-                        "streak":   streak,
-                        "strat":    strat,
-                        "pnl_all":  pnl_all,
-                        "win_rate": win_rate,
-                        "title":    title,
-                        "side":     side,
-                        "size":     size,
-                        "cur_pct":  cur_pct,
-                        "cond_id":  cond_id,
-                    })
+                    new_alertable.append(
+                        {
+                            "addr": addr,
+                            "score": score,
+                            "streak": streak,
+                            "strat": strat,
+                            "pnl_all": pnl_all,
+                            "win_rate": win_rate,
+                            "title": title,
+                            "side": side,
+                            "size": size,
+                            "cur_pct": cur_pct,
+                            "cond_id": cond_id,
+                        }
+                    )
 
                 new_lines.append(
                     f"    → {side} on '{title}' ${size:,.0f} @ {cur_pct:.0%}"
                 )
             shown += 1
 
-        _sm_positions_cache["lines"]         = new_lines
-        _sm_positions_cache["fetched_at"]    = now
+        _sm_positions_cache["lines"] = new_lines
+        _sm_positions_cache["fetched_at"] = now
         _sm_positions_cache["position_keys"] = new_pos_keys
-        _sm_positions_cache["alertable"]     = new_alertable
+        _sm_positions_cache["alertable"] = new_alertable
 
         if new_lines:
             return (
@@ -2704,11 +3070,13 @@ def _build_smart_money_context(force_refresh: bool = False, sport_filter: str = 
 # Copy-trade alert quality filter + channel notifier
 # ---------------------------------------------------------------------------
 
-_SM_ALERT_MIN_SCORE   = 40    # wallets below this score are too low-quality
-_SM_ALERT_MIN_SIZE    = 200   # positions below $200 are noise / test trades
-_SM_ALERT_PRICE_LOW   = 0.15  # below 15% → near-certain NO, no useful entry window
-_SM_ALERT_PRICE_HIGH  = 0.75  # above 75% → mostly played out, follower gets little upside
-_SM_ALERT_DCA_WINDOW  = 86400 # 24 hours — suppress follow-on buys into same market
+_SM_ALERT_MIN_SCORE = 40  # wallets below this score are too low-quality
+_SM_ALERT_MIN_SIZE = 200  # positions below $200 are noise / test trades
+_SM_ALERT_PRICE_LOW = 0.15  # below 15% → near-certain NO, no useful entry window
+_SM_ALERT_PRICE_HIGH = (
+    0.75  # above 75% → mostly played out, follower gets little upside
+)
+_SM_ALERT_DCA_WINDOW = 86400  # 24 hours — suppress follow-on buys into same market
 
 
 def _copy_trade_quality_check(pos: dict) -> tuple[bool, str]:
@@ -2722,9 +3090,9 @@ def _copy_trade_quality_check(pos: dict) -> tuple[bool, str]:
       4. DCA suppression — same wallet already alerted on this market in last 24h
       5. Stale price check — if cur_pct is exactly 0.5, price fetch likely failed
     """
-    score   = pos["score"]
+    score = pos["score"]
     cur_pct = pos["cur_pct"]
-    size    = pos["size"]
+    size = pos["size"]
     key_24h = f"{pos['addr']}:{pos['cond_id']}"
 
     if score < _SM_ALERT_MIN_SCORE:
@@ -2772,7 +3140,10 @@ async def _send_copy_trade_alerts(bot) -> int:
     # total positions (which means prev_keys was empty = cold start).
     total_pos = len(_sm_positions_cache.get("position_keys", set()))
     if len(candidates) == total_pos and total_pos > 0:
-        log.info("[CopyAlert] Cold start — skipping %d positions (no previous baseline)", total_pos)
+        log.info(
+            "[CopyAlert] Cold start — skipping %d positions (no previous baseline)",
+            total_pos,
+        )
         return 0
 
     sent = 0
@@ -2782,48 +3153,180 @@ async def _send_copy_trade_alerts(bot) -> int:
             log.debug("[CopyAlert] Filtered out '%s': %s", pos["title"][:40], reason)
             continue
 
-        score   = pos["score"]
-        streak  = pos["streak"]
-        strat   = pos["strat"]
-        addr    = pos["addr"]
-        title   = pos["title"]
-        side    = pos["side"]
-        size    = pos["size"]
+        score = pos["score"]
+        streak = pos["streak"]
+        strat = pos["strat"]
+        addr = pos["addr"]
+        title = pos["title"]
+        side = pos["side"]
+        size = pos["size"]
         cur_pct = pos["cur_pct"]
         pnl_all = pos["pnl_all"]
-        wr      = pos["win_rate"]
+        wr = pos["win_rate"]
 
         # Derive position-specific category from the market title
         _tl = title.lower()
         _pos_cat = strat  # default to wallet-level strategy tag
         _POSITION_CATS = [
-            (["nba", "lakers", "celtics", "warriors", "bucks", "nets", "knicks",
-              "nuggets", "suns", "76ers", "heat", "mavericks", "thunder",
-              "grizzlies", "clippers", "rockets", "kings", "bulls", "hawks",
-              "cavaliers", "pacers", "pistons", "hornets", "magic", "jazz",
-              "timberwolves", "spurs", "pelicans", "trail blazers", "wizards",
-              "raptors"], "NBA"),
-            (["nfl", "chiefs", "eagles", "cowboys", "ravens", "bills", "bengals",
-              "dolphins", "steelers", "49ers", "rams", "seahawks", "packers",
-              "lions", "bears", "vikings", "giants", "saints", "buccaneers",
-              "chargers", "raiders", "broncos", "texans", "colts", "titans",
-              "jaguars", "browns", "falcons", "panthers", "cardinals",
-              "commanders"], "NFL"),
-            (["nhl", "bruins", "rangers", "oilers", "flames", "canucks",
-              "maple leafs", "canadiens", "lightning", "penguins", "capitals",
-              "avalanche", "golden knights", "red wings", "blackhawks",
-              "blues", "flyers"], "NHL"),
-            (["fc ", "united", "city", "arsenal", "chelsea", "liverpool",
-              "barcelona", "madrid", "bayern", "juventus", "psg",
-              "paris saint", "inter milan", "ac milan", "dortmund",
-              "atletico", "tottenham", "man utd", "man city", "la liga",
-              "premier league", "serie a", "bundesliga", "ligue 1",
-              "champions league", "europa", "soccer", "football"], "Soccer"),
-            (["bitcoin", "btc", "ethereum", "eth", "crypto", "solana",
-              "token", "coin", "defi"], "Crypto"),
-            (["election", "president", "trump", "biden", "senate", "congress",
-              "governor", "vote", "ballot", "democrat", "republican",
-              "by-election", "parliament"], "Politics"),
+            (
+                [
+                    "nba",
+                    "lakers",
+                    "celtics",
+                    "warriors",
+                    "bucks",
+                    "nets",
+                    "knicks",
+                    "nuggets",
+                    "suns",
+                    "76ers",
+                    "heat",
+                    "mavericks",
+                    "thunder",
+                    "grizzlies",
+                    "clippers",
+                    "rockets",
+                    "kings",
+                    "bulls",
+                    "hawks",
+                    "cavaliers",
+                    "pacers",
+                    "pistons",
+                    "hornets",
+                    "magic",
+                    "jazz",
+                    "timberwolves",
+                    "spurs",
+                    "pelicans",
+                    "trail blazers",
+                    "wizards",
+                    "raptors",
+                ],
+                "NBA",
+            ),
+            (
+                [
+                    "nfl",
+                    "chiefs",
+                    "eagles",
+                    "cowboys",
+                    "ravens",
+                    "bills",
+                    "bengals",
+                    "dolphins",
+                    "steelers",
+                    "49ers",
+                    "rams",
+                    "seahawks",
+                    "packers",
+                    "lions",
+                    "bears",
+                    "vikings",
+                    "giants",
+                    "saints",
+                    "buccaneers",
+                    "chargers",
+                    "raiders",
+                    "broncos",
+                    "texans",
+                    "colts",
+                    "titans",
+                    "jaguars",
+                    "browns",
+                    "falcons",
+                    "panthers",
+                    "cardinals",
+                    "commanders",
+                ],
+                "NFL",
+            ),
+            (
+                [
+                    "nhl",
+                    "bruins",
+                    "rangers",
+                    "oilers",
+                    "flames",
+                    "canucks",
+                    "maple leafs",
+                    "canadiens",
+                    "lightning",
+                    "penguins",
+                    "capitals",
+                    "avalanche",
+                    "golden knights",
+                    "red wings",
+                    "blackhawks",
+                    "blues",
+                    "flyers",
+                ],
+                "NHL",
+            ),
+            (
+                [
+                    "fc ",
+                    "united",
+                    "city",
+                    "arsenal",
+                    "chelsea",
+                    "liverpool",
+                    "barcelona",
+                    "madrid",
+                    "bayern",
+                    "juventus",
+                    "psg",
+                    "paris saint",
+                    "inter milan",
+                    "ac milan",
+                    "dortmund",
+                    "atletico",
+                    "tottenham",
+                    "man utd",
+                    "man city",
+                    "la liga",
+                    "premier league",
+                    "serie a",
+                    "bundesliga",
+                    "ligue 1",
+                    "champions league",
+                    "europa",
+                    "soccer",
+                    "football",
+                ],
+                "Soccer",
+            ),
+            (
+                [
+                    "bitcoin",
+                    "btc",
+                    "ethereum",
+                    "eth",
+                    "crypto",
+                    "solana",
+                    "token",
+                    "coin",
+                    "defi",
+                ],
+                "Crypto",
+            ),
+            (
+                [
+                    "election",
+                    "president",
+                    "trump",
+                    "biden",
+                    "senate",
+                    "congress",
+                    "governor",
+                    "vote",
+                    "ballot",
+                    "democrat",
+                    "republican",
+                    "by-election",
+                    "parliament",
+                ],
+                "Politics",
+            ),
         ]
         for _keywords, _cat_label in _POSITION_CATS:
             if any(kw in _tl for kw in _keywords):
@@ -2831,8 +3334,16 @@ async def _send_copy_trade_alerts(bot) -> int:
                 break
 
         # Upside/downside remaining
-        upside_pp  = round((1.0 - cur_pct) * 100, 1) if side == "YES" else round(cur_pct * 100, 1)
-        downside_pp = round(cur_pct * 100, 1) if side == "YES" else round((1.0 - cur_pct) * 100, 1)
+        upside_pp = (
+            round((1.0 - cur_pct) * 100, 1)
+            if side == "YES"
+            else round(cur_pct * 100, 1)
+        )
+        downside_pp = (
+            round(cur_pct * 100, 1)
+            if side == "YES"
+            else round((1.0 - cur_pct) * 100, 1)
+        )
 
         streak_line = ""
         if streak >= 5:
@@ -2844,8 +3355,11 @@ async def _send_copy_trade_alerts(bot) -> int:
 
         pnl_str = f"+${pnl_all:,.0f}" if pnl_all >= 0 else f"-${abs(pnl_all):,.0f}"
         confidence = (
-            "High conviction" if score >= 60 else
-            "Moderate signal" if score >= 40 else "Weak signal"
+            "High conviction"
+            if score >= 60
+            else "Moderate signal"
+            if score >= 40
+            else "Weak signal"
         )
 
         text = (
@@ -2862,16 +3376,20 @@ async def _send_copy_trade_alerts(bot) -> int:
 
         try:
             await bot.send_message(
-                chat_id    = ALERT_CHANNEL_ID,
-                text       = text,
-                parse_mode = ParseMode.HTML,
+                chat_id=ALERT_CHANNEL_ID,
+                text=text,
+                parse_mode=ParseMode.HTML,
             )
             # Mark this wallet+market as alerted so DCA follow-ons are suppressed
             _sm_alerted_24h[f"{addr}:{pos['cond_id']}"] = time.time()
             sent += 1
             log.info(
                 "[CopyAlert] Sent: %s %s on '%s' @ %.0f%% (score=%d)",
-                addr[:10], side, title[:40], cur_pct * 100, score,
+                addr[:10],
+                side,
+                title[:40],
+                cur_pct * 100,
+                score,
             )
         except Exception as exc:
             log.warning("[CopyAlert] Failed to send alert: %s", exc)
@@ -2886,14 +3404,195 @@ async def _send_copy_trade_alerts(bot) -> int:
 
 
 # ---------------------------------------------------------------------------
+# Game Assessment Context Builder
+# ---------------------------------------------------------------------------
+
+_GAME_ASSESSMENT_KEYWORDS = {
+    "analysis",
+    "assess",
+    "break down",
+    "preview",
+    "prediction",
+    "prediction",
+    "who wins",
+    "win chance",
+    "win probability",
+    "odds",
+    "outlook",
+    "outlook",
+    "how will",
+    "should i bet",
+    "bet on",
+    "recap",
+    "previous game",
+    "last game",
+    "h2h",
+    "head to head",
+    "matchup",
+    "versus",
+    "vs ",
+    "standings",
+    "record",
+}
+
+
+def _build_game_assessment_context(teams: list[str], sport: str, query: str) -> str:
+    """
+    Build a comprehensive game assessment context for a matchup.
+    Includes: standings/records, head-to-head, coaching, all-stars, recent form.
+    Returns "" if no game assessment keywords detected.
+    """
+    if len(teams) < 2:
+        return ""
+
+    if not any(kw in query.lower() for kw in _GAME_ASSESSMENT_KEYWORDS):
+        return ""
+
+    from datetime import date
+
+    today = date.today().strftime("%B %d, %Y")
+
+    team1, team2 = teams[0], teams[1]
+
+    assessment_lines = [f"\n[Game Assessment — {team1} vs {team2}]", f"Today: {today}"]
+
+    assessment_lines.append(f"\nWeb search results for matchup analysis:")
+
+    search_query = f"{team1} vs {team2} {sport.upper()} game preview analysis standings record {today}"
+    try:
+        import requests as _req
+
+        resp = _req.get(
+            "https://google.serper.dev/search",
+            headers={"X-API-KEY": os.getenv("SERPER_API_KEY", "").strip()},
+            json={"q": search_query, "num": 5},
+            timeout=10,
+        )
+        if resp.status_code == 200:
+            data = resp.json()
+            if ans := data.get("answerBox", {}).get("answer"):
+                assessment_lines.append(f"Summary: {ans}")
+            for r in data.get("organic", [])[:5]:
+                title = r.get("title", "").strip()
+                snippet = r.get("snippet", "").strip()
+                if len(snippet) > 200:
+                    snippet = snippet[:200].rsplit(" ", 1)[0] + "..."
+                assessment_lines.append(f"• {title}: {snippet}")
+    except Exception:
+        pass
+
+    h2h_query = f"{team1} vs {team2} {sport.upper()} head to head results this season"
+    try:
+        resp = _req.get(
+            "https://google.serper.dev/search",
+            headers={"X-API-KEY": os.getenv("SERPER_API_KEY", "").strip()},
+            json={"q": h2h_query, "num": 3},
+            timeout=10,
+        )
+        if resp.status_code == 200:
+            data = resp.json()
+            if data.get("organic"):
+                assessment_lines.append(f"\nHead-to-head / this season results:")
+                for r in data.get("organic", [])[:3]:
+                    title = r.get("title", "").strip()
+                    snippet = r.get("snippet", "").strip()
+                    if len(snippet) > 200:
+                        snippet = snippet[:200].rsplit(" ", 1)[0] + "..."
+                    assessment_lines.append(f"• {title}: {snippet}")
+    except Exception:
+        pass
+
+    return "\n".join(assessment_lines)
+
+
+def _build_todays_games_context(user_msg: str) -> str:
+    """
+    Return a context block listing today's games when user asks about them.
+    Supports NBA (BallDontLie) and NHL (web search).
+    Returns "" if no 'today's games' intent detected.
+    """
+    _TODAYS_GAMES_TRIGGERS = {
+        "games today",
+        "games tonight",
+        "todays games",
+        "tonights games",
+        "what games",
+        "schedule today",
+        "schedule tonight",
+        "games on today",
+        "games on tonight",
+        "whats playing",
+        "whats on today",
+    }
+    q = user_msg.lower().strip()
+
+    if not any(t in q for t in _TODAYS_GAMES_TRIGGERS):
+        return ""
+
+    from datetime import date, timedelta
+
+    today = date.today().strftime("%B %d, %Y")
+    lines = [f"\n[Today's Games — {today}]"]
+
+    nba_games = _get_tonight_nba_games()
+    if nba_games:
+        lines.append(f"\n🏀 NBA Tonight/Tomorrow: {', '.join(sorted(nba_games)[:20])}")
+
+    sport = (
+        "NHL"
+        if any(
+            t in q for t in {"hockey", "nhl", "ducks", "flyers", "rangers", "islanders"}
+        )
+        else None
+    )
+    if sport is None:
+        if any(t in q for t in {"nba", "basketball", "lakers", "celtics", "warriors"}):
+            sport = "NBA"
+        elif any(t in q for t in {"mlb", "baseball", "yankees", "dodgers", "mets"}):
+            sport = "MLB"
+
+    if sport:
+        search_query = (
+            f"{sport} games schedule today {date.today().strftime('%B %d %Y')}"
+        )
+        try:
+            resp = _req.get(
+                "https://google.serper.dev/search",
+                headers={"X-API-KEY": os.getenv("SERPER_API_KEY", "").strip()},
+                json={"q": search_query, "num": 8},
+                timeout=10,
+            )
+            if resp.status_code == 200:
+                data = resp.json()
+                if ans := data.get("answerBox", {}).get("answer"):
+                    lines.append(f"\n{ans}")
+                for r in data.get("organic", [])[:6]:
+                    title = r.get("title", "").strip()
+                    snippet = r.get("snippet", "").strip()
+                    if len(snippet) > 200:
+                        snippet = snippet[:200].rsplit(" ", 1)[0] + "..."
+                    if sport.lower() in (title + snippet).lower():
+                        lines.append(f"• {title}: {snippet}")
+        except Exception:
+            pass
+
+    if len(lines) == 1:
+        return ""
+
+    lines.append("\n[End today's games]")
+    return "\n".join(lines)
+
+
+# ---------------------------------------------------------------------------
 # Free-form AI chat
 # ---------------------------------------------------------------------------
 
+
 async def handle_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
-    user_id    = update.effective_user.id
+    user_id = update.effective_user.id
     first_name = update.effective_user.first_name or None
-    username   = update.effective_user.username or None
-    user_msg   = update.message.text
+    username = update.effective_user.username or None
+    user_msg = update.message.text
 
     if not user_msg:
         return
@@ -2923,22 +3622,64 @@ async def handle_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None
     # ── Correction detection ──────────────────────────────────────────────────
     _CORRECTION_TRIGGERS = {
         # explicit corrections
-        "wrong", "you're wrong", "youre wrong", "that's wrong", "thats wrong",
-        "that was wrong", "bad answer", "wrong answer", "incorrect", "not right",
-        "still wrong", "no that",
+        "wrong",
+        "you're wrong",
+        "youre wrong",
+        "that's wrong",
+        "thats wrong",
+        "that was wrong",
+        "bad answer",
+        "wrong answer",
+        "incorrect",
+        "not right",
+        "still wrong",
+        "no that",
         # stale/outdated data
-        "old data", "stale", "outdated", "your data is", "data is wrong",
-        "data is old", "data is outdated", "data is off", "data is stale",
-        "not current", "not live", "not accurate", "not up to date",
+        "old data",
+        "stale",
+        "outdated",
+        "your data is",
+        "data is wrong",
+        "data is old",
+        "data is outdated",
+        "data is off",
+        "data is stale",
+        "not current",
+        "not live",
+        "not accurate",
+        "not up to date",
         # retry requests
-        "try again", "retry", "search again", "look again", "check again",
-        "check current", "check polymarket", "check the price", "pull the price",
-        "get the price", "get current", "get live", "pull live", "pull current",
-        "different answer", "try harder", "redo",
+        "try again",
+        "retry",
+        "search again",
+        "look again",
+        "check again",
+        "check current",
+        "check polymarket",
+        "check the price",
+        "pull the price",
+        "get the price",
+        "get current",
+        "get live",
+        "pull live",
+        "pull current",
+        "different answer",
+        "try harder",
+        "redo",
         # direct challenges
-        "that's not", "thats not", "you said", "actually", "no the price",
-        "the price is", "it's actually", "its actually", "are you sure",
-        "are you certain", "double check", "double-check", "verify that",
+        "that's not",
+        "thats not",
+        "you said",
+        "actually",
+        "no the price",
+        "the price is",
+        "it's actually",
+        "its actually",
+        "are you sure",
+        "are you certain",
+        "double check",
+        "double-check",
+        "verify that",
     }
     _is_correction = any(t in user_msg.lower() for t in _CORRECTION_TRIGGERS)
 
@@ -2947,56 +3688,74 @@ async def handle_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None
     # Also detect generic "remove my city/team" requests.
     _city_deny = re.search(
         r"(?:i )?(?:don'?t|do not) live in\s+([\w\s]{2,25})",
-        user_msg, re.IGNORECASE,
+        user_msg,
+        re.IGNORECASE,
     )
     if _city_deny:
         _denied_city = _city_deny.group(1).strip().title()
         try:
             if _profiles.remove_fact(user_id, "city", _denied_city):
-                log.info("[profile] Auto-removed city '%s' for user %s", _denied_city, user_id)
+                log.info(
+                    "[profile] Auto-removed city '%s' for user %s",
+                    _denied_city,
+                    user_id,
+                )
         except Exception:
             pass
 
     _not_from = re.search(
         r"i(?:'m| am) not (?:from|in|based in)\s+([\w\s]{2,25})",
-        user_msg, re.IGNORECASE,
+        user_msg,
+        re.IGNORECASE,
     )
     if _not_from:
         _denied_city = _not_from.group(1).strip().title()
         try:
             if _profiles.remove_fact(user_id, "city", _denied_city):
-                log.info("[profile] Auto-removed city '%s' for user %s", _denied_city, user_id)
+                log.info(
+                    "[profile] Auto-removed city '%s' for user %s",
+                    _denied_city,
+                    user_id,
+                )
         except Exception:
             pass
 
     # Generic "forget my city/location/team" via chat (alternative to /forget command)
     _forget_chat = re.search(
         r"(?:remove|delete|forget|clear)\s+(?:my\s+)?(?:city|location)",
-        user_msg, re.IGNORECASE,
+        user_msg,
+        re.IGNORECASE,
     )
     if _forget_chat:
         try:
             if _profiles.remove_fact(user_id, "city"):
-                log.info("[profile] Cleared all city data for user %s via chat", user_id)
+                log.info(
+                    "[profile] Cleared all city data for user %s via chat", user_id
+                )
         except Exception:
             pass
 
     # "that's not my city", "wrong city", "incorrect location"
     _wrong_city = re.search(
         r"(?:wrong|not my|incorrect|that'?s not)\s+(?:my\s+)?(?:city|location|hometown)",
-        user_msg, re.IGNORECASE,
+        user_msg,
+        re.IGNORECASE,
     )
     if _wrong_city:
         try:
             if _profiles.remove_fact(user_id, "city"):
-                log.info("[profile] Removed city for user %s (wrong city correction)", user_id)
+                log.info(
+                    "[profile] Removed city for user %s (wrong city correction)",
+                    user_id,
+                )
         except Exception:
             pass
 
     # "remove X from my profile/memory" — try to match a stored fact value
     _forget_profile = re.search(
         r"(?:remove|delete|clear|erase)\s+(.{1,40}?)\s+(?:from|in)\s+(?:my\s+)?(?:profile|memory|data)",
-        user_msg, re.IGNORECASE,
+        user_msg,
+        re.IGNORECASE,
     )
     if _forget_profile:
         _target = _forget_profile.group(1).strip().lower()
@@ -3007,7 +3766,12 @@ async def handle_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None
                     for v in values:
                         if v.lower() in _target or _target in v.lower():
                             _profiles.remove_fact(user_id, key, v)
-                            log.info("[profile] Removed %s='%s' for user %s via chat", key, v, user_id)
+                            log.info(
+                                "[profile] Removed %s='%s' for user %s via chat",
+                                key,
+                                v,
+                                user_id,
+                            )
                             break
         except Exception:
             pass
@@ -3023,14 +3787,26 @@ async def handle_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None
 
     # 2b. Detect short affirmative replies ("yes", "yeah", "sure") and inject
     #     continuation context so the AI follows up on its own question.
-    _SHORT_AFFIRM = {"yes", "yeah", "yep", "yea", "sure", "ok", "okay",
-                     "definitely", "absolutely", "do it", "go ahead", "please"}
+    _SHORT_AFFIRM = {
+        "yes",
+        "yeah",
+        "yep",
+        "yea",
+        "sure",
+        "ok",
+        "okay",
+        "definitely",
+        "absolutely",
+        "do it",
+        "go ahead",
+        "please",
+    }
     if user_msg.strip().lower().rstrip("!.") in _SHORT_AFFIRM:
         _last_q = _mem_user.get_last_bot_question()
         if _last_q:
             user_msg = (
                 f"(User replied '{user_msg}' to your previous message: "
-                f"\"{_last_q[:300]}\")\n"
+                f'"{_last_q[:300]}")\n'
                 f"Follow up on YOUR question — do not change topics."
             )
 
@@ -3038,46 +3814,114 @@ async def handle_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None
     # ── Team name → canonical search tokens (Polymarket uses full city names) ──
     _TEAM_ALIASES: dict[str, str] = {
         # NBA
-        "warriors": "Warriors", "golden state": "Warriors",
-        "timberwolves": "Timberwolves", "wolves": "Timberwolves",
-        "lakers": "Lakers", "celtics": "Celtics", "bucks": "Bucks",
-        "heat": "Heat", "nets": "Nets", "knicks": "Knicks",
-        "nuggets": "Nuggets", "suns": "Suns", "sixers": "76ers",
-        "raptors": "Raptors", "mavericks": "Mavericks", "mavs": "Mavericks",
-        "spurs": "Spurs", "thunder": "Thunder", "grizzlies": "Grizzlies",
-        "pelicans": "Pelicans", "kings": "Kings", "bulls": "Bulls",
-        "rockets": "Rockets", "jazz": "Jazz", "clippers": "Clippers",
-        "pistons": "Pistons", "hornets": "Hornets", "magic": "Magic",
-        "hawks": "Hawks", "pacers": "Pacers", "cavaliers": "Cavaliers",
-        "cavs": "Cavaliers", "wizards": "Wizards", "blazers": "Trail Blazers",
-        "trailblazers": "Trail Blazers", "trail blazers": "Trail Blazers",
-        "portland": "Trail Blazers", "okc": "Thunder",
-        "brooklyn": "Nets", "minnesota": "Timberwolves",
+        "warriors": "Warriors",
+        "golden state": "Warriors",
+        "timberwolves": "Timberwolves",
+        "wolves": "Timberwolves",
+        "lakers": "Lakers",
+        "celtics": "Celtics",
+        "bucks": "Bucks",
+        "heat": "Heat",
+        "nets": "Nets",
+        "knicks": "Knicks",
+        "nuggets": "Nuggets",
+        "suns": "Suns",
+        "sixers": "76ers",
+        "raptors": "Raptors",
+        "mavericks": "Mavericks",
+        "mavs": "Mavericks",
+        "spurs": "Spurs",
+        "thunder": "Thunder",
+        "grizzlies": "Grizzlies",
+        "pelicans": "Pelicans",
+        "kings": "Kings",
+        "bulls": "Bulls",
+        "rockets": "Rockets",
+        "jazz": "Jazz",
+        "clippers": "Clippers",
+        "pistons": "Pistons",
+        "hornets": "Hornets",
+        "magic": "Magic",
+        "hawks": "Hawks",
+        "pacers": "Pacers",
+        "cavaliers": "Cavaliers",
+        "cavs": "Cavaliers",
+        "wizards": "Wizards",
+        "blazers": "Trail Blazers",
+        "trailblazers": "Trail Blazers",
+        "trail blazers": "Trail Blazers",
+        "portland": "Trail Blazers",
+        "okc": "Thunder",
+        "brooklyn": "Nets",
+        "minnesota": "Timberwolves",
         # NFL
-        "chiefs": "Chiefs", "eagles": "Eagles", "cowboys": "Cowboys",
-        "ravens": "Ravens", "bills": "Bills", "bengals": "Bengals",
-        "dolphins": "Dolphins", "steelers": "Steelers", "49ers": "49ers",
-        "niners": "49ers", "rams": "Rams", "seahawks": "Seahawks",
-        "packers": "Packers", "lions": "Lions", "bears": "Bears",
-        "vikings": "Vikings", "giants": "Giants", "commanders": "Commanders",
-        "saints": "Saints", "falcons": "Falcons", "panthers": "Panthers",
-        "buccaneers": "Buccaneers", "bucs": "Buccaneers", "texans": "Texans",
-        "colts": "Colts", "jaguars": "Jaguars", "titans": "Titans",
-        "broncos": "Broncos", "raiders": "Raiders", "chargers": "Chargers",
+        "chiefs": "Chiefs",
+        "eagles": "Eagles",
+        "cowboys": "Cowboys",
+        "ravens": "Ravens",
+        "bills": "Bills",
+        "bengals": "Bengals",
+        "dolphins": "Dolphins",
+        "steelers": "Steelers",
+        "49ers": "49ers",
+        "niners": "49ers",
+        "rams": "Rams",
+        "seahawks": "Seahawks",
+        "packers": "Packers",
+        "lions": "Lions",
+        "bears": "Bears",
+        "vikings": "Vikings",
+        "giants": "Giants",
+        "commanders": "Commanders",
+        "saints": "Saints",
+        "falcons": "Falcons",
+        "panthers": "Panthers",
+        "buccaneers": "Buccaneers",
+        "bucs": "Buccaneers",
+        "texans": "Texans",
+        "colts": "Colts",
+        "jaguars": "Jaguars",
+        "titans": "Titans",
+        "broncos": "Broncos",
+        "raiders": "Raiders",
+        "chargers": "Chargers",
         # NHL
-        "bruins": "Bruins", "maple leafs": "Maple Leafs", "leafs": "Maple Leafs",
-        "canadiens": "Canadiens", "habs": "Canadiens", "lightning": "Lightning",
-        "florida panthers": "Panthers", "capitals": "Capitals", "rangers": "Rangers",
-        "flyers": "Flyers", "penguins": "Penguins", "red wings": "Red Wings",
-        "blackhawks": "Blackhawks", "blues": "Blues", "avalanche": "Avalanche",
-        "golden knights": "Golden Knights", "oilers": "Oilers",
-        "flames": "Flames", "canucks": "Canucks",
+        "bruins": "Bruins",
+        "maple leafs": "Maple Leafs",
+        "leafs": "Maple Leafs",
+        "canadiens": "Canadiens",
+        "habs": "Canadiens",
+        "lightning": "Lightning",
+        "florida panthers": "Panthers",
+        "capitals": "Capitals",
+        "rangers": "Rangers",
+        "flyers": "Flyers",
+        "ducks": "Ducks",
+        "penguins": "Penguins",
+        "red wings": "Red Wings",
+        "blackhawks": "Blackhawks",
+        "blues": "Blues",
+        "avalanche": "Avalanche",
+        "golden knights": "Golden Knights",
+        "oilers": "Oilers",
+        "flames": "Flames",
+        "canucks": "Canucks",
         # MLB
-        "yankees": "Yankees", "red sox": "Red Sox", "dodgers": "Dodgers",
-        "cubs": "Cubs", "cardinals": "Cardinals", "braves": "Braves",
-        "mets": "Mets", "astros": "Astros", "phillies": "Phillies",
-        "padres": "Padres", "sf giants": "Giants", "mariners": "Mariners",
-        "blue jays": "Blue Jays", "rays": "Rays", "orioles": "Orioles",
+        "yankees": "Yankees",
+        "red sox": "Red Sox",
+        "dodgers": "Dodgers",
+        "cubs": "Cubs",
+        "cardinals": "Cardinals",
+        "braves": "Braves",
+        "mets": "Mets",
+        "astros": "Astros",
+        "phillies": "Phillies",
+        "padres": "Padres",
+        "sf giants": "Giants",
+        "mariners": "Mariners",
+        "blue jays": "Blue Jays",
+        "rays": "Rays",
+        "orioles": "Orioles",
     }
 
     def _find_team_mentions(text: str) -> list[str]:
@@ -3096,32 +3940,83 @@ async def handle_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None
     # Team name → Polymarket slug abbreviation
     _SLUG_ABBR: dict[str, str] = {
         # NBA
-        "Warriors": "gsw", "Timberwolves": "min", "Lakers": "lal",
-        "Celtics": "bos", "Bucks": "mil", "Heat": "mia", "Nets": "bkn",
-        "Knicks": "nyk", "Nuggets": "den", "Suns": "phx", "76ers": "phi",
-        "Raptors": "tor", "Mavericks": "dal", "Spurs": "sas",
-        "Thunder": "okc", "Grizzlies": "mem", "Pelicans": "nop",
-        "Kings": "sac", "Bulls": "chi", "Rockets": "hou", "Jazz": "uta",
-        "Clippers": "lac", "Pistons": "det", "Hornets": "cha",
-        "Magic": "orl", "Hawks": "atl", "Pacers": "ind",
-        "Cavaliers": "cle", "Wizards": "was", "Trail Blazers": "por",
+        "Warriors": "gsw",
+        "Timberwolves": "min",
+        "Lakers": "lal",
+        "Celtics": "bos",
+        "Bucks": "mil",
+        "Heat": "mia",
+        "Nets": "bkn",
+        "Knicks": "nyk",
+        "Nuggets": "den",
+        "Suns": "phx",
+        "76ers": "phi",
+        "Raptors": "tor",
+        "Mavericks": "dal",
+        "Spurs": "sas",
+        "Thunder": "okc",
+        "Grizzlies": "mem",
+        "Pelicans": "nop",
+        "Kings": "sac",
+        "Bulls": "chi",
+        "Rockets": "hou",
+        "Jazz": "uta",
+        "Clippers": "lac",
+        "Pistons": "det",
+        "Hornets": "cha",
+        "Magic": "orl",
+        "Hawks": "atl",
+        "Pacers": "ind",
+        "Cavaliers": "cle",
+        "Wizards": "was",
+        "Trail Blazers": "por",
         # NHL
-        "Bruins": "bos", "Maple Leafs": "tor", "Canadiens": "mtl",
-        "Lightning": "tbl", "Capitals": "wsh", "Rangers": "nyr",
-        "Flyers": "phi", "Penguins": "pit", "Red Wings": "det",
-        "Blackhawks": "chi", "Blues": "stl", "Avalanche": "col",
-        "Golden Knights": "vgk", "Oilers": "edm", "Flames": "cgy",
+        "Bruins": "bos",
+        "Maple Leafs": "tor",
+        "Canadiens": "mtl",
+        "Lightning": "tbl",
+        "Capitals": "wsh",
+        "Rangers": "nyr",
+        "Flyers": "phi",
+        "Ducks": "ana",
+        "Penguins": "pit",
+        "Red Wings": "det",
+        "Blackhawks": "chi",
+        "Blues": "stl",
+        "Avalanche": "col",
+        "Golden Knights": "vgk",
+        "Oilers": "edm",
+        "Flames": "cgy",
         "Canucks": "van",
         # NFL (off-season — slug lookup still useful for futures)
-        "Chiefs": "kc", "Eagles": "phi", "Cowboys": "dal", "Ravens": "bal",
-        "Bills": "buf", "Bengals": "cin", "Dolphins": "mia",
-        "Steelers": "pit", "49ers": "sf", "Rams": "lar",
-        "Seahawks": "sea", "Packers": "gb", "Lions": "det",
-        "Bears": "chi", "Vikings": "min", "Giants": "nyg",
-        "Commanders": "was", "Saints": "no", "Falcons": "atl",
-        "Panthers": "car", "Buccaneers": "tb", "Texans": "hou",
-        "Colts": "ind", "Jaguars": "jax", "Titans": "ten",
-        "Broncos": "den", "Raiders": "lv", "Chargers": "lac",
+        "Chiefs": "kc",
+        "Eagles": "phi",
+        "Cowboys": "dal",
+        "Ravens": "bal",
+        "Bills": "buf",
+        "Bengals": "cin",
+        "Dolphins": "mia",
+        "Steelers": "pit",
+        "49ers": "sf",
+        "Rams": "lar",
+        "Seahawks": "sea",
+        "Packers": "gb",
+        "Lions": "det",
+        "Bears": "chi",
+        "Vikings": "min",
+        "Giants": "nyg",
+        "Commanders": "was",
+        "Saints": "no",
+        "Falcons": "atl",
+        "Panthers": "car",
+        "Buccaneers": "tb",
+        "Texans": "hou",
+        "Colts": "ind",
+        "Jaguars": "jax",
+        "Titans": "ten",
+        "Broncos": "den",
+        "Raiders": "lv",
+        "Chargers": "lac",
     }
 
     def _search_polymarket_game(teams: list[str]) -> str:
@@ -3137,36 +4032,125 @@ async def handle_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None
         GAMMA = "https://gamma-api.polymarket.com"
 
         def _sport_prefix(t1: str, t2: str) -> str:
-            nba = {"Warriors","Timberwolves","Lakers","Celtics","Bucks","Heat",
-                   "Nets","Knicks","Nuggets","Suns","76ers","Raptors","Mavericks",
-                   "Spurs","Thunder","Grizzlies","Pelicans","Kings","Bulls",
-                   "Rockets","Jazz","Clippers","Pistons","Hornets","Magic",
-                   "Hawks","Pacers","Cavaliers","Wizards","Trail Blazers"}
-            nhl = {"Bruins","Maple Leafs","Canadiens","Lightning","Capitals",
-                   "Rangers","Flyers","Penguins","Red Wings","Blackhawks",
-                   "Blues","Avalanche","Golden Knights","Oilers","Flames","Canucks"}
-            nfl = {"Chiefs","Eagles","Cowboys","Ravens","Bills","Bengals",
-                   "Dolphins","Steelers","49ers","Rams","Seahawks","Packers",
-                   "Lions","Bears","Vikings","Giants","Commanders","Saints",
-                   "Falcons","Panthers","Buccaneers","Texans","Colts","Jaguars",
-                   "Titans","Broncos","Raiders","Chargers"}
+            nba = {
+                "Warriors",
+                "Timberwolves",
+                "Lakers",
+                "Celtics",
+                "Bucks",
+                "Heat",
+                "Nets",
+                "Knicks",
+                "Nuggets",
+                "Suns",
+                "76ers",
+                "Raptors",
+                "Mavericks",
+                "Spurs",
+                "Thunder",
+                "Grizzlies",
+                "Pelicans",
+                "Kings",
+                "Bulls",
+                "Rockets",
+                "Jazz",
+                "Clippers",
+                "Pistons",
+                "Hornets",
+                "Magic",
+                "Hawks",
+                "Pacers",
+                "Cavaliers",
+                "Wizards",
+                "Trail Blazers",
+            }
+            nhl = {
+                "Bruins",
+                "Maple Leafs",
+                "Canadiens",
+                "Lightning",
+                "Capitals",
+                "Rangers",
+                "Flyers",
+                "Ducks",
+                "Penguins",
+                "Red Wings",
+                "Blackhawks",
+                "Blues",
+                "Avalanche",
+                "Golden Knights",
+                "Oilers",
+                "Flames",
+                "Canucks",
+            }
+            nfl = {
+                "Chiefs",
+                "Eagles",
+                "Cowboys",
+                "Ravens",
+                "Bills",
+                "Bengals",
+                "Dolphins",
+                "Steelers",
+                "49ers",
+                "Rams",
+                "Seahawks",
+                "Packers",
+                "Lions",
+                "Bears",
+                "Vikings",
+                "Giants",
+                "Commanders",
+                "Saints",
+                "Falcons",
+                "Panthers",
+                "Buccaneers",
+                "Texans",
+                "Colts",
+                "Jaguars",
+                "Titans",
+                "Broncos",
+                "Raiders",
+                "Chargers",
+            }
             for t in (t1, t2):
-                if t in nba: return "nba"
-                if t in nhl: return "nhl"
-                if t in nfl: return "nfl"
+                if t in nba:
+                    return "nba"
+                if t in nhl:
+                    return "nhl"
+                if t in nfl:
+                    return "nfl"
             return "nba"
 
         def _fmt_market(title: str, markets: list[dict]) -> str:
             """Pick the moneyline (highest-volume non-total market) and format it."""
             # Filter out totals (O/U) and prop bets; pick highest volume remainder
             non_total = [
-                m for m in markets
-                if not any(kw in (m.get("question") or "").lower()
-                           for kw in ("o/u", "over/under", "total", "spread", "points", "rebounds",
-                                      "assists", "1h", "2h", "quarter", "period"))
+                m
+                for m in markets
+                if not any(
+                    kw in (m.get("question") or "").lower()
+                    for kw in (
+                        "o/u",
+                        "over/under",
+                        "total",
+                        "spread",
+                        "points",
+                        "rebounds",
+                        "assists",
+                        "1h",
+                        "2h",
+                        "quarter",
+                        "period",
+                    )
+                )
             ]
             candidates = non_total if non_total else markets
-            best = max(candidates, key=lambda m: float(m.get("volumeNum", 0) or 0), default=None)
+            best = max(
+                candidates,
+                key=lambda m: float(m.get("volumeNum", 0) or 0),
+                default=None,
+            )
             if not best:
                 return ""
             prices = best.get("outcomePrices") or []
@@ -3184,11 +4168,11 @@ async def handle_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None
             except Exception:
                 return ""
             vol = float(best.get("volumeNum", 0) or 0)
-            vol_str = f"${vol/1000:.0f}k vol" if vol >= 1000 else f"${vol:.0f} vol"
+            vol_str = f"${vol / 1000:.0f}k vol" if vol >= 1000 else f"${vol:.0f} vol"
             accepting = best.get("acceptingOrders", False)
             status = "LIVE" if accepting else "RESOLVED"
             # Extract team labels from the event title (e.g. "Warriors vs. Pistons")
-            _vs_parts = re.split(r'\s+vs\.?\s+', title, maxsplit=1)
+            _vs_parts = re.split(r"\s+vs\.?\s+", title, maxsplit=1)
             if len(_vs_parts) >= 2:
                 label_a = _vs_parts[0].strip()
                 label_b = _vs_parts[1].strip()
@@ -3215,33 +4199,56 @@ async def handle_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None
                 d = (today + timedelta(days=delta)).isoformat()
                 for slug in (f"{prefix}-{a1}-{a2}-{d}", f"{prefix}-{a2}-{a1}-{d}"):
                     try:
-                        resp = _req.get(f"{GAMMA}/events", params={"slug": slug}, timeout=8)
+                        resp = _req.get(
+                            f"{GAMMA}/events", params={"slug": slug}, timeout=8
+                        )
                         items = resp.json() if resp.status_code == 200 else []
                         if items:
                             ev = items[0]
                             result = _fmt_market(
                                 ev.get("title", " vs ".join(teams)),
-                                ev.get("markets", [])
+                                ev.get("markets", []),
                             )
                             if result:
                                 return result
                     except Exception as exc:
-                        log.warning("[polymarket_game] Slug lookup failed for %s: %s", slug, exc)
+                        log.warning(
+                            "[polymarket_game] Slug lookup failed for %s: %s", slug, exc
+                        )
                         continue
 
         # ── Fallback: tag_slug search for the team's sport ────────────────────
         # tag_slug=nba/nhl/nfl returns actual games, not championship futures.
         _CITY_NAMES: dict[str, str] = {
-            "Warriors": "golden state", "Lakers": "los angeles", "Clippers": "los angeles",
-            "Celtics": "boston", "Bucks": "milwaukee", "Heat": "miami",
-            "Nets": "brooklyn", "Knicks": "new york", "Nuggets": "denver",
-            "Suns": "phoenix", "76ers": "philadelphia", "Raptors": "toronto",
-            "Mavericks": "dallas", "Spurs": "san antonio", "Thunder": "oklahoma city",
-            "Grizzlies": "memphis", "Pelicans": "new orleans", "Kings": "sacramento",
-            "Bulls": "chicago", "Rockets": "houston", "Jazz": "utah",
-            "Pistons": "detroit", "Hornets": "charlotte", "Magic": "orlando",
-            "Hawks": "atlanta", "Pacers": "indiana", "Cavaliers": "cleveland",
-            "Wizards": "washington", "Trail Blazers": "portland",
+            "Warriors": "golden state",
+            "Lakers": "los angeles",
+            "Clippers": "los angeles",
+            "Celtics": "boston",
+            "Bucks": "milwaukee",
+            "Heat": "miami",
+            "Nets": "brooklyn",
+            "Knicks": "new york",
+            "Nuggets": "denver",
+            "Suns": "phoenix",
+            "76ers": "philadelphia",
+            "Raptors": "toronto",
+            "Mavericks": "dallas",
+            "Spurs": "san antonio",
+            "Thunder": "oklahoma city",
+            "Grizzlies": "memphis",
+            "Pelicans": "new orleans",
+            "Kings": "sacramento",
+            "Bulls": "chicago",
+            "Rockets": "houston",
+            "Jazz": "utah",
+            "Pistons": "detroit",
+            "Hornets": "charlotte",
+            "Magic": "orlando",
+            "Hawks": "atlanta",
+            "Pacers": "indiana",
+            "Cavaliers": "cleveland",
+            "Wizards": "washington",
+            "Trail Blazers": "portland",
             "Timberwolves": "minnesota",
         }
         try:
@@ -3271,14 +4278,15 @@ async def handle_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None
                     _slug_tokens.add(abbr)
             for ev in events:
                 ev_title = (ev.get("title") or "").lower()
-                ev_slug  = (ev.get("slug") or "").lower()
+                ev_slug = (ev.get("slug") or "").lower()
                 title_match = any(p.search(ev_title) for p in _title_patterns)
-                slug_match  = any(f"-{tok}-" in ev_slug or ev_slug.endswith(f"-{tok}")
-                                  for tok in _slug_tokens)
+                slug_match = any(
+                    f"-{tok}-" in ev_slug or ev_slug.endswith(f"-{tok}")
+                    for tok in _slug_tokens
+                )
                 if title_match or slug_match:
                     result = _fmt_market(
-                        ev.get("title", teams[0]),
-                        ev.get("markets", [])
+                        ev.get("title", teams[0]), ev.get("markets", [])
                     )
                     if result:
                         return result
@@ -3292,8 +4300,10 @@ async def handle_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None
                 resp = _req.get(
                     f"{GAMMA}/markets",
                     params={
-                        "active": "true", "closed": "false",
-                        "limit": 30, "order": "volume24hrClob",
+                        "active": "true",
+                        "closed": "false",
+                        "limit": 30,
+                        "order": "volume24hrClob",
                         "ascending": "false",
                     },
                     timeout=8,
@@ -3318,7 +4328,11 @@ async def handle_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None
                             p0 = round(float(prices[0]) * 100, 1)
                             p1 = round(float(prices[1]) * 100, 1)
                             vol = float(m.get("volumeNum", 0) or 0)
-                            vol_str = f"${vol/1000:.0f}k vol" if vol >= 1000 else f"${vol:.0f} vol"
+                            vol_str = (
+                                f"${vol / 1000:.0f}k vol"
+                                if vol >= 1000
+                                else f"${vol:.0f} vol"
+                            )
                             question = m.get("question", teams[0])
                             accepting = m.get("acceptingOrders", False)
                             status = "LIVE" if accepting else "RESOLVED"
@@ -3346,11 +4360,30 @@ async def handle_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None
     _mentioned_teams = _find_team_mentions(q)
     if len(_mentioned_teams) >= 2 or (
         len(_mentioned_teams) == 1
-        and any(kw in q for kw in (
-            "vs", "versus", "game", "tonight", "match", "beat", "win",
-            "cover", "price", "market", "scan", "odds", "line", "bet",
-            "chances", "probability", "playing", "play", "spread",
-        ))
+        and any(
+            kw in q
+            for kw in (
+                "vs",
+                "versus",
+                "game",
+                "tonight",
+                "match",
+                "beat",
+                "win",
+                "cover",
+                "price",
+                "market",
+                "scan",
+                "odds",
+                "line",
+                "bet",
+                "chances",
+                "probability",
+                "playing",
+                "play",
+                "spread",
+            )
+        )
     ):
         market_context = _search_polymarket_game(_mentioned_teams)
 
@@ -3359,13 +4392,19 @@ async def handle_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None
         for keywords, series in _SERIES_MAP:
             if any(kw in q for kw in keywords):
                 try:
-                    markets = _kalshi_api.get_markets(limit=3, series_ticker=series, min_volume=1)
+                    markets = _kalshi_api.get_markets(
+                        limit=3, series_ticker=series, min_volume=1
+                    )
                     if markets:
-                        lines = [f"\nLive {series} Kalshi markets (season/championship):"]
+                        lines = [
+                            f"\nLive {series} Kalshi markets (season/championship):"
+                        ]
                         for m in markets:
                             prob = _kalshi_api.parse_market_prob(m)
-                            vol  = _kalshi_api.parse_volume(m)
-                            lines.append(f"- {m.get('title', m.get('ticker'))}: {prob:.0%} yes | ${vol:,.0f} vol")
+                            vol = _kalshi_api.parse_volume(m)
+                            lines.append(
+                                f"- {m.get('title', m.get('ticker'))}: {prob:.0%} yes | ${vol:,.0f} vol"
+                            )
                         market_context = "\n".join(lines)
                 except Exception:
                     pass
@@ -3383,15 +4422,27 @@ async def handle_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None
         if _matched_tag:
             try:
                 import requests as _req
+
                 # Try multiple tag formats — Polymarket is inconsistent:
                 # "elon-musk" might be stored as "elon musk" or just "elon"
                 events = []
-                _tag_attempts = [_matched_tag, _matched_tag.replace("-", " "), _matched_tag.split("-")[0]]
-                for _tag_try in dict.fromkeys(_tag_attempts):  # deduplicate, preserve order
+                _tag_attempts = [
+                    _matched_tag,
+                    _matched_tag.replace("-", " "),
+                    _matched_tag.split("-")[0],
+                ]
+                for _tag_try in dict.fromkeys(
+                    _tag_attempts
+                ):  # deduplicate, preserve order
                     resp = _req.get(
                         "https://gamma-api.polymarket.com/events",
-                        params={"tag_slug": _tag_try, "active": "true", "limit": 8,
-                                "order": "volume", "ascending": "false"},
+                        params={
+                            "tag_slug": _tag_try,
+                            "active": "true",
+                            "limit": 8,
+                            "order": "volume",
+                            "ascending": "false",
+                        },
                         timeout=10,
                     )
                     events = resp.json() if resp.status_code == 200 else []
@@ -3404,7 +4455,11 @@ async def handle_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None
                         mkts = ev.get("markets", [])
                         if not mkts:
                             continue
-                        best = max(mkts, key=lambda m: float(m.get("volumeNum", 0) or 0), default=None)
+                        best = max(
+                            mkts,
+                            key=lambda m: float(m.get("volumeNum", 0) or 0),
+                            default=None,
+                        )
                         if not best:
                             continue
                         prices = best.get("outcomePrices") or "[]"
@@ -3417,7 +4472,9 @@ async def handle_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None
                             continue
                         p0 = round(float(prices[0]) * 100, 1)
                         vol = float(best.get("volumeNum", 0) or 0)
-                        vol_str = f"${vol/1000:.0f}k" if vol >= 1000 else f"${vol:.0f}"
+                        vol_str = (
+                            f"${vol / 1000:.0f}k" if vol >= 1000 else f"${vol:.0f}"
+                        )
                         lines.append(f"  • {title[:70]} — YES: {p0}¢ | {vol_str} vol")
                     if len(lines) > 1:
                         market_context = "\n".join(lines)
@@ -3429,23 +4486,50 @@ async def handle_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None
     # "what should I bet on", "odds", "prices", "prediction market"
     if not market_context:
         _GENERIC_MARKET_KW = {
-            "polymarket", "prediction market", "what market", "which market",
-            "show me market", "any market", "trending market", "hot market",
-            "what should i bet", "what should i trade", "any good bet",
-            "what's trading", "whats trading", "top market",
-            "scan market", "show me odds", "what markets are", "any markets",
-            "best market", "good bet", "what to trade", "active markets",
-            "what's popular", "whats popular", "live markets", "live odds",
-            "show me", "what can i bet", "give me markets", "find me a market",
+            "polymarket",
+            "prediction market",
+            "what market",
+            "which market",
+            "show me market",
+            "any market",
+            "trending market",
+            "hot market",
+            "what should i bet",
+            "what should i trade",
+            "any good bet",
+            "what's trading",
+            "whats trading",
+            "top market",
+            "scan market",
+            "show me odds",
+            "what markets are",
+            "any markets",
+            "best market",
+            "good bet",
+            "what to trade",
+            "active markets",
+            "what's popular",
+            "whats popular",
+            "live markets",
+            "live odds",
+            "show me",
+            "what can i bet",
+            "give me markets",
+            "find me a market",
         }
         if any(kw in q for kw in _GENERIC_MARKET_KW):
             try:
                 import requests as _req
+
                 resp = _req.get(
                     "https://gamma-api.polymarket.com/markets",
-                    params={"active": "true", "limit": 10,
-                            "order": "volume24hrClob", "ascending": "false",
-                            "closed": "false"},
+                    params={
+                        "active": "true",
+                        "limit": 10,
+                        "order": "volume24hrClob",
+                        "ascending": "false",
+                        "closed": "false",
+                    },
                     timeout=10,
                 )
                 mkts = resp.json() if resp.status_code == 200 else []
@@ -3461,7 +4545,11 @@ async def handle_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None
                                 continue
                         p0 = round(float(prices[0]) * 100, 1) if len(prices) >= 1 else 0
                         vol24 = float(m.get("volume24hrClob", 0) or 0)
-                        vol_str = f"${vol24/1000:.0f}k" if vol24 >= 1000 else f"${vol24:.0f}"
+                        vol_str = (
+                            f"${vol24 / 1000:.0f}k"
+                            if vol24 >= 1000
+                            else f"${vol24:.0f}"
+                        )
                         spread = float(m.get("spreadBps", 0) or 0) / 100
                         lines.append(
                             f"  • {question[:65]} — YES: {p0}¢ | "
@@ -3493,9 +4581,9 @@ async def handle_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None
     _PT_RE = re.compile(
         r"(?:paper\s*(?:trade|bet)|put\s+me\s+down|(?:i(?:'ll| will| want to| wanna)\s+(?:take|pick|bet|paper))|(?:^|\s)bet\b)"
         r"(?:"
-        r"\s+(?:on\s+)?(.{2,40}?)\s+(yes|no)\b"        # A: "paper trade Warriors YES"
+        r"\s+(?:on\s+)?(.{2,40}?)\s+(yes|no)\b"  # A: "paper trade Warriors YES"
         r"|"
-        r"\s+(yes|no)\s+(?:on\s+)?(.{2,40})"            # B: "paper trade NO on warriors"
+        r"\s+(yes|no)\s+(?:on\s+)?(.{2,40})"  # B: "paper trade NO on warriors"
         r")",
         re.IGNORECASE,
     )
@@ -3503,85 +4591,135 @@ async def handle_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None
     if _pt_match:
         if _pt_match.group(1):
             _pt_topic = _pt_match.group(1).strip()
-            _pt_side  = _pt_match.group(2).upper()
+            _pt_side = _pt_match.group(2).upper()
         else:
-            _pt_side  = _pt_match.group(3).upper()
+            _pt_side = _pt_match.group(3).upper()
             _pt_topic = _pt_match.group(4).strip()
         # Strip trailing noise: "today's warriors game" → "warriors"
-        _pt_topic = re.sub(r"(?:today'?s?\s+|tonight'?s?\s+|the\s+)", "", _pt_topic, flags=re.I).strip()
-        _pt_topic = re.sub(r"\s+(?:game|match|market|tonight|today)$", "", _pt_topic, flags=re.I).strip()
+        _pt_topic = re.sub(
+            r"(?:today'?s?\s+|tonight'?s?\s+|the\s+)", "", _pt_topic, flags=re.I
+        ).strip()
+        _pt_topic = re.sub(
+            r"\s+(?:game|match|market|tonight|today)$", "", _pt_topic, flags=re.I
+        ).strip()
         # Strip betting jargon that pollutes search: "Warriors ML" → "Warriors"
         _pt_topic = re.sub(
             r"\b(?:ml|moneyline|money\s*line|spread|over|under|o/u|ats|pts|points|props?|parlay|alt)\b",
-            "", _pt_topic, flags=re.I,
+            "",
+            _pt_topic,
+            flags=re.I,
         ).strip()
         _pt_topic = re.sub(r"\s{2,}", " ", _pt_topic)  # collapse double spaces
         if _pt_topic and _pt_side in ("YES", "NO"):
             try:
                 import requests as _ptreq
                 from datetime import date as _ptdate, timedelta as _pttd
+
                 _pt_teams = _find_team_mentions(_pt_topic.lower())
                 _found_ev = None
 
                 # Path A: team detected — try slug (2 teams) then tag_slug title match
                 if _pt_teams:
-                    _a1 = _SLUG_ABBR.get(_pt_teams[0], _pt_teams[0].lower().replace(" ", ""))
+                    _a1 = _SLUG_ABBR.get(
+                        _pt_teams[0], _pt_teams[0].lower().replace(" ", "")
+                    )
                     _pfx = _sport_prefix(_pt_teams[0], _pt_teams[-1])
                     _today = _ptdate.today()
                     # Slug lookup only works with 2 teams
                     if len(_pt_teams) >= 2:
-                        _a2 = _SLUG_ABBR.get(_pt_teams[1], _pt_teams[1].lower().replace(" ", ""))
+                        _a2 = _SLUG_ABBR.get(
+                            _pt_teams[1], _pt_teams[1].lower().replace(" ", "")
+                        )
                         for _delta in (0, 1, -1, 2, 3, 4, 5, 6):
                             _d = (_today + _pttd(days=_delta)).isoformat()
-                            for _sl in (f"{_pfx}-{_a1}-{_a2}-{_d}", f"{_pfx}-{_a2}-{_a1}-{_d}"):
-                                _rr = _ptreq.get("https://gamma-api.polymarket.com/events",
-                                                 params={"slug": _sl}, timeout=6)
+                            for _sl in (
+                                f"{_pfx}-{_a1}-{_a2}-{_d}",
+                                f"{_pfx}-{_a2}-{_a1}-{_d}",
+                            ):
+                                _rr = _ptreq.get(
+                                    "https://gamma-api.polymarket.com/events",
+                                    params={"slug": _sl},
+                                    timeout=6,
+                                )
                                 _items = _rr.json() if _rr.status_code == 200 else []
                                 if _items:
-                                    _found_ev = _items[0]; break
-                            if _found_ev: break
+                                    _found_ev = _items[0]
+                                    break
+                            if _found_ev:
+                                break
                     # tag_slug fallback: search by sport, match team name in title
                     # Works for BOTH single-team ("Warriors YES") and 2-team queries
                     if not _found_ev:
-                        _rr2 = _ptreq.get("https://gamma-api.polymarket.com/events",
-                                          params={"tag_slug": _pfx, "active": "true",
-                                                  "limit": 50, "order": "startDate",
-                                                  "ascending": "false"}, timeout=8)
+                        _rr2 = _ptreq.get(
+                            "https://gamma-api.polymarket.com/events",
+                            params={
+                                "tag_slug": _pfx,
+                                "active": "true",
+                                "limit": 50,
+                                "order": "startDate",
+                                "ascending": "false",
+                            },
+                            timeout=8,
+                        )
                         _evs = _rr2.json() if _rr2.status_code == 200 else []
-                        _pats = [re.compile(r"\b" + re.escape(t.lower()) + r"\b") for t in _pt_teams]
+                        _pats = [
+                            re.compile(r"\b" + re.escape(t.lower()) + r"\b")
+                            for t in _pt_teams
+                        ]
                         for _ev in _evs:
-                            if any(p.search((_ev.get("title") or "").lower()) for p in _pats):
-                                _found_ev = _ev; break
+                            if any(
+                                p.search((_ev.get("title") or "").lower())
+                                for p in _pats
+                            ):
+                                _found_ev = _ev
+                                break
                     # Text search fallback: search by team name directly in Gamma
                     if not _found_ev:
-                        _rr2b = _ptreq.get("https://gamma-api.polymarket.com/events",
-                                           params={"title": _pt_teams[0], "active": "true",
-                                                   "limit": 10, "order": "startDate",
-                                                   "ascending": "false"}, timeout=8)
+                        _rr2b = _ptreq.get(
+                            "https://gamma-api.polymarket.com/events",
+                            params={
+                                "title": _pt_teams[0],
+                                "active": "true",
+                                "limit": 10,
+                                "order": "startDate",
+                                "ascending": "false",
+                            },
+                            timeout=8,
+                        )
                         _evs2b = _rr2b.json() if _rr2b.status_code == 200 else []
                         for _ev in _evs2b:
                             _ev_title_lc = (_ev.get("title") or "").lower()
                             if _pt_teams[0].lower() in _ev_title_lc:
-                                _found_ev = _ev; break
+                                _found_ev = _ev
+                                break
 
                 # Path B: no team found — try topic tag (but VERIFY result matches)
                 if not _found_ev:
                     _tag = _pt_topic.lower().replace(" ", "-")
                     for _tag_try in [_tag, _tag.split("-")[0]]:
-                        _rr3 = _ptreq.get("https://gamma-api.polymarket.com/events",
-                                          params={"tag_slug": _tag_try, "active": "true",
-                                                  "limit": 5, "order": "volume",
-                                                  "ascending": "false"}, timeout=8)
+                        _rr3 = _ptreq.get(
+                            "https://gamma-api.polymarket.com/events",
+                            params={
+                                "tag_slug": _tag_try,
+                                "active": "true",
+                                "limit": 5,
+                                "order": "volume",
+                                "ascending": "false",
+                            },
+                            timeout=8,
+                        )
                         _evs3 = _rr3.json() if _rr3.status_code == 200 else []
                         if _evs3:
                             # If we had teams, verify the result actually matches
                             if _pt_teams:
                                 _ev_title_check = (_evs3[0].get("title") or "").lower()
                                 if any(t.lower() in _ev_title_check for t in _pt_teams):
-                                    _found_ev = _evs3[0]; break
+                                    _found_ev = _evs3[0]
+                                    break
                                 # else: SKIP — wrong market (prevents Trump tariff bug)
                             else:
-                                _found_ev = _evs3[0]; break
+                                _found_ev = _evs3[0]
+                                break
 
                 # Explicit "not found" — don't fall through to AI with wrong data
                 if not _found_ev:
@@ -3593,31 +4731,43 @@ async def handle_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None
 
                 if _found_ev:
                     _pt_title = _found_ev.get("title", _pt_topic)
-                    _pt_mkts  = _found_ev.get("markets", [])
-                    _pt_best  = max(_pt_mkts, key=lambda m: float(m.get("volumeNum", 0) or 0), default=None)
+                    _pt_mkts = _found_ev.get("markets", [])
+                    _pt_best = max(
+                        _pt_mkts,
+                        key=lambda m: float(m.get("volumeNum", 0) or 0),
+                        default=None,
+                    )
                     if _pt_best:
                         _pt_prices = _pt_best.get("outcomePrices", "[]")
                         if isinstance(_pt_prices, str):
                             _pt_prices = json.loads(_pt_prices)
                         # YES = prices[0], NO = prices[1]
-                        _entry_prob = (float(_pt_prices[0]) if _pt_side == "YES"
-                                       else float(_pt_prices[1]) if len(_pt_prices) > 1
-                                       else 0.5)
-                        _pt_market_id  = _found_ev.get("slug", _pt_topic.lower().replace(" ", "-"))
-                        _pt_signal_id  = int(time.time() * 1000) % 2_000_000_000
-                        _ot.register_signal(
-                            signal_id   = _pt_signal_id,
-                            market_id   = _pt_market_id,
-                            venue       = "POLYMARKET",
-                            target_side = _pt_side,
-                            entry_prob  = _entry_prob,
-                            question    = _pt_title,
+                        _entry_prob = (
+                            float(_pt_prices[0])
+                            if _pt_side == "YES"
+                            else float(_pt_prices[1])
+                            if len(_pt_prices) > 1
+                            else 0.5
                         )
-                        _ot.record_user_pick(_pt_signal_id, _pt_market_id, user_id, _pt_side)
+                        _pt_market_id = _found_ev.get(
+                            "slug", _pt_topic.lower().replace(" ", "-")
+                        )
+                        _pt_signal_id = int(time.time() * 1000) % 2_000_000_000
+                        _ot.register_signal(
+                            signal_id=_pt_signal_id,
+                            market_id=_pt_market_id,
+                            venue="POLYMARKET",
+                            target_side=_pt_side,
+                            entry_prob=_entry_prob,
+                            question=_pt_title,
+                        )
+                        _ot.record_user_pick(
+                            _pt_signal_id, _pt_market_id, user_id, _pt_side
+                        )
                         await update.message.reply_text(
                             f"✅ Paper trade logged!\n"
                             f"Market: {_pt_title[:60]}\n"
-                            f"Side: {_pt_side} @ {_entry_prob*100:.1f}¢  |  $10 virtual stake\n\n"
+                            f"Side: {_pt_side} @ {_entry_prob * 100:.1f}¢  |  $10 virtual stake\n\n"
                             f"Use /mytrades to track it."
                         )
                         return
@@ -3647,21 +4797,106 @@ async def handle_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None
     #    Before building context, auto-refresh the cache if it is stale (>2h) or empty
     #    so the AI always sees real data rather than falling back to training knowledge.
     _SPORT_DETECT = {
-        "nba": {"nba", "basketball", "lakers", "celtics", "warriors", "bucks", "heat",
-                "nets", "knicks", "nuggets", "suns", "sixers", "raptors", "mavericks",
-                "mavs", "spurs", "thunder", "grizzlies", "pelicans", "kings", "bulls",
-                "rockets", "jazz", "clippers", "pistons", "hornets", "magic", "hawks",
-                "pacers", "cavaliers", "wizards", "timberwolves", "trail blazers"},
-        "nfl": {"nfl", "football", "chiefs", "eagles", "cowboys", "ravens", "bills",
-                "bengals", "dolphins", "steelers", "49ers", "rams", "seahawks",
-                "patriots", "packers", "bears", "giants", "saints", "buccaneers",
-                "chargers", "raiders", "broncos", "texans", "colts", "titans",
-                "jaguars", "browns", "falcons", "panthers", "cardinals", "vikings"},
-        "nhl": {"nhl", "hockey", "oilers", "bruins", "rangers", "leafs", "canadiens",
-                "penguins", "capitals", "lightning", "golden knights", "kraken",
-                "avalanche", "flames", "canucks", "senators", "sabres", "coyotes",
-                "sharks", "ducks", "kings", "blues", "predators", "wild", "jets",
-                "red wings", "islanders", "devils", "flyers", "hurricanes"},
+        "nba": {
+            "nba",
+            "basketball",
+            "lakers",
+            "celtics",
+            "warriors",
+            "bucks",
+            "heat",
+            "nets",
+            "knicks",
+            "nuggets",
+            "suns",
+            "sixers",
+            "raptors",
+            "mavericks",
+            "mavs",
+            "spurs",
+            "thunder",
+            "grizzlies",
+            "pelicans",
+            "kings",
+            "bulls",
+            "rockets",
+            "jazz",
+            "clippers",
+            "pistons",
+            "hornets",
+            "magic",
+            "hawks",
+            "pacers",
+            "cavaliers",
+            "wizards",
+            "timberwolves",
+            "trail blazers",
+        },
+        "nfl": {
+            "nfl",
+            "football",
+            "chiefs",
+            "eagles",
+            "cowboys",
+            "ravens",
+            "bills",
+            "bengals",
+            "dolphins",
+            "steelers",
+            "49ers",
+            "rams",
+            "seahawks",
+            "patriots",
+            "packers",
+            "bears",
+            "giants",
+            "saints",
+            "buccaneers",
+            "chargers",
+            "raiders",
+            "broncos",
+            "texans",
+            "colts",
+            "titans",
+            "jaguars",
+            "browns",
+            "falcons",
+            "panthers",
+            "cardinals",
+            "vikings",
+        },
+        "nhl": {
+            "nhl",
+            "hockey",
+            "oilers",
+            "bruins",
+            "rangers",
+            "leafs",
+            "canadiens",
+            "penguins",
+            "capitals",
+            "lightning",
+            "golden knights",
+            "kraken",
+            "avalanche",
+            "flames",
+            "canucks",
+            "senators",
+            "sabres",
+            "coyotes",
+            "sharks",
+            "ducks",
+            "kings",
+            "blues",
+            "predators",
+            "wild",
+            "jets",
+            "red wings",
+            "islanders",
+            "devils",
+            "flyers",
+            "hurricanes",
+        },
     }
     _chat_sport = None
     for _sp, _triggers in _SPORT_DETECT.items():
@@ -3682,20 +4917,44 @@ async def handle_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None
         _player_pat = re.findall(r"\b([A-Z][a-z]+(?:\s+[A-Z][a-z]+)+)\b", user_msg)
         # Filter out known team names, cities, and common non-player phrases
         _non_player = {
-            "Golden Knights", "Red Wings", "Trail Blazers", "Red Sox", "White Sox",
-            "Blue Jays", "Maple Leafs", "Golden State", "New York", "Los Angeles",
-            "San Francisco", "San Antonio", "New Orleans", "Oklahoma City",
-            "Kansas City", "Green Bay", "Tampa Bay", "Las Vegas", "Salt Lake",
-            "Paper Trade", "March Madness", "Super Bowl", "World Series",
+            "Golden Knights",
+            "Red Wings",
+            "Trail Blazers",
+            "Red Sox",
+            "White Sox",
+            "Blue Jays",
+            "Maple Leafs",
+            "Golden State",
+            "New York",
+            "Los Angeles",
+            "San Francisco",
+            "San Antonio",
+            "New Orleans",
+            "Oklahoma City",
+            "Kansas City",
+            "Green Bay",
+            "Tampa Bay",
+            "Las Vegas",
+            "Salt Lake",
+            "Paper Trade",
+            "March Madness",
+            "Super Bowl",
+            "World Series",
         }
-        _player_names = [p for p in _player_pat if p not in _non_player and len(p.split()) <= 3]
+        _player_names = [
+            p for p in _player_pat if p not in _non_player and len(p.split()) <= 3
+        ]
         if _player_names:
             _pname = _player_names[0]
             _p_query = f"{_pname} current team roster {_chat_sport.upper()} 2026"
             _ploop = asyncio.get_running_loop()
-            _player_search_context = await _ploop.run_in_executor(None, _tavily_search, _p_query)
+            _player_search_context = await _ploop.run_in_executor(
+                None, _tavily_search, _p_query
+            )
             if not _player_search_context:
-                _player_search_context = await _ploop.run_in_executor(None, _serper_search, _p_query)
+                _player_search_context = await _ploop.run_in_executor(
+                    None, _serper_search, _p_query
+                )
             if _player_search_context:
                 _player_search_context = (
                     f"\n[Live player lookup for {_pname} — use this for current team info, "
@@ -3712,12 +4971,15 @@ async def handle_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None
         # User says our price is wrong — re-hit Polymarket directly, bypass cache
         # Clear file cache for this query so we don't return the same stale result
         import glob as _glob, os as _os
+
         for _f in _glob.glob(".cache/trader_leaderboard*.json"):
-            try: _os.remove(_f)
-            except Exception: pass
+            try:
+                _os.remove(_f)
+            except Exception:
+                pass
         _fresh_market = _search_polymarket_game(_mentioned_teams)
         if _fresh_market:
-            market_context = _fresh_market   # override with freshly fetched data
+            market_context = _fresh_market  # override with freshly fetched data
             search_context = "\n[Market data refreshed from Polymarket live feed]"
         else:
             search_context = "\n[No live Polymarket market found for that matchup]"
@@ -3736,7 +4998,9 @@ async def handle_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None
 
     # Merge player lookup into search context so AI sees current roster data
     if _player_search_context:
-        search_context = _player_search_context + ("\n\n" + search_context if search_context else "")
+        search_context = _player_search_context + (
+            "\n\n" + search_context if search_context else ""
+        )
 
     # 6b. Topic-based news search — fires for non-sport topics (Oscars, Tesla,
     #     UFC, NHL, politics, crypto, etc.) when no sport game is detected.
@@ -3754,10 +5018,19 @@ async def handle_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None
                 f"{_topic_news_tag.replace('-', ' ')} latest news today 2026",
             )
             _tloop = asyncio.get_running_loop()
-            search_context = await _tloop.run_in_executor(None, _tavily_search, _news_query)
+            search_context = await _tloop.run_in_executor(
+                None, _tavily_search, _news_query
+            )
             if not search_context:
-                search_context = await _tloop.run_in_executor(None, _serper_search, _news_query)
-            log.debug("[topic_news] tag=%s query=%r ctx_len=%d", _topic_news_tag, _news_query, len(search_context))
+                search_context = await _tloop.run_in_executor(
+                    None, _serper_search, _news_query
+                )
+            log.debug(
+                "[topic_news] tag=%s query=%r ctx_len=%d",
+                _topic_news_tag,
+                _news_query,
+                len(search_context),
+            )
 
     # 7. Win-probability impact context — injected when a sport is detected.
     #    Prepended to search_context so the AI reasons with actual shift math
@@ -3766,32 +5039,91 @@ async def handle_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None
     if _chat_sport and _chat_sport != "unknown":
         wp_context = _build_win_prob_context(_chat_sport)
         if wp_context:
-            search_context = wp_context + ("\n\n" + search_context if search_context else "")
+            search_context = wp_context + (
+                "\n\n" + search_context if search_context else ""
+            )
+
+    # 7b. Game Assessment context — when user asks for matchup analysis, preview,
+    #     or prediction, fetch standings, records, H2H results, coaching info.
+    game_assessment_context = ""
+    if _mentioned_teams and len(_mentioned_teams) >= 2:
+        sport_for_assessment = _chat_sport or "nba"
+        game_assessment_context = _build_game_assessment_context(
+            _mentioned_teams, sport_for_assessment, user_msg
+        )
+        if game_assessment_context:
+            log.debug(
+                "[game_assessment] Built context for %s vs %s",
+                _mentioned_teams[0],
+                _mentioned_teams[1],
+            )
+
+    # 7c. Today's Games context — when user asks "what games are today/tonight"
+    todays_games_context = _build_todays_games_context(user_msg)
 
     # 8. Smart money positions — injected when user asks about trading or markets.
     #    Shows what top-scored vetted wallets are currently positioned on so the
     #    AI can surface copy-trade ideas and smart money alignment signals.
     _SMART_MONEY_TRIGGERS = {
-        "trade", "buy", "bet", "position", "market", "edge", "wallet",
-        "copy", "follow", "who", "smart money", "trader", "recommend",
-        "should i", "worth", "call", "play", "play on", "long", "short",
+        "trade",
+        "buy",
+        "bet",
+        "position",
+        "market",
+        "edge",
+        "wallet",
+        "copy",
+        "follow",
+        "who",
+        "smart money",
+        "trader",
+        "recommend",
+        "should i",
+        "worth",
+        "call",
+        "play",
+        "play on",
+        "long",
+        "short",
         # streak / hot-hand queries
-        "streak", "hot", "on fire", "killing it", "winning",
+        "streak",
+        "hot",
+        "on fire",
+        "killing it",
+        "winning",
         # strategy / specialist queries
-        "specialist", "expert", "best at", "who trades", "who bets",
-        "nba trader", "nhl trader", "crypto trader", "sports trader",
+        "specialist",
+        "expert",
+        "best at",
+        "who trades",
+        "who bets",
+        "nba trader",
+        "nhl trader",
+        "crypto trader",
+        "sports trader",
         # copy-trade intent
-        "copy trade", "who should", "top trader", "best trader",
+        "copy trade",
+        "who should",
+        "top trader",
+        "best trader",
     }
     # Detect sport context in the question for specialist routing
     _SPORT_KEYWORDS: dict[str, str] = {
-        "nba": "NBA", "basketball": "NBA",
-        "nhl": "NHL", "hockey": "NHL",
-        "nfl": "NFL", "football": "NFL",
-        "mlb": "MLB", "baseball": "MLB",
-        "soccer": "Soccer", "football": "Soccer",
-        "crypto": "Crypto", "bitcoin": "Crypto", "btc": "Crypto",
-        "politics": "Politics", "election": "Politics",
+        "nba": "NBA",
+        "basketball": "NBA",
+        "nhl": "NHL",
+        "hockey": "NHL",
+        "nfl": "NFL",
+        "football": "NFL",
+        "mlb": "MLB",
+        "baseball": "MLB",
+        "soccer": "Soccer",
+        "football": "Soccer",
+        "crypto": "Crypto",
+        "bitcoin": "Crypto",
+        "btc": "Crypto",
+        "politics": "Politics",
+        "election": "Politics",
     }
     sm_sport = next((label for kw, label in _SPORT_KEYWORDS.items() if kw in q), "")
 
@@ -3802,24 +5134,68 @@ async def handle_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None
     # 8b. Live crypto prices — injected when the user asks about BTC, ETH, crypto.
     #     Uses Binance 15-min cache — gives AI real prices instead of guessing.
     _CRYPTO_TRIGGERS = {
-        "bitcoin", "btc", "ethereum", "eth", "solana", "sol", "xrp", "crypto",
-        "doge", "bnb", "coin", "token", "blockchain", "price", "dump", "pump",
-        "rally", "altcoin", "defi", "nft", "bull", "bear", "market cap",
+        "bitcoin",
+        "btc",
+        "ethereum",
+        "eth",
+        "solana",
+        "sol",
+        "xrp",
+        "crypto",
+        "doge",
+        "bnb",
+        "coin",
+        "token",
+        "blockchain",
+        "price",
+        "dump",
+        "pump",
+        "rally",
+        "altcoin",
+        "defi",
+        "nft",
+        "bull",
+        "bear",
+        "market cap",
     }
     crypto_price_context = ""
     if any(kw in q for kw in _CRYPTO_TRIGGERS):
         try:
-            crypto_price_context = "\n\n" + get_crypto_price_context() if get_crypto_price_context() else ""
+            crypto_price_context = (
+                "\n\n" + get_crypto_price_context()
+                if get_crypto_price_context()
+                else ""
+            )
         except Exception:
             pass
 
     # 8c. Live economic rates — injected when the user asks about the Fed, rates, inflation.
     #     Uses NY Fed API + Treasury yields — gives AI real rate context.
     _ECON_TRIGGERS = {
-        "fed", "federal reserve", "rate", "fomc", "cut", "hike", "pause",
-        "inflation", "cpi", "pce", "recession", "gdp", "yield", "treasury",
-        "interest", "monetary", "hawkish", "dovish", "basis points", "bps",
-        "unemployment", "jobs", "nonfarm", "payroll",
+        "fed",
+        "federal reserve",
+        "rate",
+        "fomc",
+        "cut",
+        "hike",
+        "pause",
+        "inflation",
+        "cpi",
+        "pce",
+        "recession",
+        "gdp",
+        "yield",
+        "treasury",
+        "interest",
+        "monetary",
+        "hawkish",
+        "dovish",
+        "basis points",
+        "bps",
+        "unemployment",
+        "jobs",
+        "nonfarm",
+        "payroll",
     }
     econ_rate_context = ""
     if any(kw in q for kw in _ECON_TRIGGERS):
@@ -3842,7 +5218,8 @@ async def handle_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None
         "4. If you still can't find accurate data, say honestly: 'I'm not finding a live feed "
         "for that right now — check polymarket.com directly.' Do NOT guess or hallucinate.\n"
         "5. Never be defensive or make excuses — just correct and move forward.\n\n"
-        if _is_correction else ""
+        if _is_correction
+        else ""
     )
 
     system_prompt = (
@@ -3869,7 +5246,8 @@ async def handle_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None
         "(e.g., /forget city). NEVER claim you've 'updated', 'edited', or 'removed' anything "
         "from their profile — you do not have that ability. "
         "Only the /forget command and specific correction phrases ('I don't live in X') actually work.\n\n"
-        + onboarding_hint + ("\n\n" if onboarding_hint else "")
+        + onboarding_hint
+        + ("\n\n" if onboarding_hint else "")
         + "BREVITY IS MANDATORY. Telegram users want 1-3 sentences for simple questions, "
         "max 100 words for market analysis. No filler phrases, no emoji stories, no life "
         "analogies, no sports metaphors. Give the data, the edge, and the recommendation. "
@@ -3955,16 +5333,34 @@ async def handle_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None
     # Dynamic guardrail: when live data IS present, prepend a hard reminder
     # so the AI never says "I don't have live data" when it literally does.
     _data_available_hint = ""
-    _has_live = bool(market_context or scan_context or search_context
-                     or injury_context or crypto_price_context or econ_rate_context)
+    _has_live = bool(
+        market_context
+        or scan_context
+        or search_context
+        or injury_context
+        or game_assessment_context
+        or todays_games_context
+        or crypto_price_context
+        or econ_rate_context
+    )
     if _has_live:
         _blocks = []
-        if market_context:  _blocks.append("market prices")
-        if scan_context:    _blocks.append("scan opportunities")
-        if search_context:  _blocks.append("web search results")
-        if injury_context:  _blocks.append("injury data")
-        if crypto_price_context: _blocks.append("crypto prices")
-        if econ_rate_context:    _blocks.append("economic rates")
+        if market_context:
+            _blocks.append("market prices")
+        if scan_context:
+            _blocks.append("scan opportunities")
+        if search_context:
+            _blocks.append("web search results")
+        if injury_context:
+            _blocks.append("injury data")
+        if game_assessment_context:
+            _blocks.append("game assessment data")
+        if todays_games_context:
+            _blocks.append("today's games schedule")
+        if crypto_price_context:
+            _blocks.append("crypto prices")
+        if econ_rate_context:
+            _blocks.append("economic rates")
         _data_available_hint = (
             f"\n\n⚡ LIVE DATA LOADED: You have real-time {', '.join(_blocks)} below. "
             "USE THIS DATA. Do NOT say 'I don't have live data' or 'I don't have access "
@@ -3975,42 +5371,88 @@ async def handle_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None
         user_msg
         + kb_context
         + platform_doc_context
-        + profile_context        # long-term personal facts about this user
-        + session_context        # today's conversation history (per user)
+        + profile_context  # long-term personal facts about this user
+        + session_context  # today's conversation history (per user)
         + _data_available_hint
         + market_context
         + scan_context
-        + smart_money_context    # top-scored wallet positions (copy-trade signal)
+        + smart_money_context  # top-scored wallet positions (copy-trade signal)
         + injury_context
         + search_context
-        + crypto_price_context   # live Binance prices (BTC, ETH, SOL)
-        + econ_rate_context      # live NY Fed rates + Treasury yields
+        + game_assessment_context  # matchup analysis: records, H2H, coaching, all-stars
+        + todays_games_context  # today's game schedule when asked
+        + crypto_price_context  # live Binance prices (BTC, ETH, SOL)
+        + econ_rate_context  # live NY Fed rates + Treasury yields
     )
 
     # Build context block list for decision_log (which blocks were non-empty)
     _active_ctx_blocks: list[str] = []
-    if kb_context:            _active_ctx_blocks.append("knowledge_base")
-    if platform_doc_context:  _active_ctx_blocks.append("platform_docs")
-    if profile_context:       _active_ctx_blocks.append("user_profile")
-    if session_context:       _active_ctx_blocks.append("session_history")
-    if market_context:        _active_ctx_blocks.append("market_data")
-    if scan_context:          _active_ctx_blocks.append("scan_results")
-    if smart_money_context:   _active_ctx_blocks.append("smart_money")
-    if injury_context:        _active_ctx_blocks.append("injuries")
-    if search_context:        _active_ctx_blocks.append("web_search")
-    if crypto_price_context:  _active_ctx_blocks.append("crypto_prices")
-    if econ_rate_context:     _active_ctx_blocks.append("econ_rates")
+    if kb_context:
+        _active_ctx_blocks.append("knowledge_base")
+    if platform_doc_context:
+        _active_ctx_blocks.append("platform_docs")
+    if profile_context:
+        _active_ctx_blocks.append("user_profile")
+    if session_context:
+        _active_ctx_blocks.append("session_history")
+    if market_context:
+        _active_ctx_blocks.append("market_data")
+    if scan_context:
+        _active_ctx_blocks.append("scan_results")
+    if smart_money_context:
+        _active_ctx_blocks.append("smart_money")
+    if injury_context:
+        _active_ctx_blocks.append("injuries")
+    if search_context:
+        _active_ctx_blocks.append("web_search")
+    if game_assessment_context:
+        _active_ctx_blocks.append("game_assessment")
+    if todays_games_context:
+        _active_ctx_blocks.append("todays_games")
+    if crypto_price_context:
+        _active_ctx_blocks.append("crypto_prices")
+    if econ_rate_context:
+        _active_ctx_blocks.append("econ_rates")
 
     reply = get_chat_response(
         prompt,
-        task_type       = "creative",
-        system_prompt   = system_prompt,
-        prompt_version  = "chat_system@2.4",
-        context_blocks  = _active_ctx_blocks,
-        correction_mode = _is_correction,
-        regime_safe     = _regime.is_ml_safe,
-        user_id         = str(update.effective_user.id),
-    ) or "Sorry, I couldn't generate a response right now."
+        task_type="creative",
+        system_prompt=system_prompt,
+        prompt_version="chat_system@2.7",
+        context_blocks=_active_ctx_blocks,
+        correction_mode=_is_correction,
+        regime_safe=_regime.is_ml_safe,
+        user_id=str(update.effective_user.id),
+    )
+
+    # Fallback: if AI failed, try a minimal retry with just the user message + basic market data
+    if reply is None:
+        log.warning("[handle_message] Primary AI call failed, attempting fallback...")
+        fallback_prompt = (
+            f"User asked: {user_msg}\n\n"
+            f"{market_context or '[No market data available]'}\n\n"
+            f"{injury_context or '[No injury data available]'}\n\n"
+            f"{search_context or '[No web search results]'}"
+        )
+        fallback_system = (
+            "You are EDGE, a helpful sports prediction market assistant. "
+            "Answer the user's question based on the data provided above. "
+            "If no data is available, say so and suggest what to check. "
+            "Keep your reply under 150 words. Be concise and direct."
+        )
+        reply = get_chat_response(
+            fallback_prompt,
+            task_type="simple",
+            system_prompt=fallback_system,
+            prompt_version="fallback@1.0",
+            user_id=str(update.effective_user.id),
+            max_tokens=300,
+        )
+
+    reply = (
+        reply
+        or "Sorry, I couldn't generate a response right now. The AI service may be temporarily unavailable. Please try again in a few minutes."
+    )
 
     # Save to per-user session memory
     if reply:
@@ -4028,12 +5470,12 @@ async def handle_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None
 # ---------------------------------------------------------------------------
 
 _SEVERITY_EMOJI = {
-    "Out":             "🔴",
-    "Injured Reserve": "🔴",   # NHL IR — confirmed miss, treated same as Out
-    "Suspension":      "🚫",
-    "Doubtful":        "🟠",
-    "Questionable":    "🟡",
-    "Day-To-Day":      "⚪",
+    "Out": "🔴",
+    "Injured Reserve": "🔴",  # NHL IR — confirmed miss, treated same as Out
+    "Suspension": "🚫",
+    "Doubtful": "🟠",
+    "Questionable": "🟡",
+    "Day-To-Day": "⚪",
 }
 
 # Max players shown per sport before truncation (keeps messages readable)
@@ -4064,11 +5506,12 @@ def _build_tonight_injury_alerts() -> str:
     try:
         from edge_agent.memory.injury_cache import InjuryCache
         from edge_agent.win_probability import injury_win_prob_shift
+
         db = InjuryCache()
         lines: list[str] = []
 
         # Fetch tonight's NBA game schedule once (cached 30 min)
-        tonight_nba = _get_tonight_nba_games()   # frozenset of lowercase team tokens
+        tonight_nba = _get_tonight_nba_games()  # frozenset of lowercase team tokens
 
         for sport in ("nba", "nfl", "nhl"):
             records = db.get_all(sport)
@@ -4076,7 +5519,8 @@ def _build_tonight_injury_alerts() -> str:
                 continue
             key_pos = _KEY_POSITIONS.get(sport, set())
             alerts = [
-                r for r in records
+                r
+                for r in records
                 if r.get("status", "").lower() in _ALERT_STATUSES
                 and (not r.get("position") or r.get("position", "") in key_pos)
             ]
@@ -4084,25 +5528,27 @@ def _build_tonight_injury_alerts() -> str:
                 continue
 
             # Header — tag NBA with "(Tonight's Games)" when schedule is available
-            header_suffix = " (Tonight & Tomorrow)" if sport == "nba" and tonight_nba else ""
+            header_suffix = (
+                " (Tonight & Tomorrow)" if sport == "nba" and tonight_nba else ""
+            )
             lines.append(f"\n🏥 <b>{sport.upper()} Starter Alerts{header_suffix}:</b>")
 
             shown = 0
             for r in alerts:
-                if shown >= 10:   # cap at 10 per sport to keep message compact
+                if shown >= 10:  # cap at 10 per sport to keep message compact
                     break
-                name   = r.get("player_name", "Unknown")
-                team   = r.get("team", "")
+                name = r.get("player_name", "Unknown")
+                team = r.get("team", "")
                 status = r.get("status", "")
-                src    = r.get("source_api", "")
-                pos    = r.get("position", "")
-                emoji  = _SEVERITY_EMOJI.get(status, "⚪")
+                src = r.get("source_api", "")
+                pos = r.get("position", "")
+                emoji = _SEVERITY_EMOJI.get(status, "⚪")
 
                 # NBA: filter to teams playing tonight when schedule data is available
                 if sport == "nba" and tonight_nba:
                     team_tokens = set(team.lower().split())
                     if not team_tokens.intersection(tonight_nba):
-                        continue   # this team isn't playing tonight — skip
+                        continue  # this team isn't playing tonight — skip
 
                 # ── Win-probability shift (points-system math) ────────────────
                 shift, eff_impact, _expl = injury_win_prob_shift(
@@ -4114,8 +5560,10 @@ def _build_tonight_injury_alerts() -> str:
                     star_multiplier=1.0,
                 )
                 if shift != 0.0:
-                    unit      = "goals/gm" if sport == "nhl" else "pts/gm"
-                    shift_str = f" → <b>{shift:+.1%}</b> win prob ({eff_impact:.1f} {unit})"
+                    unit = "goals/gm" if sport == "nhl" else "pts/gm"
+                    shift_str = (
+                        f" → <b>{shift:+.1%}</b> win prob ({eff_impact:.1f} {unit})"
+                    )
                 else:
                     shift_str = ""
 
@@ -4149,13 +5597,18 @@ def _fetch_sportsbook_lines(sport: str) -> str:
     """
     try:
         from datetime import date
+
         today = date.today().strftime("%B %d")
         query = f"{sport.upper()} games tonight moneyline odds spread {today}"
         result = _tavily_search(query, max_results=3)
         if not result:
             result = _serper_search(query, max_results=3)
         # Strip the wrapper tags and trim to keep scan message readable
-        result = result.replace("\n[Live web search results]\n", "").replace("\n[End web search]", "").strip()
+        result = (
+            result.replace("\n[Live web search results]\n", "")
+            .replace("\n[End web search]", "")
+            .strip()
+        )
         return result[:700] if result else ""
     except Exception as exc:
         log.debug("_fetch_sportsbook_lines failed for %s: %s", sport, exc)
@@ -4189,10 +5642,13 @@ def _get_tonight_nba_games() -> frozenset:
         return frozenset()
 
     now = time.time()
-    if _bdl_game_cache["teams"] is not None and now - _bdl_game_cache["fetched_at"] < 1800:
+    if (
+        _bdl_game_cache["teams"] is not None
+        and now - _bdl_game_cache["fetched_at"] < 1800
+    ):
         return _bdl_game_cache["teams"]
 
-    today    = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
     tomorrow = (datetime.now(timezone.utc) + timedelta(days=1)).strftime("%Y-%m-%d")
     try:
         resp = _req.get(
@@ -4210,13 +5666,13 @@ def _get_tonight_nba_games() -> frozenset:
                 full_name = game.get(side, {}).get("full_name", "")
                 tokens.update(full_name.lower().split())
         result = frozenset(tokens)
-        _bdl_game_cache["teams"]      = result
+        _bdl_game_cache["teams"] = result
         _bdl_game_cache["fetched_at"] = now
         log.info("[BALLDONTLIE] Tonight+Tomorrow NBA team tokens: %s", sorted(result))
         return result
     except Exception as exc:
         log.warning("[BALLDONTLIE] Game fetch failed: %s", exc)
-        _bdl_game_cache["teams"]      = frozenset()
+        _bdl_game_cache["teams"] = frozenset()
         _bdl_game_cache["fetched_at"] = now
         return frozenset()
 
@@ -4224,6 +5680,7 @@ def _get_tonight_nba_games() -> frozenset:
 # ---------------------------------------------------------------------------
 # Win-probability context builder for AI chat
 # ---------------------------------------------------------------------------
+
 
 def _build_win_prob_context(sport: str) -> str:
     """
@@ -4237,7 +5694,8 @@ def _build_win_prob_context(sport: str) -> str:
     try:
         from edge_agent.memory.injury_cache import InjuryCache
         from edge_agent.win_probability import injury_win_prob_shift
-        db      = InjuryCache()
+
+        db = InjuryCache()
         records = db.get_all(sport)
         lines: list[str] = []
         for r in records:
@@ -4281,12 +5739,13 @@ async def cmd_injuries(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     """
     args = ctx.args or []
     sport_filter = args[0].lower() if args else None
-    team_filter  = " ".join(args[1:]).lower() if len(args) > 1 else None
+    team_filter = " ".join(args[1:]).lower() if len(args) > 1 else None
 
     _VALID_SPORTS = ("nba", "nfl", "nhl", "cfb", "cbb", "wnba", "ncaaw")
 
     try:
         from edge_agent.memory.injury_cache import InjuryCache
+
         cache = InjuryCache()
 
         # ── No sport arg: show summary ────────────────────────────────────────
@@ -4341,18 +5800,18 @@ async def cmd_injuries(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         header = f"<b>🏥 {sport_label} Injuries</b>"
         if team_filter:
             header += f" — <i>{_e(team_filter.title())}</i>"
-        starters_all   = [r for r in records if r.get("is_starter")]
-        role_all       = [r for r in records if not r.get("is_starter")]
+        starters_all = [r for r in records if r.get("is_starter")]
+        role_all = [r for r in records if not r.get("is_starter")]
         header += f" ({len(starters_all)} starters · {len(role_all)} role)"
 
         def _player_line(r: dict) -> str:
-            status    = r.get("status", "")
-            sem       = _SEVERITY_EMOJI.get(status, "⚪")
-            player    = r.get("player_name", "")
-            pos       = r.get("position", "")
-            inj_type  = r.get("injury_type", "")
-            src       = r.get("source_api", "espn")
-            pos_str    = f" ({_e(pos)})" if pos else ""
+            status = r.get("status", "")
+            sem = _SEVERITY_EMOJI.get(status, "⚪")
+            player = r.get("player_name", "")
+            pos = r.get("position", "")
+            inj_type = r.get("injury_type", "")
+            src = r.get("source_api", "espn")
+            pos_str = f" ({_e(pos)})" if pos else ""
             detail_str = f" — <i>{_e(inj_type)}</i>" if inj_type else ""
             if "nba_official" in src or "+sleeper✓" in src:
                 src_badge = " ✅"
@@ -4424,6 +5883,7 @@ async def cmd_injuries(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
 # Background injury refresh job
 # ---------------------------------------------------------------------------
 
+
 async def injury_refresh_job(ctx: ContextTypes.DEFAULT_TYPE) -> None:
     """
     Fetches fresh injury data for NBA and NFL from ESPN + NBA official PDF,
@@ -4442,12 +5902,12 @@ async def injury_refresh_job(ctx: ContextTypes.DEFAULT_TYPE) -> None:
     # for sports that aren't playing (e.g. NFL lines in March = preseason noise).
     _now_month = datetime.now(timezone.utc).month
     _SEASON_MONTHS: dict[str, tuple[int, ...]] = {
-        "nba":   (10, 11, 12, 1, 2, 3, 4, 5, 6),       # Oct–Jun (inc. playoffs)
-        "wnba":  (5, 6, 7, 8, 9, 10),                   # May–Oct
-        "nfl":   (9, 10, 11, 12, 1, 2),                 # Sep–Feb (inc. playoffs)
-        "cfb":   (8, 9, 10, 11, 12, 1),                 # Aug–Jan
-        "nhl":   (10, 11, 12, 1, 2, 3, 4, 5, 6),        # Oct–Jun
-        "cbb":   (11, 12, 1, 2, 3, 4),                  # Nov–Apr (March Madness)
+        "nba": (10, 11, 12, 1, 2, 3, 4, 5, 6),  # Oct–Jun (inc. playoffs)
+        "wnba": (5, 6, 7, 8, 9, 10),  # May–Oct
+        "nfl": (9, 10, 11, 12, 1, 2),  # Sep–Feb (inc. playoffs)
+        "cfb": (8, 9, 10, 11, 12, 1),  # Aug–Jan
+        "nhl": (10, 11, 12, 1, 2, 3, 4, 5, 6),  # Oct–Jun
+        "cbb": (11, 12, 1, 2, 3, 4),  # Nov–Apr (March Madness)
         "ncaaw": (11, 12, 1, 2, 3, 4),
     }
 
@@ -4455,7 +5915,11 @@ async def injury_refresh_job(ctx: ContextTypes.DEFAULT_TYPE) -> None:
         active_months = _SEASON_MONTHS.get(sport, tuple(range(1, 13)))
         if _now_month not in active_months:
             results[sport.upper()] = "off-season (skipped)"
-            log.info("Injury refresh: %s is off-season (month=%d) — skipped", sport.upper(), _now_month)
+            log.info(
+                "Injury refresh: %s is off-season (month=%d) — skipped",
+                sport.upper(),
+                _now_month,
+            )
             continue
         try:
             count = client.fetch_and_store(sport)
@@ -4470,23 +5934,28 @@ async def injury_refresh_job(ctx: ContextTypes.DEFAULT_TYPE) -> None:
     # ── Proactive status-change alerts ────────────────────────────────────────
     try:
         from edge_agent.memory.injury_cache import InjuryCache
+
         cache = InjuryCache()
         pending = cache.get_pending_change_alerts()  # all directions
 
         for alert in pending:
-            player    = alert.get("player_name", "")
-            team      = alert.get("team", "")
-            pos       = alert.get("position", "")
-            old_s     = alert.get("old_status", "")
-            new_s     = alert.get("new_status", "")
-            sport     = alert.get("sport", "").upper()
+            player = alert.get("player_name", "")
+            team = alert.get("team", "")
+            pos = alert.get("position", "")
+            old_s = alert.get("old_status", "")
+            new_s = alert.get("new_status", "")
+            sport = alert.get("sport", "").upper()
             direction = alert.get("direction", "worsening")
 
-            pos_str     = f" ({_e(pos)})" if pos else ""
+            pos_str = f" ({_e(pos)})" if pos else ""
             sport_emoji = {
-                "NBA": "🏀", "WNBA": "🏀♀️", "NCAAW": "🎓🏀♀️",
-                "NFL": "🏈", "CFB": "🎓🏈",
-                "NHL": "🏒", "MLB": "⚾",
+                "NBA": "🏀",
+                "WNBA": "🏀♀️",
+                "NCAAW": "🎓🏀♀️",
+                "NFL": "🏈",
+                "CFB": "🎓🏈",
+                "NHL": "🏒",
+                "MLB": "⚾",
             }.get(sport, "🏅")
 
             # ── Worsening alert (existing behavior) ───────────────────────────
@@ -4502,17 +5971,21 @@ async def injury_refresh_job(ctx: ContextTypes.DEFAULT_TYPE) -> None:
                     f"Run /scan for updated signals.</i>"
                 )
                 await _broadcast(ctx.bot, msg, parse_mode=ParseMode.HTML)
-                log.info("Proactive injury alert sent: %s %s → %s", player, old_s, new_s)
+                log.info(
+                    "Proactive injury alert sent: %s %s → %s", player, old_s, new_s
+                )
 
             # ── Return / clearance alert ───────────────────────────────────────
             elif direction == "return":
                 if new_s == "Active":
-                    status_line = f"🟢 <b>Cleared — off injury report</b> (was {_e(old_s)})"
-                    headline    = "🔓 <b>PLAYER CLEARED FOR RETURN</b>"
+                    status_line = (
+                        f"🟢 <b>Cleared — off injury report</b> (was {_e(old_s)})"
+                    )
+                    headline = "🔓 <b>PLAYER CLEARED FOR RETURN</b>"
                 else:
                     old_em = _SEVERITY_EMOJI.get(old_s, "⚪")
                     status_line = f"{old_em} {_e(old_s)} → 🟡 <b>{_e(new_s)}</b>"
-                    headline    = "📈 <b>INJURY STATUS IMPROVING</b>"
+                    headline = "📈 <b>INJURY STATUS IMPROVING</b>"
 
                 # Broadcast to the main channel
                 channel_msg = (
@@ -4529,9 +6002,7 @@ async def injury_refresh_job(ctx: ContextTypes.DEFAULT_TYPE) -> None:
                 try:
                     fan_ids: set[int] = set(
                         _profiles.get_users_for_player(player)
-                    ) | set(
-                        _profiles.get_users_for_team(team)
-                    )
+                    ) | set(_profiles.get_users_for_team(team))
                     for fan_id in fan_ids:
                         tone = _profiles.get_alert_tone(
                             fan_id, player_name=player, team_name=team, event="return"
@@ -4549,17 +6020,25 @@ async def injury_refresh_job(ctx: ContextTypes.DEFAULT_TYPE) -> None:
                         )
                         try:
                             await ctx.bot.send_message(
-                                chat_id=fan_id, text=dm, parse_mode=ParseMode.HTML,
+                                chat_id=fan_id,
+                                text=dm,
+                                parse_mode=ParseMode.HTML,
                             )
                             log.info(
-                                "Personalized return alert → user %d for %s", fan_id, player,
+                                "Personalized return alert → user %d for %s",
+                                fan_id,
+                                player,
                             )
                         except Exception as dm_exc:
                             log.warning(
-                                "Could not send return DM to user %d: %s", fan_id, dm_exc,
+                                "Could not send return DM to user %d: %s",
+                                fan_id,
+                                dm_exc,
                             )
                 except Exception as fan_exc:
-                    log.warning("Fan lookup failed for return alert (%s): %s", player, fan_exc)
+                    log.warning(
+                        "Fan lookup failed for return alert (%s): %s", player, fan_exc
+                    )
 
                 log.info("Return alert sent: %s %s → %s", player, old_s, new_s)
 
@@ -4570,6 +6049,7 @@ async def injury_refresh_job(ctx: ContextTypes.DEFAULT_TYPE) -> None:
 # ---------------------------------------------------------------------------
 # /standings command
 # ---------------------------------------------------------------------------
+
 
 async def cmd_standings(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     """
@@ -4599,10 +6079,23 @@ async def cmd_standings(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     sport = args[0].lower() if args else None
 
     _VALID = (
-        "nfl", "nba", "mlb", "nhl", "wnba",
-        "cfb", "cbb", "ncaaw",
-        "mls", "epl", "laliga", "bundesliga", "seriea", "ligue1", "ucl",
-        "f1", "pga",
+        "nfl",
+        "nba",
+        "mlb",
+        "nhl",
+        "wnba",
+        "cfb",
+        "cbb",
+        "ncaaw",
+        "mls",
+        "epl",
+        "laliga",
+        "bundesliga",
+        "seriea",
+        "ligue1",
+        "ucl",
+        "f1",
+        "pga",
     )
 
     await update.message.reply_text("🔍 Fetching standings…")
@@ -4618,19 +6111,19 @@ async def cmd_standings(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
             # No arg: championship favorites summary across all sports
             lines = ["🏆 <b>Championship Favorites (Polymarket)</b>\n"]
             sport_labels = {
-                "nfl":        "🏈 Super Bowl",
-                "nba":        "🏀 NBA Champion",
-                "mlb":        "⚾ World Series",
-                "nhl":        "🏒 Stanley Cup",
-                "wnba":       "🏀♀️ WNBA Champion",
-                "cfb":        "🎓🏈 CFB Playoff",
-                "cbb":        "🎓🏀 March Madness",
-                "ncaaw":      "🎓🏀♀️ Women's March Madness",
-                "mls":        "⚽ MLS Cup",
-                "epl":        "🏴󠁧󠁢󠁥󠁮󠁧󠁿 Premier League",
-                "ucl":        "🌟⚽ Champions League",
-                "f1":         "🏎️ F1 World Champion",
-                "pga":        "⛳ Masters Winner",
+                "nfl": "🏈 Super Bowl",
+                "nba": "🏀 NBA Champion",
+                "mlb": "⚾ World Series",
+                "nhl": "🏒 Stanley Cup",
+                "wnba": "🏀♀️ WNBA Champion",
+                "cfb": "🎓🏈 CFB Playoff",
+                "cbb": "🎓🏀 March Madness",
+                "ncaaw": "🎓🏀♀️ Women's March Madness",
+                "mls": "⚽ MLS Cup",
+                "epl": "🏴󠁧󠁢󠁥󠁮󠁧󠁿 Premier League",
+                "ucl": "🌟⚽ Champions League",
+                "f1": "🏎️ F1 World Champion",
+                "pga": "⛳ Masters Winner",
             }
             for s, label in sport_labels.items():
                 try:
@@ -4661,6 +6154,7 @@ async def cmd_standings(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
 # /mlstatus — ML layer health, calibration state, regime, predictions
 # ---------------------------------------------------------------------------
 
+
 async def cmd_mlstatus(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     """
     Show the current state of every ML component:
@@ -4676,7 +6170,9 @@ async def cmd_mlstatus(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     # ── 1. Confidence Calibrator ──────────────────────────────────────────
     cal = _calibrator.status()
     lines.append("<b>📐 Confidence Calibrator (Platt Scaling)</b>")
-    lines.append(f"  Status:   {'✅ Active' if cal['active'] else '⏳ Collecting data (passthrough)'}")
+    lines.append(
+        f"  Status:   {'✅ Active' if cal['active'] else '⏳ Collecting data (passthrough)'}"
+    )
     lines.append(f"  Samples:  {cal['n_samples']} / {cal['min_samples_needed']} needed")
     if cal["active"]:
         lines.append(f"  β₀={cal['intercept']}  β₁={cal['slope']}")
@@ -4692,39 +6188,49 @@ async def cmd_mlstatus(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     lines.append(f"  Samples: {sc['n_samples']} / {sc['min_train_samples']} needed")
     if sc["model_version"] != "untrained":
         lines.append(f"  Model v{sc['model_version']}")
-        lines.append(f"  Val accuracy: {sc['val_accuracy']:.1%}  |  Logloss: {sc['val_logloss']}")
+        lines.append(
+            f"  Val accuracy: {sc['val_accuracy']:.1%}  |  Logloss: {sc['val_logloss']}"
+        )
         lines.append(f"  Trained: {sc['trained_at']}")
         if sc.get("feature_importance"):
             top3 = sorted(sc["feature_importance"].items(), key=lambda x: -x[1])[:3]
             imp_str = "  |  ".join(f"{k}={v:.3f}" for k, v in top3)
             lines.append(f"  Top features: {imp_str}")
-        lines.append(f"  Promote threshold: {sc['promote_threshold']:.0%}  |  Demote: {sc['demote_threshold']:.0%}")
+        lines.append(
+            f"  Promote threshold: {sc['promote_threshold']:.0%}  |  Demote: {sc['demote_threshold']:.0%}"
+        )
     lines.append("")
 
     # ── 3. Regime Detector ────────────────────────────────────────────────
     reg = _regime.status()
     safe_emoji = "✅" if reg["ml_safe"] else "🔴"
     lines.append("<b>📊 Feature Regime Detector</b>")
-    lines.append(f"  ML safe: {safe_emoji} {'Yes — no drift detected' if reg['ml_safe'] else 'NO — ML DISABLED (drift detected)'}")
+    lines.append(
+        f"  ML safe: {safe_emoji} {'Yes — no drift detected' if reg['ml_safe'] else 'NO — ML DISABLED (drift detected)'}"
+    )
     if not reg["ml_safe"] and reg.get("drift_reasons"):
         for r in reg["drift_reasons"]:
             lines.append(f"  ⚠️ {r}")
         lines.append(f"  Recovery: {reg['recovery_needed']}")
     if reg.get("baseline"):
         b = reg["baseline"]
-        lines.append(f"  Baseline: conf={b.get('confidence', 0):.3f}  ev={b.get('ev_net', 0):.4f}  prob={b.get('market_prob', 0):.3f}")
+        lines.append(
+            f"  Baseline: conf={b.get('confidence', 0):.3f}  ev={b.get('ev_net', 0):.4f}  prob={b.get('market_prob', 0):.3f}"
+        )
     lines.append(f"  Last checked: {reg['last_checked']}")
-    lines.append(f"  Thresholds: conf±{reg['thresholds']['confidence']}  ev±{reg['thresholds']['ev_net']}  prob±{reg['thresholds']['market_prob']}")
+    lines.append(
+        f"  Thresholds: conf±{reg['thresholds']['confidence']}  ev±{reg['thresholds']['ev_net']}  prob±{reg['thresholds']['market_prob']}"
+    )
     lines.append("")
 
     # ── 4. Prediction counts ──────────────────────────────────────────────
     pred = _ml_store.prediction_counts()
     total = pred.get("total") or 0
-    wins  = pred.get("wins")  or 0
-    losses= pred.get("losses") or 0
-    pend  = pred.get("pending") or 0
+    wins = pred.get("wins") or 0
+    losses = pred.get("losses") or 0
+    pend = pred.get("pending") or 0
     resolved = wins + losses
-    win_rate_str = f"{wins/resolved:.1%}" if resolved > 0 else "n/a"
+    win_rate_str = f"{wins / resolved:.1%}" if resolved > 0 else "n/a"
     lines.append("<b>🎯 Shadow Predictions (all-time)</b>")
     lines.append(f"  Total: {total}  |  Resolved: {resolved}  |  Pending: {pend}")
     lines.append(f"  Wins: {wins}  |  Losses: {losses}  |  Win rate: {win_rate_str}")
@@ -4745,7 +6251,9 @@ async def cmd_mlstatus(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         lines.append("<b>📋 AI Decision Log (last 7 days)</b>")
         lines.append(f"  Total calls: {dec_summary['total_calls']}")
         lines.append(f"  Avg latency: {dec_summary['avg_latency_ms']}ms")
-        lines.append(f"  Correction rate: {dec_summary['correction_rate']} ({dec_summary['correction_calls']} calls)")
+        lines.append(
+            f"  Correction rate: {dec_summary['correction_rate']} ({dec_summary['correction_calls']} calls)"
+        )
         lines.append(f"  User corrections: {dec_summary['user_corrections']}")
         model_stats = _decision_log.model_stats(days=7)
         if model_stats:
@@ -4764,7 +6272,9 @@ async def cmd_mlstatus(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         prompts = _prompt_registry.list_prompts()
         lines.append("<b>📝 Prompt Registry</b>")
         for p in prompts:
-            lines.append(f"  • <code>{p['version_id']}</code>  ~{p['tokens_est']} tokens  [{p['hash']}]")
+            lines.append(
+                f"  • <code>{p['version_id']}</code>  ~{p['tokens_est']} tokens  [{p['hash']}]"
+            )
         lines.append("")
     except Exception:
         pass
@@ -4778,6 +6288,7 @@ async def cmd_mlstatus(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
 # ---------------------------------------------------------------------------
 # /decisions — last N AI decisions with model, prompt version, context blocks
 # ---------------------------------------------------------------------------
+
 
 async def cmd_decisions(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     """
@@ -4841,7 +6352,9 @@ async def cmd_decisions(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
             flags.append("❌ user corrected")
         flag_str = "  " + " | ".join(flags) if flags else ""
 
-        model_short = (d.get("model_used") or "unknown").split("/")[-1].replace(":free", "")
+        model_short = (
+            (d.get("model_used") or "unknown").split("/")[-1].replace(":free", "")
+        )
 
         lines.append(
             f"<b>{i}. {d['ts_str']}</b>{flag_str}\n"
@@ -4876,6 +6389,7 @@ async def cmd_decisions(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
 # /insider command — show recent insider alerts
 # ---------------------------------------------------------------------------
 
+
 async def cmd_insider(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     """
     Show the last 10 insider alerts fired by the engine.
@@ -4908,13 +6422,17 @@ async def cmd_insider(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
 
     lines = [f"<b>Insider Alerts — Last {len(alerts)}</b>\n"]
     for a in alerts:
-        ts   = datetime.fromtimestamp(a["fired_at"], tz=timezone.utc).strftime("%m/%d %H:%M")
+        ts = datetime.fromtimestamp(a["fired_at"], tz=timezone.utc).strftime(
+            "%m/%d %H:%M"
+        )
         addr = a["wallet"][:6] + "..." + a["wallet"][-4:]
-        q    = _e(a["question"][:70])
+        q = _e(a["question"][:70])
         score = a["suspicion_score"]
-        size  = a["trade_size_usd"]
+        size = a["trade_size_usd"]
         price = int(a["current_price"] * 100)
-        outcome_emoji = {"win": "✅", "loss": "❌", "pending": "⏳"}.get(a["outcome"], "⏳")
+        outcome_emoji = {"win": "✅", "loss": "❌", "pending": "⏳"}.get(
+            a["outcome"], "⏳"
+        )
         score_emoji = "🚨" if score >= 70 else "⚠️" if score >= 50 else "🔍"
         lines.append(
             f"{score_emoji} [{ts}] <b>{score}/100</b> — ${size:,.0f} @ {price}% YES\n"
@@ -4932,6 +6450,7 @@ async def cmd_insider(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
 # Specialist scanner helpers — shared market fetcher + alert formatter
 # ---------------------------------------------------------------------------
 
+
 def _fetch_all_open_markets(limit: int = 200) -> list[dict]:
     """
     Pull open markets from Kalshi (and optionally Polymarket) for specialist scanners.
@@ -4941,30 +6460,39 @@ def _fetch_all_open_markets(limit: int = 200) -> list[dict]:
     try:
         ka = _kalshi_api.KalshiAPIClient()
         raw = ka.get_markets(status="open", limit=limit)
-        for m in (raw or []):
-            markets.append({
-                "title":  m.get("title", m.get("question", "")),
-                "price":  float(m.get("yes_bid", m.get("last_price", 0.5)) or 0.5),
-                "ticker": m.get("ticker", m.get("id", "")),
-                "venue":  "kalshi",
-            })
+        for m in raw or []:
+            markets.append(
+                {
+                    "title": m.get("title", m.get("question", "")),
+                    "price": float(m.get("yes_bid", m.get("last_price", 0.5)) or 0.5),
+                    "ticker": m.get("ticker", m.get("id", "")),
+                    "venue": "kalshi",
+                }
+            )
     except Exception as exc:
         log.debug("[SpecialistScan] Kalshi market fetch failed: %s", exc)
 
     # Polymarket — if adapter available, add those markets too
     try:
         from edge_agent.dat_ingestion_polymarket_api import PolymarketAPIClient  # noqa: F401
+
         pa = PolymarketAPIClient()
         poly_raw = pa.get_markets(active=True, limit=100)
-        for m in (poly_raw or []):
-            markets.append({
-                "title":  m.get("question", m.get("title", "")),
-                "price":  float(m.get("outcomePrices", [0.5])[0] if isinstance(m.get("outcomePrices"), list) else 0.5),
-                "ticker": m.get("conditionId", m.get("id", "")),
-                "venue":  "polymarket",
-            })
+        for m in poly_raw or []:
+            markets.append(
+                {
+                    "title": m.get("question", m.get("title", "")),
+                    "price": float(
+                        m.get("outcomePrices", [0.5])[0]
+                        if isinstance(m.get("outcomePrices"), list)
+                        else 0.5
+                    ),
+                    "ticker": m.get("conditionId", m.get("id", "")),
+                    "venue": "polymarket",
+                }
+            )
     except Exception:
-        pass   # Polymarket adapter optional
+        pass  # Polymarket adapter optional
 
     return markets
 
@@ -4974,8 +6502,8 @@ def _fmt_weather_gap(g: WeatherGap) -> str:
     cond_emoji = {
         "temp_above": "🌡️",
         "temp_below": "🥶",
-        "snow":       "❄️",
-        "rain":       "🌧️",
+        "snow": "❄️",
+        "rain": "🌧️",
     }.get(g.condition, "🌤️")
     action_emoji = "📈" if g.action == "BUY YES" else "📉"
     return (
@@ -4993,10 +6521,10 @@ def _fmt_weather_gap(g: WeatherGap) -> str:
 
 def _fmt_crypto_gap(g: CryptoGap) -> str:
     """Format a CryptoGap into a Telegram HTML alert string."""
-    sym          = g.symbol.replace("USDT", "")
+    sym = g.symbol.replace("USDT", "")
     action_emoji = "📈" if g.action == "BUY YES" else "📉"
-    c24_str      = f"{g.change_24h:+.1f}%"
-    c7d_str      = f"{g.change_7d:+.1f}%"
+    c24_str = f"{g.change_24h:+.1f}%"
+    c7d_str = f"{g.change_7d:+.1f}%"
     return (
         f"₿ <b>CRYPTO MARKET SIGNAL</b>\n\n"
         f"<b>{_e(g.title[:80])}</b>\n\n"
@@ -5013,11 +6541,11 @@ def _fmt_crypto_gap(g: CryptoGap) -> str:
 def _fmt_econ_gap(g: EconGap) -> str:
     """Format an EconGap into a Telegram HTML alert string."""
     cat_emoji = {
-        "fed_rate":     "🏦",
-        "inflation":    "📈",
-        "recession":    "📉",
+        "fed_rate": "🏦",
+        "inflation": "📈",
+        "recession": "📉",
         "unemployment": "👷",
-        "gdp":          "📊",
+        "gdp": "📊",
     }.get(g.category, "🏛️")
     action_emoji = "📈" if g.action == "BUY YES" else "📉"
     return (
@@ -5038,15 +6566,15 @@ async def _run_specialist_scans(bot, silent: bool = False) -> tuple[int, int, in
     Sends alerts to ALERT_CHANNEL_ID (or CHAT_ID) for new gaps.
     Returns (n_weather, n_crypto, n_econ) — number of alerts sent per scanner.
     """
-    loop    = asyncio.get_running_loop()
+    loop = asyncio.get_running_loop()
     markets = await loop.run_in_executor(None, _fetch_all_open_markets)
 
     if not markets:
         log.debug("[SpecialistScan] No markets fetched — skipping scan")
         return 0, 0, 0
 
-    target  = ALERT_CHANNEL_ID or CHAT_ID
-    now     = time.time()
+    target = ALERT_CHANNEL_ID or CHAT_ID
+    now = time.time()
 
     # ── Weather ──────────────────────────────────────────────────────────
     w_gaps = await loop.run_in_executor(None, scan_weather_markets, markets)
@@ -5058,8 +6586,9 @@ async def _run_specialist_scans(bot, silent: bool = False) -> tuple[int, int, in
         _WEATHER_ALERTED[key] = now
         if not silent and target:
             try:
-                await bot.send_message(chat_id=target, text=_fmt_weather_gap(g),
-                                       parse_mode=ParseMode.HTML)
+                await bot.send_message(
+                    chat_id=target, text=_fmt_weather_gap(g), parse_mode=ParseMode.HTML
+                )
                 n_w += 1
             except Exception as exc:
                 log.warning("[WeatherScan] Alert send failed: %s", exc)
@@ -5074,8 +6603,9 @@ async def _run_specialist_scans(bot, silent: bool = False) -> tuple[int, int, in
         _CRYPTO_ALERTED[key] = now
         if not silent and target:
             try:
-                await bot.send_message(chat_id=target, text=_fmt_crypto_gap(g),
-                                       parse_mode=ParseMode.HTML)
+                await bot.send_message(
+                    chat_id=target, text=_fmt_crypto_gap(g), parse_mode=ParseMode.HTML
+                )
                 n_c += 1
             except Exception as exc:
                 log.warning("[CryptoScan] Alert send failed: %s", exc)
@@ -5090,15 +6620,21 @@ async def _run_specialist_scans(bot, silent: bool = False) -> tuple[int, int, in
         _ECON_ALERTED[key] = now
         if not silent and target:
             try:
-                await bot.send_message(chat_id=target, text=_fmt_econ_gap(g),
-                                       parse_mode=ParseMode.HTML)
+                await bot.send_message(
+                    chat_id=target, text=_fmt_econ_gap(g), parse_mode=ParseMode.HTML
+                )
                 n_e += 1
             except Exception as exc:
                 log.warning("[EconScan] Alert send failed: %s", exc)
 
     log.info(
         "[SpecialistScan] Gaps found — weather: %d, crypto: %d, econ: %d | alerts sent: %d/%d/%d",
-        len(w_gaps), len(c_gaps), len(e_gaps), n_w, n_c, n_e,
+        len(w_gaps),
+        len(c_gaps),
+        len(e_gaps),
+        n_w,
+        n_c,
+        n_e,
     )
     return n_w, n_c, n_e
 
@@ -5107,6 +6643,7 @@ async def _run_specialist_scans(bot, silent: bool = False) -> tuple[int, int, in
 # /weatherscan command
 # ---------------------------------------------------------------------------
 
+
 async def cmd_weatherscan(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     """
     /weatherscan — scan all open weather markets against Open-Meteo forecast.
@@ -5114,9 +6651,9 @@ async def cmd_weatherscan(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> Non
     Shows any pricing gaps where the weather forecast contradicts the market price.
     """
     await update.message.reply_text("🌤️ Running weather market scan…")
-    loop    = asyncio.get_running_loop()
+    loop = asyncio.get_running_loop()
     markets = await loop.run_in_executor(None, _fetch_all_open_markets)
-    gaps    = await loop.run_in_executor(None, scan_weather_markets, markets)
+    gaps = await loop.run_in_executor(None, scan_weather_markets, markets)
 
     if not gaps:
         await update.message.reply_text(
@@ -5128,8 +6665,12 @@ async def cmd_weatherscan(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> Non
 
     lines = [f"🌤️ <b>WEATHER MARKET GAPS</b> — {len(gaps)} found\n"]
     for g in gaps[:5]:
-        cond_emoji = {"temp_above": "🌡️", "temp_below": "🥶",
-                      "snow": "❄️", "rain": "🌧️"}.get(g.condition, "🌤️")
+        cond_emoji = {
+            "temp_above": "🌡️",
+            "temp_below": "🥶",
+            "snow": "❄️",
+            "rain": "🌧️",
+        }.get(g.condition, "🌤️")
         action_emoji = "📈" if g.action == "BUY YES" else "📉"
         lines.append(
             f"{cond_emoji} <b>{_e(g.title[:65])}</b>\n"
@@ -5149,6 +6690,7 @@ async def cmd_weatherscan(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> Non
 # /cryptoscan command
 # ---------------------------------------------------------------------------
 
+
 async def cmd_cryptoscan(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     """
     /cryptoscan — scan crypto prediction markets against Binance price data.
@@ -5157,9 +6699,9 @@ async def cmd_cryptoscan(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None
     "Will BTC exceed $X by [date]?" type markets.
     """
     await update.message.reply_text("₿ Running crypto market scan…")
-    loop    = asyncio.get_running_loop()
+    loop = asyncio.get_running_loop()
     markets = await loop.run_in_executor(None, _fetch_all_open_markets)
-    gaps    = await loop.run_in_executor(None, scan_crypto_markets, markets)
+    gaps = await loop.run_in_executor(None, scan_crypto_markets, markets)
 
     if not gaps:
         await update.message.reply_text(
@@ -5171,7 +6713,7 @@ async def cmd_cryptoscan(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None
 
     lines = [f"₿ <b>CRYPTO MARKET GAPS</b> — {len(gaps)} found\n"]
     for g in gaps[:5]:
-        sym          = g.symbol.replace("USDT", "")
+        sym = g.symbol.replace("USDT", "")
         action_emoji = "📈" if g.action == "BUY YES" else "📉"
         lines.append(
             f"<b>{_e(g.title[:65])}</b>\n"
@@ -5183,13 +6725,16 @@ async def cmd_cryptoscan(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None
     if len(gaps) > 5:
         lines.append(f"<i>… and {len(gaps) - 5} more gaps</i>")
 
-    lines.append("\n<i>Model: Binance lognormal | 15-min price cache | Gaps ≥15pp shown</i>")
+    lines.append(
+        "\n<i>Model: Binance lognormal | 15-min price cache | Gaps ≥15pp shown</i>"
+    )
     await _send_chunked(update.message.reply_text, "\n".join(lines))
 
 
 # ---------------------------------------------------------------------------
 # /fedscan command
 # ---------------------------------------------------------------------------
+
 
 async def cmd_fedscan(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     """
@@ -5198,13 +6743,13 @@ async def cmd_fedscan(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     Detects mispricings in FOMC rate decision markets, inflation markets, etc.
     """
     await update.message.reply_text("🏛️ Running Fed/econ market scan…")
-    loop    = asyncio.get_running_loop()
+    loop = asyncio.get_running_loop()
 
     # Show current rates first
     econ_ctx = await loop.run_in_executor(None, get_econ_context_string)
 
     markets = await loop.run_in_executor(None, _fetch_all_open_markets)
-    gaps    = await loop.run_in_executor(None, scan_econ_markets, markets)
+    gaps = await loop.run_in_executor(None, scan_econ_markets, markets)
 
     lines = [f"🏛️ <b>FED / ECON MARKET SCAN</b>\n"]
     if econ_ctx:
@@ -5221,11 +6766,14 @@ async def cmd_fedscan(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
 
     lines.append(f"<b>{len(gaps)} gap(s) found:</b>\n")
     cat_emoji = {
-        "fed_rate": "🏦", "inflation": "📈", "recession": "📉",
-        "unemployment": "👷", "gdp": "📊",
+        "fed_rate": "🏦",
+        "inflation": "📈",
+        "recession": "📉",
+        "unemployment": "👷",
+        "gdp": "📊",
     }
     for g in gaps[:5]:
-        ce           = cat_emoji.get(g.category, "🏛️")
+        ce = cat_emoji.get(g.category, "🏛️")
         action_emoji = "📈" if g.action == "BUY YES" else "📉"
         lines.append(
             f"{ce} <b>{_e(g.title[:65])}</b>\n"
@@ -5245,6 +6793,7 @@ async def cmd_fedscan(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
 # Background scan job
 # ---------------------------------------------------------------------------
 
+
 async def scan_job(ctx: ContextTypes.DEFAULT_TYPE) -> None:
     log.info("Background scan triggered.")
     result = await _run_scan(ctx.bot, notify=True)
@@ -5258,7 +6807,9 @@ async def scan_job(ctx: ContextTypes.DEFAULT_TYPE) -> None:
 # Entry point
 # ---------------------------------------------------------------------------
 
-_SEED_WALLET_FILE = Path(__file__).parent / "edge_agent" / "memory" / "data" / "seed_wallets.json"
+_SEED_WALLET_FILE = (
+    Path(__file__).parent / "edge_agent" / "memory" / "data" / "seed_wallets.json"
+)
 
 
 def _bootstrap_seed_wallets() -> None:
@@ -5270,10 +6821,10 @@ def _bootstrap_seed_wallets() -> None:
         log.warning("[bootstrap] seed_wallets.json not found — skipping.")
         return
     try:
-        data    = json.loads(_SEED_WALLET_FILE.read_text(encoding="utf-8"))
+        data = json.loads(_SEED_WALLET_FILE.read_text(encoding="utf-8"))
         wallets = data.get("wallets", [])
-        tc      = _TraderCache()
-        added   = 0
+        tc = _TraderCache()
+        added = 0
         for w in wallets:
             addr = w.get("address", "").strip().lower()
             note = w.get("note", "Owner seed — priority vet")
@@ -5282,7 +6833,11 @@ def _bootstrap_seed_wallets() -> None:
             ok = tc.watchlist_add(addr, added_by="seed_bootstrap", note=note)
             if ok:
                 added += 1
-        log.info("[bootstrap] Seed wallets loaded: %d new / %d total in file.", added, len(wallets))
+        log.info(
+            "[bootstrap] Seed wallets loaded: %d new / %d total in file.",
+            added,
+            len(wallets),
+        )
     except Exception as exc:
         log.warning("[bootstrap] Failed to load seed wallets: %s", exc)
 
@@ -5307,11 +6862,7 @@ def main() -> None:
         INJURY_REFRESH_MIN,
     )
 
-    app = (
-        Application.builder()
-        .token(BOT_TOKEN)
-        .build()
-    )
+    app = Application.builder().token(BOT_TOKEN).build()
 
     # ---------------------------------------------------------------------------
     # Access control — single dev/testing channel (Telegram is internal only)
@@ -5323,7 +6874,9 @@ def main() -> None:
         log.info("Chat filter active: only responding to chat_id=%s", CHAT_ID)
     except (ValueError, TypeError):
         _chat_filter = filters.ALL
-        log.warning("CHAT_ID=%r is not a valid integer — no chat filter applied", CHAT_ID)
+        log.warning(
+            "CHAT_ID=%r is not a valid integer — no chat filter applied", CHAT_ID
+        )
 
     try:
         _user_filter = filters.User(int(OWNER_ID)) if OWNER_ID else filters.ALL
@@ -5336,44 +6889,54 @@ def main() -> None:
             )
     except (ValueError, TypeError):
         _user_filter = filters.ALL
-        log.warning("OWNER_ID=%r is not a valid integer — no user filter applied", OWNER_ID)
+        log.warning(
+            "OWNER_ID=%r is not a valid integer — no user filter applied", OWNER_ID
+        )
 
     _auth_filter = _chat_filter & _user_filter
 
     # Command handlers
-    app.add_handler(CommandHandler("start",     cmd_start,     filters=_auth_filter))
-    app.add_handler(CommandHandler("help",      cmd_help,      filters=_auth_filter))
-    app.add_handler(CommandHandler("scan",      cmd_scan,      filters=_auth_filter))
-    app.add_handler(CommandHandler("injuries",  cmd_injuries,  filters=_auth_filter))
-    app.add_handler(CommandHandler("injurys",   cmd_injuries,  filters=_auth_filter))  # typo alias
-    app.add_handler(CommandHandler("tracking",  cmd_tracking,  filters=_auth_filter))
-    app.add_handler(CommandHandler("top",       cmd_top,       filters=_auth_filter))
-    app.add_handler(CommandHandler("traders",     cmd_traders,     filters=_auth_filter))
-    app.add_handler(CommandHandler("wallet",      cmd_wallet,      filters=_auth_filter))
-    app.add_handler(CommandHandler("watch",       cmd_watch,       filters=_auth_filter))
-    app.add_handler(CommandHandler("unwatch",     cmd_unwatch,     filters=_auth_filter))
-    app.add_handler(CommandHandler("watchlist",   cmd_watchlist,   filters=_auth_filter))
-    app.add_handler(CommandHandler("performance", cmd_performance, filters=_auth_filter))
-    app.add_handler(CommandHandler("mytrades",    cmd_mytrades,    filters=_auth_filter))
-    app.add_handler(CommandHandler("status",      cmd_status,      filters=_auth_filter))
-    app.add_handler(CommandHandler("approvals",   cmd_approvals,   filters=_auth_filter))
-    app.add_handler(CommandHandler("profile",     cmd_profile,     filters=_auth_filter))
-    app.add_handler(CommandHandler("forget",      cmd_forget,      filters=_auth_filter))
-    app.add_handler(CommandHandler("standings",   cmd_standings,   filters=_auth_filter))
-    app.add_handler(CommandHandler("mlstatus",    cmd_mlstatus,    filters=_auth_filter))
-    app.add_handler(CommandHandler("decisions",   cmd_decisions,   filters=_auth_filter))
-    app.add_handler(CommandHandler("insider",     cmd_insider,     filters=_auth_filter))
-    app.add_handler(CommandHandler("weatherscan", cmd_weatherscan, filters=_auth_filter))
-    app.add_handler(CommandHandler("cryptoscan",  cmd_cryptoscan,  filters=_auth_filter))
-    app.add_handler(CommandHandler("fedscan",     cmd_fedscan,     filters=_auth_filter))
+    app.add_handler(CommandHandler("start", cmd_start, filters=_auth_filter))
+    app.add_handler(CommandHandler("help", cmd_help, filters=_auth_filter))
+    app.add_handler(CommandHandler("scan", cmd_scan, filters=_auth_filter))
+    app.add_handler(CommandHandler("injuries", cmd_injuries, filters=_auth_filter))
+    app.add_handler(
+        CommandHandler("injurys", cmd_injuries, filters=_auth_filter)
+    )  # typo alias
+    app.add_handler(CommandHandler("tracking", cmd_tracking, filters=_auth_filter))
+    app.add_handler(CommandHandler("top", cmd_top, filters=_auth_filter))
+    app.add_handler(CommandHandler("traders", cmd_traders, filters=_auth_filter))
+    app.add_handler(CommandHandler("wallet", cmd_wallet, filters=_auth_filter))
+    app.add_handler(CommandHandler("watch", cmd_watch, filters=_auth_filter))
+    app.add_handler(CommandHandler("unwatch", cmd_unwatch, filters=_auth_filter))
+    app.add_handler(CommandHandler("watchlist", cmd_watchlist, filters=_auth_filter))
+    app.add_handler(
+        CommandHandler("performance", cmd_performance, filters=_auth_filter)
+    )
+    app.add_handler(CommandHandler("mytrades", cmd_mytrades, filters=_auth_filter))
+    app.add_handler(CommandHandler("status", cmd_status, filters=_auth_filter))
+    app.add_handler(CommandHandler("approvals", cmd_approvals, filters=_auth_filter))
+    app.add_handler(CommandHandler("profile", cmd_profile, filters=_auth_filter))
+    app.add_handler(CommandHandler("forget", cmd_forget, filters=_auth_filter))
+    app.add_handler(CommandHandler("standings", cmd_standings, filters=_auth_filter))
+    app.add_handler(CommandHandler("mlstatus", cmd_mlstatus, filters=_auth_filter))
+    app.add_handler(CommandHandler("decisions", cmd_decisions, filters=_auth_filter))
+    app.add_handler(CommandHandler("insider", cmd_insider, filters=_auth_filter))
+    app.add_handler(
+        CommandHandler("weatherscan", cmd_weatherscan, filters=_auth_filter)
+    )
+    app.add_handler(CommandHandler("cryptoscan", cmd_cryptoscan, filters=_auth_filter))
+    app.add_handler(CommandHandler("fedscan", cmd_fedscan, filters=_auth_filter))
     # Inline keyboard (callback queries are always scoped to the chat they came from)
     app.add_handler(CallbackQueryHandler(handle_callback))
 
     # Free-form AI chat — only in the authorized chat, must come last
-    app.add_handler(MessageHandler(
-        filters.TEXT & ~filters.COMMAND & _auth_filter,
-        handle_message,
-    ))
+    app.add_handler(
+        MessageHandler(
+            filters.TEXT & ~filters.COMMAND & _auth_filter,
+            handle_message,
+        )
+    )
 
     # ---------------------------------------------------------------------------
     # Injury refresh — 3 targeted daily pulls aligned to game-prep windows
@@ -5387,9 +6950,9 @@ def main() -> None:
     # mid-day but are most likely to update in these three windows.
     # ---------------------------------------------------------------------------
     for _pull_time in (
-        dt_time(9,  0,  tzinfo=_PACIFIC),   # morning
-        dt_time(13, 30, tzinfo=_PACIFIC),   # mid-day / NBA PDF window
-        dt_time(16, 30, tzinfo=_PACIFIC),   # pre-game final
+        dt_time(9, 0, tzinfo=_PACIFIC),  # morning
+        dt_time(13, 30, tzinfo=_PACIFIC),  # mid-day / NBA PDF window
+        dt_time(16, 30, tzinfo=_PACIFIC),  # pre-game final
     ):
         app.job_queue.run_daily(injury_refresh_job, time=_pull_time)
 
@@ -5412,13 +6975,19 @@ def main() -> None:
         try:
             _build_smart_money_context(force_refresh=True)
             n_lines = len(_sm_positions_cache["lines"])
-            n_new   = len(_sm_positions_cache.get("alertable", []))
-            log.info("[smart_money_job] Position cache refreshed — %d lines, %d new candidates",
-                     n_lines, n_new)
+            n_new = len(_sm_positions_cache.get("alertable", []))
+            log.info(
+                "[smart_money_job] Position cache refreshed — %d lines, %d new candidates",
+                n_lines,
+                n_new,
+            )
             if n_new > 0:
                 n_sent = await _send_copy_trade_alerts(ctx.bot)
                 if n_sent:
-                    log.info("[smart_money_job] Sent %d copy-trade alert(s) to channel", n_sent)
+                    log.info(
+                        "[smart_money_job] Sent %d copy-trade alert(s) to channel",
+                        n_sent,
+                    )
         except Exception as exc:
             log.debug("[smart_money_job] Refresh failed: %s", exc)
 
@@ -5432,6 +7001,7 @@ def main() -> None:
     async def _insider_scan_job(ctx: ContextTypes.DEFAULT_TYPE) -> None:
         engine = _get_insider_engine()
         try:
+
             async def _send_to_alert_channel(msg: str) -> None:
                 target = ALERT_CHANNEL_ID or CHAT_ID
                 if not target:
@@ -5452,7 +7022,8 @@ def main() -> None:
 
             # Cleanup old records weekly (piggyback on maintenance rhythm)
             import random
-            if random.random() < 0.02:   # ~2% chance per run ≈ weekly at 5-min intervals
+
+            if random.random() < 0.02:  # ~2% chance per run ≈ weekly at 5-min intervals
                 engine.cleanup_old_records(days=30)
 
         except Exception as exc:
@@ -5471,7 +7042,9 @@ def main() -> None:
             if total:
                 log.info(
                     "[specialist_job] Alerts sent — weather:%d crypto:%d econ:%d",
-                    n_w, n_c, n_e,
+                    n_w,
+                    n_c,
+                    n_e,
                 )
         except Exception as exc:
             log.warning("[specialist_job] failed: %s", exc)
@@ -5523,6 +7096,7 @@ def _acquire_instance_lock() -> None:
                 try:
                     if os.name == "nt":
                         import subprocess
+
                         subprocess.run(
                             ["taskkill", "/F", "/PID", str(old_pid)],
                             capture_output=True,

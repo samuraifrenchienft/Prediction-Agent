@@ -25,6 +25,7 @@ Usage:
     text, version = registry.render("catalyst_score", n_articles=3)
     # version = "catalyst_score@1.0"
 """
+
 from __future__ import annotations
 
 import hashlib
@@ -55,12 +56,13 @@ class PromptTemplate:
         notes       — human-readable change notes (what changed vs prior version)
         max_tokens  — soft cap on rendered prompt length (0 = no cap)
     """
-    name:          str
-    version:       str
-    template:      str
+
+    name: str
+    version: str
+    template: str
     output_schema: str = ""
-    notes:         str = ""
-    max_tokens:    int = 0
+    notes: str = ""
+    max_tokens: int = 0
 
     @property
     def version_id(self) -> str:
@@ -77,7 +79,8 @@ class PromptTemplate:
         except KeyError as exc:
             log.warning(
                 "[PromptRegistry] Missing variable %s in template %s — leaving placeholder",
-                exc, self.version_id,
+                exc,
+                self.version_id,
             )
             # Partial substitution: replace what we can, leave the rest
             text = self.template
@@ -118,10 +121,11 @@ class PromptRegistry:
         """Register every named prompt template."""
 
         # ── 1. Catalyst scoring (batch) ────────────────────────────────────────
-        self._register(PromptTemplate(
-            name="catalyst_score_system",
-            version="1.1",
-            template=textwrap.dedent("""\
+        self._register(
+            PromptTemplate(
+                name="catalyst_score_system",
+                version="1.1",
+                template=textwrap.dedent("""\
                 You are a financial news analyst scoring headlines for prediction markets.
                 Score each of the {n_articles} headlines below.
                 Return a JSON object: {{"scores": [{{"quality":0.7,"direction":0.3,"confidence":0.6}}, ...]}}
@@ -130,23 +134,27 @@ class PromptRegistry:
                 direction=-1.0(bearish) to 1.0(bullish).
                 confidence=0.0-1.0.
                 Plain numbers only, no text in values."""),
-            output_schema='{"scores": [{"quality": float, "direction": float, "confidence": float}]}',
-            notes="v1.1: added explicit n_articles count to reduce hallucinated extra entries",
-        ))
+                output_schema='{"scores": [{"quality": float, "direction": float, "confidence": float}]}',
+                notes="v1.1: added explicit n_articles count to reduce hallucinated extra entries",
+            )
+        )
 
-        self._register(PromptTemplate(
-            name="catalyst_score_user",
-            version="1.0",
-            template="Headlines:\n{headline_block}",
-            output_schema="(see system prompt schema)",
-            notes="v1.0: initial version — compact numbered list",
-        ))
+        self._register(
+            PromptTemplate(
+                name="catalyst_score_user",
+                version="1.0",
+                template="Headlines:\n{headline_block}",
+                output_schema="(see system prompt schema)",
+                notes="v1.0: initial version — compact numbered list",
+            )
+        )
 
         # ── 2. Chat system prompt (main conversational AI) ─────────────────────
-        self._register(PromptTemplate(
-            name="chat_system",
-            version="2.6",
-            template=textwrap.dedent("""\
+        self._register(
+            PromptTemplate(
+                name="chat_system",
+                version="2.7",
+                template=textwrap.dedent("""\
                 {correction_instruction}\
                 You are EDGE, an AI prediction market analyst operating on Telegram.
                 Your job: help users find and act on mispriced prediction markets on Polymarket and Kalshi.
@@ -239,19 +247,50 @@ class PromptRegistry:
                 DECISION TRANSPARENCY:
                 • When you make a recommendation, briefly state the key reason in one sentence:
                   e.g. 'I'm seeing 7pp edge because the injury catalyst hasn't been priced in yet.'
-                • If you're unsure, say so rather than guessing."""),
-            output_schema="Plain text, under 300 words, no JSON",
-            notes=(
-                "v2.6: added INSIDER ALERTS section so AI can explain whale detection alerts "
-                "and guide users on entry windows and research confirmation signals"
-            ),
-        ))
+                • If you're unsure, say so rather than guessing.
+
+                GAME ASSESSMENT METHODOLOGY — when asked about a matchup, preview, or prediction:
+                When a [Game Assessment] block is in the prompt, use it to provide a comprehensive
+                matchup analysis. Consider ALL of the following factors when assessing a game:
+                • Season records and standings (winning %)
+                • Head-to-head results this season (who won previous matchups)
+                • Key injuries and their win-probability impact
+                • All-Star selections and recent All-Star performance
+                • Coaching matchup (coach win %, recent performance)
+                • Home/road record (venue advantage)
+                • Recent form (last 5-10 games win-loss)
+                • Rest advantage (back-to-back vs rested)
+                Present your assessment as a probability estimate with key factors listed.
+                Format as: "My assessment: Team A [X]% | Team B [Y]% — Key factors: ..."
+
+                TODAY'S GAMES — when asked "what games are today" or similar:
+                • When a [Today's Games] block is present, use it to list actual games
+                  happening TODAY based on the live schedule data provided
+                • Do NOT guess or make up game matchups — only report what is in the data
+                • If no data available for a specific sport, say "I don't have today's [sport]
+                  schedule. Check ESPN or the league app for current games."
+                • Always use TODAY'S DATE from the context block to identify current games
+                • Format as a simple list: "🏀 NBA: [matchups] | 🏒 NHL: [matchups] | 🏈 NFL: [matchups]"
+
+                LIVE DATA REQUIREMENT:
+                • You MUST use the [Today's Games] block data to answer "what games today" questions
+                • NEVER say you don't know what games are on when that data is provided
+                • If the block says no games are scheduled, say so directly"""),
+                output_schema="Plain text, under 300 words, no JSON",
+                notes=(
+                    "v2.7: added GAME ASSESSMENT METHODOLOGY and TODAY'S GAMES sections "
+                    "so AI can properly analyze matchups using records, injuries, all-stars, "
+                    "coaching, H2H, and provide accurate game schedules using live data"
+                ),
+            )
+        )
 
         # ── 3. Correction mode instruction (prepended to chat_system) ──────────
-        self._register(PromptTemplate(
-            name="correction_mode",
-            version="1.2",
-            template=textwrap.dedent("""\
+        self._register(
+            PromptTemplate(
+                name="correction_mode",
+                version="1.2",
+                template=textwrap.dedent("""\
                 CORRECTION MODE ACTIVE — the user told you your previous answer was wrong or stale.
                 Rules:
                 1. Start your reply by briefly acknowledging the mistake — be direct and natural
@@ -264,15 +303,17 @@ class PromptRegistry:
                 5. Keep the acknowledgment to ONE sentence — get to the correct data immediately.
 
                 """),
-            output_schema="Plain text starting with a 1-sentence correction acknowledgment",
-            notes="v1.2: shortened preamble, added 'never repeat wrong price' rule",
-        ))
+                output_schema="Plain text starting with a 1-sentence correction acknowledgment",
+                notes="v1.2: shortened preamble, added 'never repeat wrong price' rule",
+            )
+        )
 
         # ── 4. Strategy DNA gatekeeper (brand_dna.py integration) ─────────────
-        self._register(PromptTemplate(
-            name="strategy_gatekeeper",
-            version="1.0",
-            template=textwrap.dedent("""\
+        self._register(
+            PromptTemplate(
+                name="strategy_gatekeeper",
+                version="1.0",
+                template=textwrap.dedent("""\
                 STRATEGY DNA — {agent_name} INTELLIGENCE FILTER
 
                 You are a gatekeeper AI agent. Your task is to analyze a news headline and return
@@ -300,23 +341,26 @@ class PromptRegistry:
                   "direction": <float -1 to 1, bearish to bullish>,
                   "confidence": <float 0-1>}}.
                 No extra keys, no markdown, no explanation."""),
-            output_schema='{"relevance": int, "quality": float, "direction": float, "confidence": float}',
-            notes="v1.0: migrated from brand_dna.py inline string to registry",
-        ))
+                output_schema='{"relevance": int, "quality": float, "direction": float, "confidence": float}',
+                notes="v1.0: migrated from brand_dna.py inline string to registry",
+            )
+        )
 
         # ── 5. Injury risk context (injected into catalyst scoring) ───────────
-        self._register(PromptTemplate(
-            name="injury_context_block",
-            version="1.0",
-            template=textwrap.dedent("""\
+        self._register(
+            PromptTemplate(
+                name="injury_context_block",
+                version="1.0",
+                template=textwrap.dedent("""\
 
                 [Live injury data — {sport} as of {fetched_at}]
                 {injury_lines}
                 Source: {source_api} official report
                 """),
-            output_schema="Plain text block injected into chat prompt",
-            notes="v1.0: standard injury context block template",
-        ))
+                output_schema="Plain text block injected into chat prompt",
+                notes="v1.0: standard injury context block template",
+            )
+        )
 
     # ── Public API ─────────────────────────────────────────────────────────────
 
@@ -338,7 +382,9 @@ class PromptRegistry:
                 f"Prompt '{name}' not found in registry. Available: {available}"
             )
         rendered = tpl.render(**kwargs)
-        log.debug("[PromptRegistry] Rendered %s (%d chars)", tpl.version_id, len(rendered))
+        log.debug(
+            "[PromptRegistry] Rendered %s (%d chars)", tpl.version_id, len(rendered)
+        )
         return rendered, tpl.version_id
 
     def get(self, name: str) -> PromptTemplate | None:
@@ -349,17 +395,19 @@ class PromptRegistry:
         """Return a summary of all registered prompts for /mlstatus or debugging."""
         return [
             {
-                "name":       t.name,
-                "version":    t.version,
+                "name": t.name,
+                "version": t.version,
                 "version_id": t.version_id,
-                "notes":      t.notes,
-                "hash":       t.content_hash(),
+                "notes": t.notes,
+                "hash": t.content_hash(),
                 "tokens_est": str(t.token_estimate(t.template)),
             }
             for t in self._templates.values()
         ]
 
-    def token_budget_ok(self, rendered: str, budget: int = _SYSTEM_PROMPT_TOKEN_BUDGET) -> bool:
+    def token_budget_ok(
+        self, rendered: str, budget: int = _SYSTEM_PROMPT_TOKEN_BUDGET
+    ) -> bool:
         """
         Check whether a rendered prompt fits within the token budget.
         Returns True if within budget. Used as a soft guard before sending to AI.
@@ -369,7 +417,8 @@ class PromptRegistry:
             log.warning(
                 "[PromptRegistry] Prompt exceeds token budget: %d tokens (budget=%d). "
                 "Consider trimming context blocks.",
-                est, budget,
+                est,
+                budget,
             )
             return False
         return True
@@ -380,17 +429,21 @@ class PromptRegistry:
         Useful for debugging — shows exactly what changed when a prompt was modified.
         """
         import difflib
+
         tpl = self._templates.get(name)
         if not tpl:
             return [f"Template '{name}' not found"]
         a_lines = tpl.template.splitlines(keepends=True)
         b_lines = other_template_text.splitlines(keepends=True)
-        return list(difflib.unified_diff(
-            a_lines, b_lines,
-            fromfile=f"{tpl.version_id} (registry)",
-            tofile=f"{name}@custom",
-            lineterm="",
-        ))
+        return list(
+            difflib.unified_diff(
+                a_lines,
+                b_lines,
+                fromfile=f"{tpl.version_id} (registry)",
+                tofile=f"{name}@custom",
+                lineterm="",
+            )
+        )
 
 
 # Module-level singleton — import and reuse everywhere
