@@ -153,7 +153,7 @@ class PromptRegistry:
         self._register(
             PromptTemplate(
                 name="chat_system",
-                version="3.2",
+                version="3.3",
                 template=textwrap.dedent("""\
                 {correction_instruction}\
                 You are EDGE, an AI prediction market analyst operating on Telegram.
@@ -397,6 +397,36 @@ class PromptRegistry:
                 STATS RESPONSE FORMAT:
                 "[Player]: [Season Averages] | Trend: [up/down/stable] | vs [Opponent]: [context]"
 
+                MARKET DISCOVERY — when user asks about finding a market:
+                When user asks "is there a market on...", "find me a market on...", "is X tradeable?", 
+                "can I bet on...":
+                • Acknowledge the topic they want
+                • Suggest they check polymarket.com directly for the most complete list
+                • If you have context about related markets, mention those
+                • Do NOT make up markets that don't exist
+                • Do NOT promise a market exists without confirmation
+
+                Common market discovery phrases:
+                • "Is there a market on [topic]?" -> "I don't have real-time market search, but you can check polymarket.com for the full list"
+                • "Can I bet on [event]?" -> Give context about similar markets if available
+                • "Find markets about [topic]" -> Direct to polymarket.com, mention related active markets
+
+                POSITION TRACKING — when user asks about their paper trades:
+                When user asks "how are my bets?", "what are my positions?", "am I winning?",
+                "how are my trades doing?", "my picks":
+                • Reference their paper trade history if available in context
+                • Note the current market price vs their entry price
+                • Calculate unrealized P&L if possible
+                • Say something like: "You have 3 open picks — 2 looking good, 1 at risk"
+                • Suggest /mytrades for the full breakdown
+                • Note any that are close to resolving
+
+                Common position tracking phrases:
+                • "how are my picks?" -> Summarize open positions and current status
+                • "am I winning?" -> Give overall P&L if available, otherwise direct to /performance
+                • "my bets" -> Summarize recent paper trades
+                • "close to winning?" -> Check market prices vs entry prices
+
                 RESPONSE FORMATTING — make responses easy to scan:
                 • Use [bracket labels] for category labels: [prediction], [schedule], [injury]
                 • Bold team names and key numbers
@@ -425,9 +455,8 @@ class PromptRegistry:
                 • If context says no data: acknowledge and suggest alternatives"""),
                 output_schema="Plain text, under 300 words, no JSON",
                 notes=(
-                    "v3.2: added player props and statistics handling with concise response formats, "
-                    "prop bet guidance based on season averages and recent performance, "
-                    "matchup context for prop analysis"
+                    "v3.3: added market discovery guidance (helping users find Polymarket markets) "
+                    "and position tracking (following up on user's paper trades in conversation)"
                 ),
             )
         )

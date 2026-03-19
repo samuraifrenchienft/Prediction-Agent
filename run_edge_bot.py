@@ -3091,6 +3091,104 @@ def _build_smart_money_context(
 
 
 # ---------------------------------------------------------------------------
+# User Position Context Builder
+# ---------------------------------------------------------------------------
+
+_POSITION_INTENT_KEYWORDS = {
+    "how are my",
+    "how's my",
+    "how is my",
+    "my bets",
+    "my picks",
+    "my trades",
+    "am i winning",
+    "am i up",
+    "am i down",
+    "my positions",
+    "my portfolio",
+    "what are my",
+    "check my",
+    "show my",
+    "winning trades",
+    "losing trades",
+    "open picks",
+    "pending picks",
+    "unsettled",
+}
+
+
+def _detect_position_tracking_intent(query: str) -> bool:
+    """Detect if user is asking about their paper trades/positions."""
+    q = query.lower()
+    return any(kw in q for kw in _POSITION_INTENT_KEYWORDS)
+
+
+def _build_user_positions_context(user_id: int) -> str:
+    """
+    Build a context block with the user's paper trade positions.
+    Returns "" if user has no positions or context not relevant.
+    """
+    try:
+        picks = _ot.get_user_picks(user_id=int(user_id), outcome_filter=None, limit=20)
+        if not picks:
+            return ""
+
+        lines = ["\n[Your Paper Trades]"]
+
+        open_picks = [p for p in picks if p.get("outcome") == "PENDING"]
+        settled_picks = [p for p in picks if p.get("outcome") != "PENDING"]
+
+        # Summary stats
+        total_picks = len(picks)
+        open_count = len(open_picks)
+        settled_count = len(settled_picks)
+
+        wins = sum(1 for p in settled_picks if p.get("outcome") == "WIN")
+        losses = sum(1 for p in settled_picks if p.get("outcome") == "LOSS")
+        voids = sum(1 for p in settled_picks if p.get("outcome") == "VOID")
+
+        win_rate = f"{wins / settled_count:.0%}" if settled_count > 0 else "N/A"
+
+        # Calculate total P&L
+        total_pnl = sum(p.get("paper_pnl", 0) or 0 for p in settled_picks)
+        pnl_str = f"+${total_pnl:.2f}" if total_pnl >= 0 else f"-${abs(total_pnl):.2f}"
+
+        lines.append(
+            f"Summary: {total_picks} total picks | {open_count} open | {win_rate} win rate | P&L: {pnl_str}"
+        )
+
+        # Open picks
+        if open_picks:
+            lines.append(f"\nOpen Picks ({open_count}):")
+            for p in open_picks[:5]:
+                question = (p.get("question") or p.get("market_id", "Unknown"))[:50]
+                side = p.get("side", "?")
+                entry = p.get("entry_prob", 0.5)
+                stake = p.get("paper_stake", 10)
+                lines.append(
+                    f"  • {side} on '{question}' - Entry: {entry:.0%} @ ${stake}"
+                )
+
+        # Recent settled
+        if settled_picks:
+            lines.append(f"\nRecent Settled ({settled_count}):")
+            for p in settled_picks[:5]:
+                question = (p.get("question") or p.get("market_id", "Unknown"))[:50]
+                side = p.get("side", "?")
+                outcome = p.get("outcome", "?")
+                pnl = p.get("paper_pnl", 0) or 0
+                pnl_str = f"+${pnl:.2f}" if pnl >= 0 else f"-${abs(pnl):.2f}"
+                lines.append(f"  • {side} → {outcome} ({pnl_str}) on '{question}'")
+
+        lines.append("\n[End Your Paper Trades]")
+        return "\n".join(lines)
+
+    except Exception as exc:
+        log.debug("[UserPositions] Failed to fetch positions: %s", exc)
+        return ""
+
+
+# ---------------------------------------------------------------------------
 # Copy-trade alert quality filter + channel notifier
 # ---------------------------------------------------------------------------
 
@@ -6057,7 +6155,18 @@ async def handle_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None
                 detected_intents,
             )
 
-    # 7c. Today's Games context — when user asks "what games are today/tonight"
+    # 7c. User Position Tracking — when user asks about their paper trades.
+    #     Shows open picks, recent settled, win rate, and P&L.
+    user_positions_context = ""
+    if _detect_position_tracking_intent(user_msg):
+        user_positions_context = _build_user_positions_context(update.effective_user.id)
+        if user_positions_context:
+            log.debug(
+                "[user_positions] Built position context for user %s",
+                update.effective_user.id,
+            )
+
+    # 7d. Today's Games context — when user asks "what games are today/tonight"
     todays_games_context = _build_todays_games_context(user_msg, _chat_sport)
 
     # 8. Smart money positions — injected when user asks about trading or markets.
@@ -6376,6 +6485,7 @@ async def handle_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None
         + market_context
         + scan_context
         + smart_money_context  # top-scored wallet positions (copy-trade signal)
+        + user_positions_context  # user's paper trade positions
         + injury_context
         + search_context
         + sports_context  # sports analysis: prediction, recap, injury, schedule, standings
@@ -6400,6 +6510,8 @@ async def handle_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None
         _active_ctx_blocks.append("scan_results")
     if smart_money_context:
         _active_ctx_blocks.append("smart_money")
+    if user_positions_context:
+        _active_ctx_blocks.append("user_positions")
     if injury_context:
         _active_ctx_blocks.append("injuries")
     if search_context:
@@ -6417,7 +6529,7 @@ async def handle_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None
         prompt,
         task_type="creative",
         system_prompt=system_prompt,
-        prompt_version="chat_system@3.2",
+        prompt_version="chat_system@3.3",
         context_blocks=_active_ctx_blocks,
         correction_mode=_is_correction,
         regime_safe=_regime.is_ml_safe,
@@ -6430,6 +6542,7 @@ async def handle_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None
         fallback_prompt = (
             f"User asked: {user_msg}\n\n"
             f"{market_context or '[No market data available]'}\n\n"
+            f"{user_positions_context or '[No position data available]'}\n\n"
             f"{injury_context or '[No injury data available]'}\n\n"
             f"{sports_context or '[No sports analysis data available]'}\n\n"
             f"{search_context or '[No web search results]'}"
