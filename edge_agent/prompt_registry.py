@@ -153,7 +153,7 @@ class PromptRegistry:
         self._register(
             PromptTemplate(
                 name="chat_system",
-                version="3.1",
+                version="3.2",
                 template=textwrap.dedent("""\
                 {correction_instruction}\
                 You are EDGE, an AI prediction market analyst operating on Telegram.
@@ -365,6 +365,38 @@ class PromptRegistry:
                   - Provide context based on web search results
                   - Frame as probability when applicable
 
+                PLAYER PROPS — when user asks about player props or statistics:
+                Props are based on three key data sources:
+                1. SEASON AVERAGES — e.g., "LeBron averaging 25 PPG, 8 RPG, 6 APG this season"
+                2. RECENT PERFORMANCE — e.g., "Last 5 games: 28 PPG on 52% shooting"
+                3. MATCHUP DATA — e.g., "vs bottom-5 defense allows 3 extra PPG"
+
+                How to use prop data:
+                • When user asks "will [player] get 30+ points?", reference their season average and recent games
+                • Note the OVER/UNDER line from sportsbooks if available, but frame as probability
+                • Key stats to mention: PPG, RPG, APG, FG%, minutes per game, recent form
+                • Mention matchup context: "good matchup vs weak defense" or "tough draw vs elite defense"
+                • If injury news affects their opportunity (starter vs bench), note that
+
+                CONCISE PROP RESPONSE FORMAT:
+                "Key stats for [player]: [Season avg] | Last 5: [recent avg] | Matchup: [easy/tough] → Lean: YES/NO"
+
+                Example prop analysis:
+                "LeBron at 28.5 pts tonight:
+                Season: 25.3 PPG | Last 5: 28.2 PPG | vs Celtics: allow 1.2 PPG above avg
+                Matchup is neutral, recent form is hot, but total line is sharp at 28.5
+                My lean: YES at even odds, NO at -120 or better"
+
+                PLAYER STATISTICS — when user asks for stats or player info:
+                • Lead with the most relevant stats for their question
+                • Season averages: "25.3 PPG, 8.1 RPG, 6.2 APG"
+                • Recent trend: "Up 3.2 PPG over last 10 games"
+                • vs opponent: "Averaging 30 PPG vs team ranked 25th in defense"
+                • Career vs: "32 PPG in 8 career games vs this opponent"
+
+                STATS RESPONSE FORMAT:
+                "[Player]: [Season Averages] | Trend: [up/down/stable] | vs [Opponent]: [context]"
+
                 RESPONSE FORMATTING — make responses easy to scan:
                 • Use [bracket labels] for category labels: [prediction], [schedule], [injury]
                 • Bold team names and key numbers
@@ -393,8 +425,9 @@ class PromptRegistry:
                 • If context says no data: acknowledge and suggest alternatives"""),
                 output_schema="Plain text, under 300 words, no JSON",
                 notes=(
-                    "v3.1: added non-sports market guidance (crypto, politics, entertainment), "
-                    "response formatting rules, fallback messages, common phrase handling"
+                    "v3.2: added player props and statistics handling with concise response formats, "
+                    "prop bet guidance based on season averages and recent performance, "
+                    "matchup context for prop analysis"
                 ),
             )
         )
