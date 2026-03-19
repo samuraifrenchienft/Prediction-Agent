@@ -12,15 +12,15 @@
 - Per-user long-term memory — favorite teams, rivals, players, family, city/timezone
 - New-user onboarding — AI naturally collects profile info across first few conversations
 - Personalized injury alerts — concern for fav players, rivalry-aware tone
+- Player Return Game Announcement — detects Out → Active transitions, sends personalized alerts
+- Sports Categories Expansion — WNBA, CFB, CBB, EPL, F1 with full team aliases
+- Non-Sports Markets — Crypto, Politics, Entertainment coverage in AI
+- Lower Qualified: 0 rate — widened thresholds for more market qualification
+- AI Response Quality — better formatting, fallbacks, common phrase handling
+- Intelligent Sports Intent Detection — prediction, recap, injury, schedule, standings queries
+- Paper Trading Suggestions — proactive but natural, multiple request formats
 
 ### 🔲 Up Next
-
-**Player Return Game Announcement**
-- When a player transitions from Out/Doubtful → Active in the injury cache, flag as "return"
-- If any user has that player as a favorite, send a personalized return alert
-  *"🎉 Steph Curry is back tonight vs the Lakers — Warriors win prob up +8pp. Market: 64% → see /scan"*
-- Tone: excitement for the user's fav player, factual for all others
-- Also surfaces on the Polymarket market for that game if one exists
 
 **Discord: `/mytrades` slash command**
 - Same data as Telegram, Discord embed format

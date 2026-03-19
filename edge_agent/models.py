@@ -33,6 +33,7 @@ AIAnalysis = Catalyst
 @dataclass
 class AIAnalysis:
     """Extended AI response model used by the Q&A chatbot."""
+
     source: str | None = None
     quality: float | None = None
     direction: float | None = None
@@ -56,7 +57,7 @@ class MarketSnapshot:
     updated_at: datetime
     ambiguity_score: float = 0.0
     volatility_entropy_score: float = 0.0
-    question: str | None = None   # human-readable market title; set by adapters
+    question: str | None = None  # human-readable market title; set by adapters
 
 
 @dataclass
@@ -71,12 +72,16 @@ class RiskPolicy:
     max_position_pct_bankroll: float = 0.03
     max_theme_exposure_pct: float = 0.20
     max_daily_drawdown_pct: float = 0.05
-    min_confidence: float = 0.50   # was 0.60 — floor-matches probability_node minimum
-    max_spread_bps: float = 260    # was 220 — slightly looser for thin Kalshi books
-    min_depth_usd: float = 500     # was 1000 — allow smaller markets through
+    min_confidence: float = 0.40  # lowered from 0.50 to qualify more markets
+    max_spread_bps: float = 350  # widened from 260 to allow thinner markets
+    min_depth_usd: float = 250  # lowered from 500 to include smaller markets
     min_time_to_resolution_hours: float = 1.0
-    max_ambiguity_score: float = 0.60   # was 0.55 — marginal tolerance increase
-    max_volatility_entropy_score: float = 0.85  # was 0.80
+    max_ambiguity_score: float = (
+        0.70  # increased from 0.60 to accept more ambiguous markets
+    )
+    max_volatility_entropy_score: float = (
+        0.90  # increased from 0.85 to accept more volatile markets
+    )
 
 
 @dataclass
