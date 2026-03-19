@@ -4877,25 +4877,81 @@ async def handle_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None
         log.info("[market_context] No live data found for teams=%s", _mentioned_teams)
 
     # ── On-demand paper trade ─────────────────────────────────────────────────
-    # Catches: "paper trade Warriors YES", "bet YES on Nets", "I'll take Lakers NO"
-    # Must run AFTER _find_team_mentions / _SLUG_ABBR / _sport_prefix are defined.
+    # Catches various paper trade request formats:
+    # "paper trade Warriors YES", "bet YES on Nets", "I'll take Lakers NO"
+    # "put me down on Rockets", "take the Celtics", "put $10 on Suns YES"
     _PT_RE = re.compile(
-        r"(?:paper\s*(?:trade|bet)|put\s+me\s+down|(?:i(?:'ll| will| want to| wanna)\s+(?:take|pick|bet|paper))|(?:^|\s)bet\b)"
         r"(?:"
-        r"\s+(?:on\s+)?(.{2,40}?)\s+(yes|no)\b"  # A: "paper trade Warriors YES"
+        # Pattern group 1+2: "paper trade [topic] YES/NO" or "bet [topic] YES/NO"
+        r"paper\s*(?:trade|bet)\s+(?:on\s+)?(.{2,40}?)\s+(yes|no)\b"
         r"|"
-        r"\s+(yes|no)\s+(?:on\s+)?(.{2,40})"  # B: "paper trade NO on warriors"
+        # Pattern group 3+4: "[topic] YES/NO" with intent verb before
+        r"(?:put\s+(?:me\s+)?(?:down\s+)?(?:on\s+|on\s+the\s+)?|take\s+(?:the\s+)?|go\s+(?:with\s+)?|play\s+(?:the\s+)?)"
+        r"(.{2,30}?)\s+(yes|no)?\b"
+        r"|"
+        # Pattern group 5+6: "YES/NO on [topic]"
+        r"(yes|no)\s+(?:on\s+)?(?:the\s+)?(?:.{2,30}?)\b"
+        r"|"
+        # Pattern group 7+8: "bet YES on [topic]" or "I'll take [topic]"
+        r"(?:i(?:'ll|'m\s+gonna| will| want(?: to)?| gonna)?\s+(?:take|pick|bet|paper))\s+(?:the\s+)?(.{2,30}?)\s+(yes|no)?"
+        r"|"
+        # Pattern group 9+10: "$X on [topic] YES/NO"
+        r"\$?\d+\s*(?:on\s+)?(?:the\s+)?(.{2,30}?)\s+(yes|no)\b"
+        r"|"
+        # Pattern group 11+12: standalone YES/NO with topic (if topic recently discussed)
+        r"(?:^|\s)(?:yes|no)\s+(?:on\s+)?(?:the\s+)?(.{2,30}?)\b"
         r")",
         re.IGNORECASE,
     )
     _pt_match = _PT_RE.search(user_msg)
     if _pt_match:
-        if _pt_match.group(1):
+        _pt_topic = None
+        _pt_side = None
+
+        # Parse based on which group matched
+        # Group 1+2: "paper trade [topic] YES/NO"
+        if _pt_match.group(1) and _pt_match.group(2):
             _pt_topic = _pt_match.group(1).strip()
             _pt_side = _pt_match.group(2).upper()
-        else:
-            _pt_side = _pt_match.group(3).upper()
-            _pt_topic = _pt_match.group(4).strip()
+        # Group 3+4: "take/play [topic]" optional YES/NO
+        elif _pt_match.group(3) and _pt_match.group(4):
+            _pt_topic = _pt_match.group(3).strip()
+            _pt_side = _pt_match.group(4).upper() if _pt_match.group(4) else None
+        # Group 5: standalone YES/NO - use recent market context
+        elif _pt_match.group(5):
+            _pt_side = _pt_match.group(5).upper()
+            _pt_topic = None  # Will use mentioned teams or recent context
+        # Group 6+7: "bet YES on [topic]"
+        elif _pt_match.group(7) and _pt_match.group(8):
+            _pt_topic = _pt_match.group(7).strip()
+            _pt_side = _pt_match.group(8).upper() if _pt_match.group(8) else None
+        # Group 9+10: "$X on [topic] YES/NO"
+        elif _pt_match.group(9) and _pt_match.group(10):
+            _pt_topic = _pt_match.group(9).strip()
+            _pt_side = _pt_match.group(10).upper()
+        # Group 11+12: standalone topic with optional YES/NO
+        elif _pt_match.group(11) and _pt_match.group(12):
+            _pt_topic = _pt_match.group(11).strip()
+            _pt_side = _pt_match.group(12).upper() if _pt_match.group(12) else None
+
+        # If no side specified, check if recent market context exists
+        if not _pt_side or _pt_side not in ("YES", "NO"):
+            _pt_side = "YES"  # Default to YES if not specified (common assumption)
+
+        # If no topic, use mentioned teams
+        if not _pt_topic or len(_pt_topic) < 2:
+            if _mentioned_teams:
+                _pt_topic = " ".join(_mentioned_teams)
+            else:
+                await update.message.reply_text(
+                    "🤔 I couldn't tell what you want to paper trade. "
+                    "Try something like:\n"
+                    "• 'paper trade Warriors YES'\n"
+                    "• 'bet NO on Lakers'\n"
+                    "• 'take the Celtics'"
+                )
+                return
+
         # Strip trailing noise: "today's warriors game" → "warriors"
         _pt_topic = re.sub(
             r"(?:today'?s?\s+|tonight'?s?\s+|the\s+)", "", _pt_topic, flags=re.I
@@ -5720,7 +5776,7 @@ async def handle_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None
         prompt,
         task_type="creative",
         system_prompt=system_prompt,
-        prompt_version="chat_system@2.8",
+        prompt_version="chat_system@2.9",
         context_blocks=_active_ctx_blocks,
         correction_mode=_is_correction,
         regime_safe=_regime.is_ml_safe,
