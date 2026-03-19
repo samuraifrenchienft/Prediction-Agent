@@ -3404,108 +3404,409 @@ async def _send_copy_trade_alerts(bot) -> int:
 
 
 # ---------------------------------------------------------------------------
-# Game Assessment Context Builder
+# Sports Query Intent System
 # ---------------------------------------------------------------------------
 
-_GAME_ASSESSMENT_KEYWORDS = {
-    "analysis",
-    "assess",
-    "break down",
-    "preview",
-    "prediction",
-    "prediction",
-    "who wins",
-    "win chance",
-    "win probability",
-    "odds",
-    "outlook",
-    "outlook",
-    "how will",
-    "should i bet",
-    "bet on",
-    "recap",
-    "previous game",
-    "last game",
-    "h2h",
-    "head to head",
-    "matchup",
-    "versus",
-    "vs ",
-    "standings",
-    "record",
+_SPORT_INTENTS = {
+    "prediction": {
+        "keywords": [
+            "prediction",
+            "who wins",
+            "who will win",
+            "win chance",
+            "win probability",
+            "odds",
+            "bet on",
+            "should i bet",
+            "pick",
+            "play",
+            "preview",
+            "analysis",
+            "assess",
+            "break down",
+            "outlook",
+            "how will",
+            "matchup",
+            "versus",
+            "vs ",
+        ],
+        "description": "matchup analysis and betting odds",
+    },
+    "recap": {
+        "keywords": [
+            "recap",
+            "who won",
+            "final score",
+            "result",
+            "game over",
+            "outcome",
+            "score",
+            "beat",
+            "defeated",
+            "lost to",
+            "won against",
+        ],
+        "description": "game results and scores",
+    },
+    "injury": {
+        "keywords": [
+            "injury",
+            "injured",
+            "hurt",
+            "out",
+            "doubtful",
+            "questionable",
+            "day-to-day",
+            "scratched",
+            "disabled list",
+            "ir",
+        ],
+        "description": "injury reports and player status",
+    },
+    "schedule": {
+        "keywords": [
+            "schedule",
+            "when do they play",
+            "what time",
+            "game time",
+            "tip off",
+            "puck drop",
+            "start time",
+            "games today",
+            "games tonight",
+            "what games",
+            "todays games",
+            "tonights games",
+            "games on today",
+            "games on tonight",
+            "whats playing",
+            "whats on today",
+            "upcoming",
+        ],
+        "description": "game schedules and times",
+    },
+    "standings": {
+        "keywords": [
+            "standings",
+            "record",
+            "win-loss",
+            "win loss",
+            "ranking",
+            "seed",
+            "seeded",
+            "division",
+            "conference",
+            "playoff",
+            "clinched",
+        ],
+        "description": "standings and records",
+    },
+    "team_status": {
+        "keywords": [
+            "how are",
+            "how is",
+            "doing",
+            "recent form",
+            "last games",
+            "streak",
+            "hot",
+            "cold",
+            "trending",
+            "struggling",
+            "playing well",
+        ],
+        "description": "team recent performance and form",
+    },
 }
 
 
-def _build_game_assessment_context(teams: list[str], sport: str, query: str) -> str:
-    """
-    Build a comprehensive game assessment context for a matchup.
-    Includes: standings/records, head-to-head, coaching, all-stars, recent form.
-    Returns "" if no game assessment keywords detected.
-    """
-    if len(teams) < 2:
-        return ""
+def _detect_sports_intent(query: str, mentioned_teams: list[str]) -> list[str]:
+    """Detect what type of sports information the user is asking for."""
+    q = query.lower()
+    intents = []
 
-    if not any(kw in query.lower() for kw in _GAME_ASSESSMENT_KEYWORDS):
-        return ""
+    # If teams mentioned without explicit intent, default to prediction for "vs" matches
+    if mentioned_teams and len(mentioned_teams) >= 2:
+        if any(kw in q for kw in _SPORT_INTENTS["prediction"]["keywords"]):
+            intents.append("prediction")
+        elif any(kw in q for kw in _SPORT_INTENTS["recap"]["keywords"]):
+            intents.append("recap")
+        elif any(kw in q for kw in _SPORT_INTENTS["injury"]["keywords"]):
+            intents.append("injury")
+        elif any(kw in q for kw in _SPORT_INTENTS["schedule"]["keywords"]):
+            intents.append("schedule")
+        elif any(kw in q for kw in _SPORT_INTENTS["standings"]["keywords"]):
+            intents.append("standings")
+        elif any(kw in q for kw in ["vs", "versus", " vs "]):
+            intents.append("prediction")  # Default to prediction for matchup questions
+        else:
+            intents.append("team_status")  # Default for single team questions
+    elif mentioned_teams and len(mentioned_teams) == 1:
+        # Single team - check for specific intents
+        for intent_name, intent_data in _SPORT_INTENTS.items():
+            if any(kw in q for kw in intent_data["keywords"]):
+                intents.append(intent_name)
+                break
+        if not intents:
+            intents.append("team_status")
 
+    return intents if intents else ["prediction"]  # Default to prediction
+
+
+# ---------------------------------------------------------------------------
+# Sports Context Builder
+# ---------------------------------------------------------------------------
+
+
+def _build_sports_context(
+    user_msg: str, mentioned_teams: list[str], sport: str, intents: list[str]
+) -> str:
+    """
+    Build comprehensive sports context based on detected intents.
+    Fetches targeted data from web search for each query type.
+    """
     from datetime import date
 
+    if not sport or sport == "unknown":
+        return ""
+
     today = date.today().strftime("%B %d, %Y")
+    lines = []
 
-    team1, team2 = teams[0], teams[1]
+    # Determine primary intent for the header
+    primary_intent = intents[0] if intents else "prediction"
+    intent_labels = {
+        "prediction": "Matchup Analysis",
+        "recap": "Game Recap",
+        "injury": "Injury Report",
+        "schedule": "Schedule",
+        "standings": "Standings",
+        "team_status": "Team Status",
+    }
 
-    assessment_lines = [f"\n[Game Assessment — {team1} vs {team2}]", f"Today: {today}"]
+    if mentioned_teams and len(mentioned_teams) >= 2:
+        header = f"\n[Sports Context — {mentioned_teams[0]} vs {mentioned_teams[1]}]"
+        if primary_intent in intent_labels:
+            header = f"\n[{intent_labels[primary_intent]} — {mentioned_teams[0]} vs {mentioned_teams[1]}]"
+    elif mentioned_teams:
+        header = f"\n[Sports Context — {mentioned_teams[0]} {sport.upper()}]"
+    else:
+        header = f"\n[Sports Context — {sport.upper()}]"
 
-    assessment_lines.append(f"\nWeb search results for matchup analysis:")
+    lines.append(header)
+    lines.append(f"Date: {today}")
 
-    search_query = f"{team1} vs {team2} {sport.upper()} game preview analysis standings record {today}"
+    # Build targeted queries based on intent
+    queries_to_run = []
+
+    for intent in intents:
+        if intent == "prediction":
+            if mentioned_teams and len(mentioned_teams) >= 2:
+                queries_to_run.append(
+                    {
+                        "intent": "prediction",
+                        "query": f"{mentioned_teams[0]} vs {mentioned_teams[1]} {sport.upper()} prediction preview odds {today}",
+                        "num": 6,
+                        "section": "Matchup Analysis",
+                    }
+                )
+                queries_to_run.append(
+                    {
+                        "intent": "h2h",
+                        "query": f"{mentioned_teams[0]} vs {mentioned_teams[1]} {sport.upper()} head to head results this season",
+                        "num": 4,
+                        "section": "Head-to-Head",
+                    }
+                )
+            queries_to_run.append(
+                {
+                    "intent": "injury",
+                    "query": f"{mentioned_teams[0]} {mentioned_teams[1] if len(mentioned_teams) >= 2 else sport.upper()} injury report {today}",
+                    "num": 4,
+                    "section": "Injury Updates",
+                }
+            )
+
+        elif intent == "recap":
+            if mentioned_teams and len(mentioned_teams) >= 2:
+                queries_to_run.append(
+                    {
+                        "intent": "recap",
+                        "query": f"{mentioned_teams[0]} vs {mentioned_teams[1]} {sport.upper()} recap final score result {today}",
+                        "num": 5,
+                        "section": "Game Recap",
+                    }
+                )
+
+        elif intent == "schedule":
+            queries_to_run.append(
+                {
+                    "intent": "schedule",
+                    "query": f"{sport.upper()} schedule games today {today}",
+                    "num": 6,
+                    "section": "Today's Schedule",
+                }
+            )
+            if mentioned_teams:
+                queries_to_run.append(
+                    {
+                        "intent": "team_schedule",
+                        "query": f"{mentioned_teams[0]} {sport.upper()} next game schedule {today}",
+                        "num": 3,
+                        "section": "Team Schedule",
+                    }
+                )
+
+        elif intent == "standings":
+            queries_to_run.append(
+                {
+                    "intent": "standings",
+                    "query": f"{sport.upper()} standings standings record {today}",
+                    "num": 5,
+                    "section": "Standings",
+                }
+            )
+            if mentioned_teams:
+                queries_to_run.append(
+                    {
+                        "intent": "team_standings",
+                        "query": f"{mentioned_teams[0]} {sport.upper()} record standings {today}",
+                        "num": 3,
+                        "section": f"{mentioned_teams[0]} Record",
+                    }
+                )
+
+        elif intent == "team_status":
+            if mentioned_teams:
+                queries_to_run.append(
+                    {
+                        "intent": "team_status",
+                        "query": f"{mentioned_teams[0]} {sport.upper()} recent form last 10 games {today}",
+                        "num": 5,
+                        "section": "Recent Form",
+                    }
+                )
+                queries_to_run.append(
+                    {
+                        "intent": "team_news",
+                        "query": f"{mentioned_teams[0]} {sport.upper()} news updates {today}",
+                        "num": 4,
+                        "section": "Team News",
+                    }
+                )
+
+    # Deduplicate queries while preserving order
+    seen_queries = set()
+    unique_queries = []
+    for q in queries_to_run:
+        if q["query"] not in seen_queries:
+            seen_queries.add(q["query"])
+            unique_queries.append(q)
+
+    # Execute all queries
+    for q_data in unique_queries:
+        section_lines = [f"\n--- {q_data['section']} ---"]
+        section_has_data = False
+
+        # Try Tavily first for better sports coverage
+        tavily_result = _tavily_search_sports(q_data["query"], q_data["num"])
+        if tavily_result:
+            section_lines.append(tavily_result)
+            section_has_data = True
+        else:
+            # Fallback to Serper
+            try:
+                import requests as _req
+
+                resp = _req.get(
+                    "https://google.serper.dev/search",
+                    headers={"X-API-KEY": os.getenv("SERPER_API_KEY", "").strip()},
+                    json={"q": q_data["query"], "num": q_data["num"]},
+                    timeout=10,
+                )
+                if resp.status_code == 200:
+                    data = resp.json()
+
+                    # Check for answer box first
+                    if ans := data.get("answerBox", {}).get("answer"):
+                        section_lines.append(f"Quick Answer: {ans}")
+                        section_has_data = True
+
+                    # Then organic results
+                    for r in data.get("organic", [])[: q_data["num"]]:
+                        title = r.get("title", "").strip()
+                        snippet = r.get("snippet", "").strip()
+                        if len(snippet) > 200:
+                            snippet = snippet[:200].rsplit(" ", 1)[0] + "..."
+                        if title or snippet:
+                            section_lines.append(
+                                f"• {title}: {snippet}" if title else snippet
+                            )
+                            section_has_data = True
+
+            except Exception:
+                pass
+
+        if section_has_data:
+            lines.extend(section_lines)
+
+    if len(lines) <= 2:  # Only header and date
+        return ""
+
+    lines.append("\n[End Sports Context]")
+    return "\n".join(lines)
+
+
+def _tavily_search_sports(query: str, max_results: int = 5) -> str:
+    """
+    Specialized Tavily search for sports queries with better formatting.
+    Returns structured results optimized for sports context.
+    """
+    api_key = os.getenv("TAVILY_API_KEY", "").strip()
+    if not api_key:
+        return ""
+
     try:
-        import requests as _req
+        from tavily import TavilyClient
 
-        resp = _req.get(
-            "https://google.serper.dev/search",
-            headers={"X-API-KEY": os.getenv("SERPER_API_KEY", "").strip()},
-            json={"q": search_query, "num": 5},
-            timeout=10,
+        client = TavilyClient(api_key=api_key)
+        response = client.search(
+            query=query,
+            search_depth="basic",
+            max_results=max_results,
+            include_answer=True,
+            include_raw_content=False,
         )
-        if resp.status_code == 200:
-            data = resp.json()
-            if ans := data.get("answerBox", {}).get("answer"):
-                assessment_lines.append(f"Summary: {ans}")
-            for r in data.get("organic", [])[:5]:
-                title = r.get("title", "").strip()
-                snippet = r.get("snippet", "").strip()
-                if len(snippet) > 200:
-                    snippet = snippet[:200].rsplit(" ", 1)[0] + "..."
-                assessment_lines.append(f"• {title}: {snippet}")
+
+        lines = []
+
+        # Top-level AI answer when available (very useful for sports)
+        if answer := response.get("answer"):
+            lines.append(f"Summary: {answer.strip()}")
+
+        # Individual results
+        for r in response.get("results", [])[:max_results]:
+            title = r.get("title", "").strip()
+            content = r.get("content", "").strip()
+            if len(content) > 200:
+                content = content[:200].rsplit(" ", 1)[0] + "..."
+            if title:
+                lines.append(f"• {title}: {content}" if content else f"• {title}")
+            elif content:
+                lines.append(f"• {content}")
+
+        return "\n".join(lines) if lines else ""
+
     except Exception:
-        pass
-
-    h2h_query = f"{team1} vs {team2} {sport.upper()} head to head results this season"
-    try:
-        resp = _req.get(
-            "https://google.serper.dev/search",
-            headers={"X-API-KEY": os.getenv("SERPER_API_KEY", "").strip()},
-            json={"q": h2h_query, "num": 3},
-            timeout=10,
-        )
-        if resp.status_code == 200:
-            data = resp.json()
-            if data.get("organic"):
-                assessment_lines.append(f"\nHead-to-head / this season results:")
-                for r in data.get("organic", [])[:3]:
-                    title = r.get("title", "").strip()
-                    snippet = r.get("snippet", "").strip()
-                    if len(snippet) > 200:
-                        snippet = snippet[:200].rsplit(" ", 1)[0] + "..."
-                    assessment_lines.append(f"• {title}: {snippet}")
-    except Exception:
-        pass
-
-    return "\n".join(assessment_lines)
+        return ""
 
 
-def _build_todays_games_context(user_msg: str) -> str:
+# ---------------------------------------------------------------------------
+# Today's Games Handler
+# ---------------------------------------------------------------------------
+
+
+def _build_todays_games_context(user_msg: str, sport: str = None) -> str:
     """
     Return a context block listing today's games when user asks about them.
     Supports NBA (BallDontLie) and NHL (web search).
@@ -5043,23 +5344,24 @@ async def handle_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None
                 "\n\n" + search_context if search_context else ""
             )
 
-    # 7b. Game Assessment context — when user asks for matchup analysis, preview,
-    #     or prediction, fetch standings, records, H2H results, coaching info.
-    game_assessment_context = ""
-    if _mentioned_teams and len(_mentioned_teams) >= 2:
-        sport_for_assessment = _chat_sport or "nba"
-        game_assessment_context = _build_game_assessment_context(
-            _mentioned_teams, sport_for_assessment, user_msg
+    # 7b. Sports Context — intelligent sports query handling based on intent detection.
+    #     Detects: prediction, recap, injury, schedule, standings, team_status
+    #     Fetches targeted web data for each query type.
+    sports_context = ""
+    if _chat_sport and _chat_sport != "unknown":
+        detected_intents = _detect_sports_intent(user_msg, _mentioned_teams)
+        sports_context = _build_sports_context(
+            user_msg, _mentioned_teams, _chat_sport, detected_intents
         )
-        if game_assessment_context:
+        if sports_context:
             log.debug(
-                "[game_assessment] Built context for %s vs %s",
-                _mentioned_teams[0],
-                _mentioned_teams[1],
+                "[sports_context] Built context for %s (intents: %s)",
+                _chat_sport,
+                detected_intents,
             )
 
     # 7c. Today's Games context — when user asks "what games are today/tonight"
-    todays_games_context = _build_todays_games_context(user_msg)
+    todays_games_context = _build_todays_games_context(user_msg, _chat_sport)
 
     # 8. Smart money positions — injected when user asks about trading or markets.
     #    Shows what top-scored vetted wallets are currently positioned on so the
@@ -5338,7 +5640,7 @@ async def handle_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None
         or scan_context
         or search_context
         or injury_context
-        or game_assessment_context
+        or sports_context
         or todays_games_context
         or crypto_price_context
         or econ_rate_context
@@ -5353,8 +5655,8 @@ async def handle_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None
             _blocks.append("web search results")
         if injury_context:
             _blocks.append("injury data")
-        if game_assessment_context:
-            _blocks.append("game assessment data")
+        if sports_context:
+            _blocks.append("sports analysis data")
         if todays_games_context:
             _blocks.append("today's games schedule")
         if crypto_price_context:
@@ -5379,7 +5681,7 @@ async def handle_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None
         + smart_money_context  # top-scored wallet positions (copy-trade signal)
         + injury_context
         + search_context
-        + game_assessment_context  # matchup analysis: records, H2H, coaching, all-stars
+        + sports_context  # sports analysis: prediction, recap, injury, schedule, standings
         + todays_games_context  # today's game schedule when asked
         + crypto_price_context  # live Binance prices (BTC, ETH, SOL)
         + econ_rate_context  # live NY Fed rates + Treasury yields
@@ -5405,8 +5707,8 @@ async def handle_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None
         _active_ctx_blocks.append("injuries")
     if search_context:
         _active_ctx_blocks.append("web_search")
-    if game_assessment_context:
-        _active_ctx_blocks.append("game_assessment")
+    if sports_context:
+        _active_ctx_blocks.append("sports_context")
     if todays_games_context:
         _active_ctx_blocks.append("todays_games")
     if crypto_price_context:
@@ -5418,7 +5720,7 @@ async def handle_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None
         prompt,
         task_type="creative",
         system_prompt=system_prompt,
-        prompt_version="chat_system@2.7",
+        prompt_version="chat_system@2.8",
         context_blocks=_active_ctx_blocks,
         correction_mode=_is_correction,
         regime_safe=_regime.is_ml_safe,
@@ -5432,6 +5734,7 @@ async def handle_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None
             f"User asked: {user_msg}\n\n"
             f"{market_context or '[No market data available]'}\n\n"
             f"{injury_context or '[No injury data available]'}\n\n"
+            f"{sports_context or '[No sports analysis data available]'}\n\n"
             f"{search_context or '[No web search results]'}"
         )
         fallback_system = (
