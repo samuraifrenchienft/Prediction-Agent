@@ -76,7 +76,7 @@ except ImportError:
 
     _PACIFIC = _dt.timezone(_dt.timedelta(hours=-8))  # PST fallback (no DST)
 
-from dotenv import load_dotenv
+from dotenv import find_dotenv, load_dotenv
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.constants import ParseMode
 from telegram.ext import (
@@ -333,7 +333,8 @@ _TOPIC_NEWS_QUERIES: dict[str, str] = {
     "biden": "Biden latest news today 2026",
 }
 
-load_dotenv()
+# Load .env from project root (finds it when run from worktree or main dir)
+load_dotenv(find_dotenv(usecwd=True) or find_dotenv())
 
 # ---------------------------------------------------------------------------
 # Tavily real-time web search

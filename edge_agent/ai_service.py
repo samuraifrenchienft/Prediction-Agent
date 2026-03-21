@@ -189,8 +189,16 @@ def get_ai_response(
                 model=model,
                 messages=messages,
                 response_format={"type": "json_object"},
+                timeout=90.0,
             )
-            result = json.loads(response.choices[0].message.content)
+            content = response.choices[0].message.content
+            if not content or not content.strip():
+                log.warning("[AI] Model %s returned empty response", model)
+                continue
+            result = json.loads(content)
+            if not isinstance(result, dict):
+                log.warning("[AI] Model %s returned non-dict JSON", model)
+                continue
             latency_ms = int((time.monotonic() - t0) * 1000)
             log.debug("[AI] get_ai_response ✓ model=%s latency=%dms", model, latency_ms)
 
@@ -281,6 +289,7 @@ def get_chat_response(
                 model=model,
                 messages=messages,
                 max_tokens=max_tokens,
+                timeout=90.0,
                 # No response_format constraint — plain text allowed
             )
             result = response.choices[0].message.content

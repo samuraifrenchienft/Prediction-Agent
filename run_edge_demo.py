@@ -114,22 +114,37 @@ def answer_question(question: str, kb: KnowledgeBase, mem: SessionMemory) -> boo
 
     # Build the full prompt: question + all context layers
     prompt = question + kb_context + session_context + market_context
+    print("\nThinking... (may take 10-90s for complex questions)")
     ai_response = get_ai_response(prompt, task_type="creative", system_prompt=system_prompt)
 
-    answer_text = ""
-    if ai_response and ai_response.get("content"):
-        answer_text = ai_response["content"]
+    if ai_response is None:
+        print("\nAPI error - check that OPEN_ROUTER_API_KEY or GROQ_API_KEY is set and valid.")
+        return False
+
+    raw = (
+        ai_response.get("content")
+        or ai_response.get("answer")
+        or ai_response.get("response")
+        or ai_response.get("message")
+        or ai_response.get("text")
+    )
+    answer_text = (raw or "").strip() if raw else ""
+
+    if answer_text:
         print(f"\nEdge: {answer_text}")
         if ai_response.get("confidence_level"):
             print(f"Confidence: {ai_response['confidence_level']}")
         if ai_response.get("action_recommendation"):
             print(f"Recommendation: {ai_response['action_recommendation']}")
-        if ai_response.get("entry_conditions"):
+        entry_conditions = ai_response.get("entry_conditions")
+        if entry_conditions:
+            conditions = entry_conditions if isinstance(entry_conditions, list) else [entry_conditions]
             print("Entry conditions:")
-            for cond in ai_response["entry_conditions"]:
+            for cond in conditions:
                 print(f"  - {cond}")
     else:
-        print("\nCouldn't generate a response. Check your AI API key.")
+        print("\nCouldn't generate a response in the expected format.")
+        pprint(ai_response)
 
     # 4. Save this exchange to session memory
     if answer_text:
