@@ -655,6 +655,7 @@ _ai_svc_mod.set_decision_log(_decision_log)
 # spawning a new DB connection on every /traders, /wallet, /watch invocation
 from edge_agent.memory.trader_cache import TraderCache as _TraderCache
 from edge_agent.insider_alerts import InsiderAlertEngine as _InsiderAlertEngine
+from edge_agent.sportsbook_odds import build_sportsbook_context as _build_sportsbook_context
 
 _trader_cache: "_TraderCache | None" = None
 
@@ -2996,11 +2997,13 @@ def _build_smart_money_context(
             except Exception:
                 continue
 
-            # Filter: significant open positions ($100+ size), active markets only
+            # Filter: significant open positions ($100+ USD value), active markets only
+            # currentValue is in USDC; size is in shares — always use currentValue for USD filter
             sig = []
             _now_iso = datetime.now(timezone.utc).strftime("%Y-%m-%d")
             for p in positions:
-                if float(p.get("size", p.get("currentValue", 0)) or 0) < 100:
+                _pos_usd = float(p.get("currentValue") or p.get("size", 0) or 0)
+                if _pos_usd < 100:
                     continue
                 # Skip expired markets (endDate in the past)
                 _end = p.get("endDate", p.get("end_date_iso", ""))
@@ -3045,7 +3048,7 @@ def _build_smart_money_context(
             for pos in sig[:3]:  # max 3 positions per wallet
                 title = (pos.get("title") or pos.get("market", "Unknown market"))[:55]
                 side = "YES" if pos.get("outcomeIndex", 0) == 0 else "NO"
-                size = float(pos.get("size", pos.get("currentValue", 0)) or 0)
+                size = float(pos.get("currentValue") or pos.get("size", 0) or 0)
                 cond_id = pos.get("conditionId", pos.get("market", title[:20]))
 
                 # Fetch real current price from CLOB API instead of defaulting to 0.5
@@ -4169,6 +4172,165 @@ async def handle_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None
         user_msg[:80] + "..." if len(user_msg) > 80 else user_msg,
     )
     await update.message.chat.send_action("typing")
+
+    # ── Natural language command routing ──────────────────────────────────────
+    # Lets users trigger any slash command by just talking naturally.
+    # Checked before AI so the right handler runs with the right data.
+    _q = user_msg.lower().strip()
+
+    # Helper: set ctx.args and call a command handler, then return
+    async def _route(handler, args: list[str] | None = None):
+        ctx.args = args or []
+        await handler(update, ctx)
+
+    # /scan — market edge scanner
+    if any(p in _q for p in (
+        "scan markets", "run scan", "run a scan", "find edges", "scan for edges",
+        "scan for opportunities", "find mispriced", "market scan", "show me edges",
+        "what markets look good", "any edges", "scan polymarket", "find value",
+        "edge scan",
+    )):
+        await _route(cmd_scan)
+        return
+
+    # /injuries [sport] — injury report
+    if any(p in _q for p in (
+        "injury report", "show injuries", "who's injured", "who is injured",
+        "injury update", "check injuries", "injured players", "injury list",
+        "whos out", "who's out", "player injuries", "injury news",
+    )):
+        _inj_sport = "nba"
+        for _sp in ("nba", "nhl", "nfl", "mlb", "wnba"):
+            if _sp in _q:
+                _inj_sport = _sp
+                break
+        await _route(cmd_injuries, [_inj_sport])
+        return
+
+    # /traders — top trader leaderboard
+    if any(p in _q for p in (
+        "top traders", "show traders", "trader leaderboard", "best traders",
+        "who are the best", "smart money traders", "show leaderboard",
+        "leaderboard", "best wallets", "top wallets",
+    )):
+        await _route(cmd_traders)
+        return
+
+    # /mytrades — user's paper trade positions
+    if any(p in _q for p in (
+        "my trades", "my bets", "my picks", "my paper trades", "my positions",
+        "show my trades", "open picks", "my open bets", "what did i bet",
+        "my paper bets", "my portfolio", "show my picks",
+    )):
+        await _route(cmd_mytrades)
+        return
+
+    # /performance — user's personal win rate and P&L
+    if any(p in _q for p in (
+        "my performance", "how am i doing", "my win rate", "my stats",
+        "my p&l", "my pnl", "my record", "how have i done", "my results",
+        "show my performance", "my roi",
+    )):
+        await _route(cmd_performance)
+        return
+
+    # /watchlist — show tracked wallets
+    if any(p in _q for p in (
+        "my watchlist", "show watchlist", "who am i watching", "show my watchlist",
+        "watched wallets", "wallets i'm watching", "watchlist",
+    )):
+        await _route(cmd_watchlist)
+        return
+
+    # /standings [sport] — league standings
+    if any(p in _q for p in (
+        "standings", "nba standings", "nhl standings", "nfl standings",
+        "show standings", "league standings", "team standings", "current standings",
+    )):
+        _std_sport = "nba"
+        for _sp in ("nba", "nhl", "nfl", "mlb"):
+            if _sp in _q:
+                _std_sport = _sp
+                break
+        await _route(cmd_standings, [_std_sport])
+        return
+
+    # /top — top markets by volume
+    if any(p in _q for p in (
+        "top markets", "biggest markets", "most volume", "highest volume",
+        "show top markets", "trending markets", "popular markets",
+    )):
+        await _route(cmd_top)
+        return
+
+    # /insider — insider alert summary
+    if any(p in _q for p in (
+        "insider alerts", "insider activity", "insider trades", "suspicious bets",
+        "show insider", "any insider", "whale activity", "suspicious wallets",
+        "insider report", "smart money insider",
+    )):
+        await _route(cmd_insider)
+        return
+
+    # /weatherscan — weather market scanner
+    if any(p in _q for p in (
+        "weather scan", "weather markets", "scan weather", "weather edge",
+        "weather scanner", "weather opportunities",
+    )):
+        await _route(cmd_weatherscan)
+        return
+
+    # /cryptoscan — crypto market scanner
+    if any(p in _q for p in (
+        "crypto scan", "scan crypto", "crypto edge", "crypto markets edge",
+        "crypto scanner", "bitcoin scan", "crypto opportunities",
+    )):
+        await _route(cmd_cryptoscan)
+        return
+
+    # /fedscan — Fed/econ market scanner
+    if any(p in _q for p in (
+        "fed scan", "fed markets", "rate markets", "econ scan", "scan fed",
+        "interest rate scan", "fed scanner", "economic scan",
+    )):
+        await _route(cmd_fedscan)
+        return
+
+    # /status — bot system status
+    if any(p in _q for p in (
+        "bot status", "system status", "how are you doing", "are you working",
+        "bot health", "is the bot working", "check status", "bot running",
+    )):
+        await _route(cmd_status)
+        return
+
+    # /decisions — AI decision log
+    if any(p in _q for p in (
+        "decision log", "show decisions", "ai decisions", "my decisions",
+        "show decision log", "what decisions",
+    )):
+        await _route(cmd_decisions)
+        return
+
+    # /mlstatus — ML model status
+    if any(p in _q for p in (
+        "ml status", "model status", "machine learning status", "ai model status",
+        "is ml working", "ml model", "show ml",
+    )):
+        await _route(cmd_mlstatus)
+        return
+
+    # /wallet <address> — wallet lookup (needs a 0x address in the message)
+    _addr_match = re.search(r"\b(0x[a-fA-F0-9]{40})\b", user_msg)
+    if _addr_match and any(p in _q for p in (
+        "check wallet", "vet wallet", "analyze wallet", "score wallet",
+        "look up wallet", "wallet score", "is this wallet", "check this wallet",
+        "look at wallet", "wallet info",
+    )):
+        await _route(cmd_wallet, [_addr_match.group(1)])
+        return
+
+    # ── End natural language routing ──────────────────────────────────────────
 
     # ── Per-user session + profile ────────────────────────────────────────────
     _mem_user = _get_session(user_id)
@@ -6079,8 +6241,8 @@ async def handle_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None
     #    On sport only (no correction): standard injury web search.
     search_context = ""
     if _is_correction and _mentioned_teams:
-        # User says our price is wrong — re-hit Polymarket directly, bypass cache
-        # Clear file cache for this query so we don't return the same stale result
+        # User says our data is wrong — re-hit Polymarket directly, bypass cache,
+        # AND run a live web search so the AI has game results / news context.
         import glob as _glob, os as _os
 
         for _f in _glob.glob(".cache/trader_leaderboard*.json"):
@@ -6094,6 +6256,17 @@ async def handle_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None
             search_context = "\n[Market data refreshed from Polymarket live feed]"
         else:
             search_context = "\n[No live Polymarket market found for that matchup]"
+
+        # Always also run a web search on correction so AI knows game outcomes,
+        # scores, recent news — Polymarket prices alone don't explain what happened.
+        _corr_sport_tag = f" {_chat_sport.upper()}" if _chat_sport else ""
+        _corr_query = f"{' '.join(_mentioned_teams)}{_corr_sport_tag} result score latest news today 2026"
+        _corr_loop = asyncio.get_running_loop()
+        _corr_web = await _corr_loop.run_in_executor(None, _tavily_search, _corr_query)
+        if not _corr_web:
+            _corr_web = await _corr_loop.run_in_executor(None, _serper_search, _corr_query)
+        if _corr_web:
+            search_context = search_context + "\n" + _corr_web
 
     elif _chat_sport or _is_correction:
         if _is_correction and _chat_sport:
@@ -6183,6 +6356,23 @@ async def handle_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None
 
     # 7d. Today's Games context — when user asks "what games are today/tonight"
     todays_games_context = _build_todays_games_context(user_msg, _chat_sport)
+
+    # 7e. Sportsbook lines — injected when sport + teams detected.
+    #     Shows DraftKings/FanDuel moneyline, spread, total, and vig-free implied
+    #     probability so the AI can detect edge vs Polymarket price.
+    #     Only fires when THE_ODDS_API_KEY is set (free tier, 500 req/month).
+    sportsbook_context = ""
+    if _chat_sport and _chat_sport != "unknown" and _mentioned_teams:
+        try:
+            sportsbook_context = _build_sportsbook_context(_mentioned_teams, _chat_sport)
+            if sportsbook_context:
+                log.debug(
+                    "[sportsbook] Got lines for %s (%s)",
+                    _mentioned_teams,
+                    _chat_sport,
+                )
+        except Exception as _sb_exc:
+            log.debug("[sportsbook] Context build failed: %s", _sb_exc)
 
     # 8. Smart money positions — injected when user asks about trading or markets.
     #    Shows what top-scored vetted wallets are currently positioned on so the
@@ -6400,6 +6590,16 @@ async def handle_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None
         "NHL standings, politics news, etc. Treat this as ground truth for current events.\n"
         "• When [Live web search results] is present: cite the headlines/facts naturally. "
         "Do NOT say 'I don't have access to current information' — you literally do.\n\n"
+        "SPORTSBOOK LINES & EDGE DETECTION:\n"
+        "• A [Sportsbook Lines] block may appear with live moneyline, spread, and total from "
+        "DraftKings/FanDuel/BetMGM. These contain the 'implied win%' with vig removed.\n"
+        "• Use the sportsbook implied win% to compare against Polymarket price. If they differ "
+        "significantly (>5pp), that gap IS the edge. Example: 'DraftKings implies 67% but "
+        "Polymarket has them at 55% — 12pp gap, strong BUY signal on YES.'\n"
+        "• NEVER output spread, moneyline numbers, or juice/vig in your reply. ALWAYS translate "
+        "to probability. Say 'Sportsbooks imply 67%' not 'they are -200 favorites'.\n"
+        "• The spread is context only — use it to understand line movement, not to advise "
+        "spread betting. We trade YES/NO contracts, not ATS.\n\n"
         f"IN-SEASON SPORTS (month {datetime.now(timezone.utc).month}):\n"
         "• NBA, NHL: IN SEASON — provide game prices and injury analysis.\n"
         "• NFL, CFB: OFF SEASON — do NOT show game lines or injury reports. "
@@ -6465,11 +6665,14 @@ async def handle_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None
         or todays_games_context
         or crypto_price_context
         or econ_rate_context
+        or sportsbook_context
     )
     if _has_live:
         _blocks = []
         if market_context:
             _blocks.append("market prices")
+        if sportsbook_context:
+            _blocks.append("sportsbook lines")
         if scan_context:
             _blocks.append("scan opportunities")
         if search_context:
@@ -6498,6 +6701,7 @@ async def handle_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None
         + session_context  # today's conversation history (per user)
         + _data_available_hint
         + market_context
+        + sportsbook_context  # live DraftKings/FanDuel lines + implied probability
         + scan_context
         + smart_money_context  # top-scored wallet positions (copy-trade signal)
         + user_positions_context  # user's paper trade positions
@@ -6521,6 +6725,8 @@ async def handle_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None
         _active_ctx_blocks.append("session_history")
     if market_context:
         _active_ctx_blocks.append("market_data")
+    if sportsbook_context:
+        _active_ctx_blocks.append("sportsbook_lines")
     if scan_context:
         _active_ctx_blocks.append("scan_results")
     if smart_money_context:
@@ -6552,6 +6758,7 @@ async def handle_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None
         correction_mode=_is_correction,
         regime_safe=_regime.is_ml_safe,
         user_id=str(update.effective_user.id),
+        max_tokens=600,  # ~450 words — enough for multi-market analysis without verbosity
     )
 
     if reply:
@@ -7060,7 +7267,10 @@ async def injury_refresh_job(ctx: ContextTypes.DEFAULT_TYPE) -> None:
             )
             continue
         try:
-            count = client.fetch_and_store(sport)
+            # fetch_and_store is a blocking sync HTTP call — run in thread pool
+            # so it doesn't freeze the event loop during the background job
+            _inj_loop = asyncio.get_running_loop()
+            count = await _inj_loop.run_in_executor(None, client.fetch_and_store, sport)
             results[sport.upper()] = count
         except Exception as exc:
             log.warning("Injury refresh %s failed: %s", sport.upper(), exc)

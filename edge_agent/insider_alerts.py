@@ -61,10 +61,18 @@ _MAX_MARKETS_PER_RUN = 60         # cap per scan cycle to avoid rate-limiting
 _WALLET_CACHE_TTL    = 3_600      # 1h — don't re-profile the same wallet within 1h
 _DB_PATH = Path(__file__).parent / "memory" / "data" / "insider_alerts.db"
 
-# Categories where insider activity is most common
+# Categories where insider activity is monitored.
+# Sports included: early injury leaks, lineup changes, and match-fixing all
+# show up as fresh wallets placing large bets before public news breaks.
 _INSIDER_CATEGORIES = {
+    # Non-sports (classic insider domains)
     "politics", "geopolitics", "elections", "business", "tech",
     "crypto", "economy", "science", "entertainment",
+    # Sports — fresh wallet + large bet before news breaks
+    "nba", "nhl", "nfl", "mlb", "nfl-super-bowl", "soccer",
+    "sports", "basketball", "football", "hockey", "baseball",
+    "ufc", "mma", "boxing", "tennis", "golf", "ncaa", "march-madness",
+    "college-football", "cfb", "cbb", "wnba",
 }
 
 # ---------------------------------------------------------------------------
