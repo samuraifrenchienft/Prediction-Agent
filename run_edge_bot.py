@@ -428,6 +428,14 @@ CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "")
 OWNER_ID = os.environ.get(
     "TELEGRAM_OWNER_ID", ""
 )  # your personal user ID (from @userinfobot)
+_ALLOWED_USER_IDS_STR = os.environ.get("ALLOWED_USER_IDS", "")
+ALLOWED_USER_IDS: set[int] = set()
+if _ALLOWED_USER_IDS_STR:
+    for uid in _ALLOWED_USER_IDS_STR.replace(" ", "").split(","):
+        try:
+            ALLOWED_USER_IDS.add(int(uid))
+        except ValueError:
+            pass
 ALERT_CHANNEL_ID = os.environ.get(
     "ALERT_CHANNEL_ID", CHAT_ID
 )  # dedicated copy-trade alert channel
@@ -4152,8 +4160,14 @@ async def handle_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None
     user_msg = update.message.text
 
     if not user_msg:
+        log.warning("[handle_message] Ignoring empty message from user_id=%s", user_id)
         return
 
+    log.info(
+        "[handle_message] Processing message from user_id=%s: %r",
+        user_id,
+        user_msg[:80] + "..." if len(user_msg) > 80 else user_msg,
+    )
     await update.message.chat.send_action("typing")
 
     # ── Per-user session + profile ────────────────────────────────────────────
@@ -4367,9 +4381,9 @@ async def handle_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None
                 f"Follow up on YOUR question — do not change topics."
             )
 
-        # 3. Live market context (on-demand, only for market questions)
-        # ── Team name → canonical search tokens (Polymarket uses full city names) ──
-        _TEAM_ALIASES: dict[str, str] = {
+    # 3. Live market context (on-demand, only for market questions)
+    # ── Team name → canonical search tokens (Polymarket uses full city names) ──
+    _TEAM_ALIASES: dict[str, str] = {
             "warriors": "Warriors",
             "golden state": "Warriors",
             "gsw": "Warriors",
@@ -6223,7 +6237,7 @@ async def handle_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None
         "nhl": "NHL",
         "hockey": "NHL",
         "nfl": "NFL",
-        "football": "NFL",
+        "american football": "NFL",
         "mlb": "MLB",
         "baseball": "MLB",
         "soccer": "Soccer",
@@ -6526,7 +6540,10 @@ async def handle_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None
     if econ_rate_context:
         _active_ctx_blocks.append("econ_rates")
 
-    reply = get_chat_response(
+    # Run in thread pool — get_chat_response is sync and can take 30–90s; blocking would
+    # freeze the event loop and make the bot appear unresponsive to all messages.
+    reply = await asyncio.to_thread(
+        get_chat_response,
         prompt,
         task_type="creative",
         system_prompt=system_prompt,
@@ -6536,6 +6553,11 @@ async def handle_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None
         regime_safe=_regime.is_ml_safe,
         user_id=str(update.effective_user.id),
     )
+
+    if reply:
+        log.info("[handle_message] AI responded (%d chars) for user_id=%s", len(reply), user_id)
+    else:
+        log.warning("[handle_message] Primary AI call returned None for user_id=%s", user_id)
 
     # Fallback: if AI failed, try a minimal retry with just the user message + basic market data
     if reply is None:
@@ -6554,7 +6576,8 @@ async def handle_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None
             "If no data is available, say so and suggest what to check. "
             "Keep your reply under 150 words. Be concise and direct."
         )
-        reply = get_chat_response(
+        reply = await asyncio.to_thread(
+            get_chat_response,
             fallback_prompt,
             task_type="simple",
             system_prompt=fallback_system,
@@ -6576,6 +6599,7 @@ async def handle_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None
     if len(reply) > 4000:
         reply = reply[:4000] + "\n\n(truncated)"
 
+    log.info("[handle_message] Sending reply (%d chars) to user_id=%s", len(reply), user_id)
     await update.message.reply_text(reply)
 
 
@@ -7978,6 +8002,25 @@ def main() -> None:
 
     app = Application.builder().token(BOT_TOKEN).build()
 
+    async def _error_handler(
+        update: object, context: "ContextTypes.DEFAULT_TYPE"
+    ) -> None:
+        """Catch handler exceptions and reply to user so they get feedback."""
+        log.error(
+            "Exception in handler: %s",
+            context.error,
+            exc_info=context.error,
+        )
+        if isinstance(update, Update) and update.effective_message:
+            try:
+                await update.effective_message.reply_text(
+                    "Something went wrong on my end. Please try again in a moment."
+                )
+            except Exception:
+                pass
+
+    app.add_error_handler(_error_handler)
+
     # ---------------------------------------------------------------------------
     # Access control — single dev/testing channel (Telegram is internal only)
     #   Layer 1: filters.Chat — only TELEGRAM_CHAT_ID group
@@ -7992,22 +8035,38 @@ def main() -> None:
             "CHAT_ID=%r is not a valid integer — no chat filter applied", CHAT_ID
         )
 
+    _allowed_ids: set[int] = set()
     try:
-        _user_filter = filters.User(int(OWNER_ID)) if OWNER_ID else filters.ALL
+        _allowed_ids = set(ALLOWED_USER_IDS)
         if OWNER_ID:
-            log.info("User filter active: only responding to user_id=%s", OWNER_ID)
+            _allowed_ids.add(int(OWNER_ID))
+        if _allowed_ids:
+            _user_filter = filters.User(list(_allowed_ids))
+            log.info(
+                "User filter active: only responding to user_id in %s",
+                sorted(_allowed_ids),
+            )
         else:
+            _user_filter = filters.ALL
             log.warning(
-                "TELEGRAM_OWNER_ID not set — bot will respond to ALL users in the chat. "
-                "Set TELEGRAM_OWNER_ID in .env to restrict to just your account."
+                "TELEGRAM_OWNER_ID / ALLOWED_USER_IDS not set — bot will respond to ALL users. "
+                "Set them in .env to restrict."
             )
     except (ValueError, TypeError):
+        _allowed_ids = set()
         _user_filter = filters.ALL
         log.warning(
-            "OWNER_ID=%r is not a valid integer — no user filter applied", OWNER_ID
+            "OWNER_ID=%r or ALLOWED_USER_IDS invalid — no user filter applied", OWNER_ID
         )
 
-    _auth_filter = _chat_filter & _user_filter
+    # When no user restriction: respond in ANY chat (group or DM). When restricted: only
+    # CHAT_ID group or DMs from allowed users. This fixes "bot not responding" when
+    # user messages from a group that isn't TELEGRAM_CHAT_ID.
+    if not _allowed_ids:
+        _auth_filter = filters.ALL
+        log.info("Auth: no restrictions — responding in all groups and DMs")
+    else:
+        _auth_filter = (_chat_filter | filters.ChatType.PRIVATE) & _user_filter
 
     # Command handlers
     app.add_handler(CommandHandler("start", cmd_start, filters=_auth_filter))
@@ -8087,7 +8146,7 @@ def main() -> None:
     # Pre-warms the cache so the first user message doesn't trigger a live fetch
     async def _smart_money_refresh_job(ctx: ContextTypes.DEFAULT_TYPE) -> None:
         try:
-            _build_smart_money_context(force_refresh=True)
+            await asyncio.to_thread(_build_smart_money_context, True)  # force_refresh=True
             n_lines = len(_sm_positions_cache["lines"])
             n_new = len(_sm_positions_cache.get("alertable", []))
             log.info(
@@ -8233,9 +8292,37 @@ def _release_instance_lock() -> None:
         pass
 
 
+_SHUTDOWN_TIMEOUT = 8  # seconds before force exit if graceful shutdown hangs
+_shutdown_timer_started = False
+
+
+def _sigint_handler(signum: int, frame: object) -> None:
+    """Ctrl+C: start graceful shutdown, but force exit if it takes >8 seconds."""
+    global _shutdown_timer_started
+    import threading
+
+    if not _shutdown_timer_started:
+        _shutdown_timer_started = True
+
+        def _force_exit() -> None:
+            import time as _t
+
+            _t.sleep(_SHUTDOWN_TIMEOUT)
+            log.warning("Shutdown taking too long — forcing exit.")
+            _release_instance_lock()
+            os._exit(0)
+
+        threading.Thread(target=_force_exit, daemon=True).start()
+    raise KeyboardInterrupt
+
+
 if __name__ == "__main__":
     _acquire_instance_lock()
+    if hasattr(signal, "SIGINT"):
+        signal.signal(signal.SIGINT, _sigint_handler)
     try:
         main()
+    except KeyboardInterrupt:
+        log.info("Bot stopped (Ctrl+C).")
     finally:
         _release_instance_lock()

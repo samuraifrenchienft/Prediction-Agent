@@ -91,15 +91,20 @@ _GROQ_MODEL_MAP: dict[str, str] = {
 }
 
 # Status codes that mean "this model slot is unavailable — try the next one"
-_SKIP_STATUS_CODES = {402, 429, 503}
+_SKIP_STATUS_CODES = {400, 401, 402, 403, 429, 502, 503, 504}
 
 # Circuit breaker — cooldown per model after skip-able errors
 # Avoids retrying a model we know is down for the next N seconds
 _MODEL_COOLDOWNS: dict[str, float] = {}   # model_id → expiry timestamp
 _COOLDOWN_SECS = {
+    400: 60,     # bad request (e.g. too long) → 1 min
+    401: 300,    # invalid API key → 5 min
     402: 3600,   # out of credits → 1 hour cooldown
+    403: 3600,   # geo-blocked / access denied (e.g. Groq in some regions) → 1 hr
     429: 120,    # rate limit → 2 min cooldown
+    502: 60,     # bad gateway (transient) → 1 min cooldown
     503: 300,    # unavailable → 5 min cooldown
+    504: 60,     # gateway timeout (transient) → 1 min cooldown
 }
 _CONNECTION_COOLDOWN = 60  # connection error → 1 min cooldown
 
@@ -117,12 +122,7 @@ def _get_candidates(task_type: str) -> list[tuple[OpenAI, str]]:
     """
     candidates: list[tuple[OpenAI, str]] = []
 
-    or_key = os.environ.get("OPEN_ROUTER_API_KEY")
-    if or_key:
-        or_client = OpenAI(base_url="https://openrouter.ai/api/v1", api_key=or_key)
-        for model in _OR_FREE_MAP.get(task_type, _OR_FREE_SIMPLE):
-            candidates.append((or_client, model))
-
+    # Groq first — free, fast, usually available
     groq_key = os.environ.get("GROQ_API_KEY")
     if groq_key:
         groq_client = OpenAI(
@@ -132,12 +132,18 @@ def _get_candidates(task_type: str) -> list[tuple[OpenAI, str]]:
             (groq_client, _GROQ_MODEL_MAP.get(task_type, "llama-3.1-8b-instant"))
         )
 
-    # DeepSeek — OpenAI-compatible, ultra-cheap overflow ($0.028/1M input cache hit)
-    # Sign up: https://platform.deepseek.com
+    # DeepSeek second — cheap, reliable
     deepseek_key = os.environ.get("DEEPSEEK_API_KEY", "").strip()
     if deepseek_key:
         _ds_client = OpenAI(base_url="https://api.deepseek.com", api_key=deepseek_key)
         candidates.append((_ds_client, "deepseek-chat"))
+
+    # OpenRouter free tier last — often 402/429/503
+    or_key = os.environ.get("OPEN_ROUTER_API_KEY")
+    if or_key:
+        or_client = OpenAI(base_url="https://openrouter.ai/api/v1", api_key=or_key)
+        for model in _OR_FREE_MAP.get(task_type, _OR_FREE_SIMPLE):
+            candidates.append((or_client, model))
 
     if not candidates:
         raise ValueError(
@@ -293,8 +299,11 @@ def get_chat_response(
                 # No response_format constraint — plain text allowed
             )
             result = response.choices[0].message.content
+            if not result or not str(result).strip():
+                log.warning("[AI] %s returned empty content — trying next model", model)
+                continue
             latency_ms = int((time.monotonic() - t0) * 1000)
-            log.debug("[AI] get_chat_response ✓ model=%s latency=%dms", model, latency_ms)
+            log.info("[AI] get_chat_response ✓ model=%s latency=%dms", model, latency_ms)
 
             # Audit log — fire-and-forget, never raises
             if _decision_log is not None:
@@ -321,21 +330,29 @@ def get_chat_response(
             if exc.status_code in _SKIP_STATUS_CODES:
                 _MODEL_COOLDOWNS[model] = time.time() + _COOLDOWN_SECS.get(exc.status_code, 60)
                 log.warning(
-                    "[AI] %s → HTTP %d — cooldown %ds, trying next model",
+                    "[AI] %s → HTTP %d — cooldown %ds, trying next model: %s",
                     model, exc.status_code, _COOLDOWN_SECS.get(exc.status_code, 60),
+                    str(exc)[:120],
                 )
                 continue
-            log.error("[AI] get_chat_response fatal error (model=%s): %s", model, exc)
+            log.error("[AI] get_chat_response fatal (model=%s) HTTP %d: %s", model, exc.status_code, exc)
             return None
 
         except APIConnectionError as exc:
             _MODEL_COOLDOWNS[model] = time.time() + _CONNECTION_COOLDOWN
-            log.warning("[AI] %s → connection error — cooldown %ds, trying next model: %s", model, _CONNECTION_COOLDOWN, exc)
+            log.warning(
+                "[AI] %s → connection error — cooldown %ds: %s",
+                model, _CONNECTION_COOLDOWN, exc,
+            )
             continue
 
         except Exception as exc:
-            log.error("[AI] get_chat_response unexpected error (model=%s): %s", model, exc)
-            return None
+            log.error("[AI] get_chat_response unexpected (model=%s): %s", model, exc, exc_info=True)
+            continue  # try next model instead of giving up
 
-    log.error("[AI] All models exhausted for get_chat_response (task=%s)", task_type)
+    log.error(
+        "[AI] All models exhausted for get_chat_response (task=%s). "
+        "Check API keys and console for HTTP/connection errors.",
+        task_type,
+    )
     return None
