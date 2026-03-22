@@ -54,27 +54,36 @@ def set_decision_log(dlog: object) -> None:
 # 503 = model unavailable → skip
 # ---------------------------------------------------------------------------
 
-# Updated 2026-03-15 — pruned retired models, added current free-tier options.
+# Updated 2026-03-21 — reflects current free-tier availability on OpenRouter.
 # Check https://openrouter.ai/models?q=free for latest availability.
 _OR_FREE_SIMPLE: list[str] = [
     "stepfun/step-3.5-flash:free",              # 256k ctx — fast, reliable
     "nvidia/nemotron-3-nano-30b-a3b:free",       # 256k ctx — small but capable
+    "minimax/minimax-m2.5:free",                 # large ctx — capable
+    "arcee-ai/trinity-large-preview:free",        # 131k ctx — solid
     "liquid/lfm-2.5-1.2b-instruct:free",         # 32k ctx — ultra-fast fallback
-    "arcee-ai/trinity-mini:free",                 # 131k ctx — lightweight
+    "liquid/lfm-2.5-1.2b-thinking:free",         # 32k ctx — thinking fallback
+    "openrouter/free",                            # generic free tier last resort
 ]
 
 _OR_FREE_COMPLEX: list[str] = [
     "nvidia/nemotron-3-super-120b-a12b:free",    # 262k ctx — strongest free model
+    "minimax/minimax-m2.5:free",                 # large ctx — capable
     "arcee-ai/trinity-large-preview:free",        # 131k ctx — solid all-rounder
     "stepfun/step-3.5-flash:free",                # 256k ctx — fast fallback
-    "nvidia/nemotron-3-nano-30b-a3b:free",        # 256k ctx — last resort
+    "nvidia/nemotron-3-nano-30b-a3b:free",        # 256k ctx — fallback
+    "liquid/lfm-2.5-1.2b-thinking:free",         # 32k ctx — last resort
+    "openrouter/free",                            # generic free tier last resort
 ]
 
 _OR_FREE_CREATIVE: list[str] = [
     "nvidia/nemotron-3-super-120b-a12b:free",    # 262k ctx — strongest free model
+    "minimax/minimax-m2.5:free",                 # large ctx — capable
     "arcee-ai/trinity-large-preview:free",        # 131k ctx — solid all-rounder
     "stepfun/step-3.5-flash:free",                # 256k ctx — fast fallback
-    "nvidia/nemotron-3-nano-30b-a3b:free",        # 256k ctx — last resort
+    "nvidia/nemotron-3-nano-30b-a3b:free",        # 256k ctx — fallback
+    "liquid/lfm-2.5-1.2b-thinking:free",         # 32k ctx — last resort
+    "openrouter/free",                            # generic free tier last resort
 ]
 
 _OR_FREE_MAP: dict[str, list[str]] = {
@@ -83,11 +92,26 @@ _OR_FREE_MAP: dict[str, list[str]] = {
     "creative": _OR_FREE_CREATIVE,
 }
 
-# Groq free fallback models
-_GROQ_MODEL_MAP: dict[str, str] = {
-    "simple":   "llama-3.1-8b-instant",
-    "complex":  "llama-3.3-70b-versatile",
-    "creative": "llama-3.3-70b-versatile",
+# Groq free models — tried in order per task type
+_GROQ_MODELS_SIMPLE: list[str] = [
+    "llama-3.3-70b-versatile",      # most capable free Groq model
+    "gemma2-9b-it",                  # fast, reliable fallback
+    "mixtral-8x7b-32768",           # solid fallback
+    "llama-3.1-8b-instant",         # ultra-fast (may 403 in some regions)
+    "llama-3.2-3b-preview",         # last resort
+]
+
+_GROQ_MODELS_COMPLEX: list[str] = [
+    "llama-3.3-70b-versatile",      # most capable
+    "gemma2-9b-it",                  # reliable fallback
+    "mixtral-8x7b-32768",           # solid fallback
+    "llama-3.1-8b-instant",         # smaller fallback
+]
+
+_GROQ_MODEL_MAP: dict[str, list[str]] = {
+    "simple":   _GROQ_MODELS_SIMPLE,
+    "complex":  _GROQ_MODELS_COMPLEX,
+    "creative": _GROQ_MODELS_COMPLEX,
 }
 
 # Status codes that mean "this model slot is unavailable — try the next one"
@@ -117,33 +141,32 @@ def _get_candidates(task_type: str) -> list[tuple[OpenAI, str]]:
     """
     Return an ordered list of (client, model_id) pairs to try.
 
-    OpenRouter free models come first (multiple fallbacks within the free tier),
-    followed by Groq as a final-resort fallback.
+    Order: OpenRouter free models (most options) → Groq (multiple models) → DeepSeek
+    Circuit breaker skips any model in cooldown automatically.
     """
     candidates: list[tuple[OpenAI, str]] = []
 
-    # Groq first — free, fast, usually available
-    groq_key = os.environ.get("GROQ_API_KEY")
-    if groq_key:
-        groq_client = OpenAI(
-            base_url="https://api.groq.com/openai/v1", api_key=groq_key
-        )
-        candidates.append(
-            (groq_client, _GROQ_MODEL_MAP.get(task_type, "llama-3.1-8b-instant"))
-        )
-
-    # DeepSeek second — cheap, reliable
-    deepseek_key = os.environ.get("DEEPSEEK_API_KEY", "").strip()
-    if deepseek_key:
-        _ds_client = OpenAI(base_url="https://api.deepseek.com", api_key=deepseek_key)
-        candidates.append((_ds_client, "deepseek-chat"))
-
-    # OpenRouter free tier last — often 402/429/503
+    # OpenRouter free tier first — 7 models, best coverage
     or_key = os.environ.get("OPEN_ROUTER_API_KEY")
     if or_key:
         or_client = OpenAI(base_url="https://openrouter.ai/api/v1", api_key=or_key)
         for model in _OR_FREE_MAP.get(task_type, _OR_FREE_SIMPLE):
             candidates.append((or_client, model))
+
+    # Groq — multiple free models tried in order
+    groq_key = os.environ.get("GROQ_API_KEY")
+    if groq_key:
+        groq_client = OpenAI(
+            base_url="https://api.groq.com/openai/v1", api_key=groq_key
+        )
+        for model in _GROQ_MODEL_MAP.get(task_type, _GROQ_MODELS_SIMPLE):
+            candidates.append((groq_client, model))
+
+    # DeepSeek last — often 402 (free tier depleted)
+    deepseek_key = os.environ.get("DEEPSEEK_API_KEY", "").strip()
+    if deepseek_key:
+        _ds_client = OpenAI(base_url="https://api.deepseek.com", api_key=deepseek_key)
+        candidates.append((_ds_client, "deepseek-chat"))
 
     if not candidates:
         raise ValueError(
