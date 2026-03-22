@@ -617,6 +617,19 @@ class InsiderAlertEngine:
         return "\n".join(lines)
 
     # ------------------------------------------------------------------
+    # Per-market wallet dedup — avoid spamming the same alert across cycles
+    # ------------------------------------------------------------------
+
+    def _already_alerted(self, wallet: str, condition_id: str, window_hours: int = 24) -> bool:
+        """Return True if we already fired an alert for this wallet+market in the last window_hours."""
+        cutoff = time.time() - window_hours * 3600
+        row = self._conn.execute(
+            "SELECT 1 FROM alert_log WHERE wallet = ? AND condition_id = ? AND fired_at >= ?",
+            (wallet, condition_id, cutoff),
+        ).fetchone()
+        return row is not None
+
+    # ------------------------------------------------------------------
     # Alert persistence
     # ------------------------------------------------------------------
 
@@ -719,6 +732,22 @@ class InsiderAlertEngine:
             if not cid:
                 continue
 
+            # Skip non-insider categories (sports markets are not insider-tradeable)
+            tags = market.get("tags") or []
+            if isinstance(tags, str):
+                try:
+                    tags = json.loads(tags)
+                except Exception:
+                    tags = []
+            tag_slugs = {
+                (t.get("slug") or t.get("label") or t if isinstance(t, str) else "").lower()
+                for t in tags
+            }
+            # If any tag slug overlaps with insider categories, allow it.
+            # If no tags match AND the set isn't empty (i.e., tags exist), skip.
+            if tag_slugs and not tag_slugs.intersection(_INSIDER_CATEGORIES):
+                continue
+
             # Current YES price
             try:
                 prices = market.get("outcomePrices") or []
@@ -764,13 +793,20 @@ class InsiderAlertEngine:
             if not trades:
                 continue
 
-            # Filter to large recent trades from unknown wallets
+            # Filter to large recent BUY trades from unknown wallets
             now = time.time()
-            cutoff = now - 600   # last 10 minutes (our scan interval is 5 min, buffer 2x)
+            cutoff = now - 900   # last 15 minutes — 3× scan interval avoids dropping trades during API delays
 
             for trade in trades:
                 trade_id = trade.get("id") or trade.get("tradeId") or ""
                 if not trade_id or not self._is_new_trade(trade_id):
+                    continue
+
+                # Only flag BUY orders — insiders accumulate YES (or NO) positions,
+                # they don't sell. SELL orders from the maker's perspective = reducing exposure.
+                side = (trade.get("side") or trade.get("makerSide") or "").upper()
+                if side and side not in ("BUY", ""):
+                    self._mark_trade_seen(trade_id, cid, "", 0)
                     continue
 
                 # Parse trade fields (CLOB format varies slightly)
@@ -784,16 +820,16 @@ class InsiderAlertEngine:
                     continue
 
                 # Trade size in USD
+                # CLOB returns size in SHARES (tokens), usdcSize in USD.
+                # Always prefer usdcSize; when absent, compute shares × price.
                 try:
-                    size = float(
-                        trade.get("usdcSize")
-                        or trade.get("matchedAmount")
-                        or trade.get("size", 0)
-                    )
-                    price_fill = float(trade.get("price") or current_price)
-                    if size < 1 and price_fill > 0:
-                        # size might be in shares — convert to USD
-                        size = size * price_fill
+                    usdc_size = trade.get("usdcSize") or trade.get("matchedAmount")
+                    if usdc_size is not None:
+                        size = float(usdc_size)
+                    else:
+                        shares = float(trade.get("size") or 0)
+                        price_fill = float(trade.get("price") or current_price)
+                        size = shares * price_fill if price_fill > 0 else shares
                 except (TypeError, ValueError):
                     size = 0.0
 
@@ -833,6 +869,14 @@ class InsiderAlertEngine:
 
                 if result.score < _SUSPICION_FIRE_THR:
                     continue  # not interesting enough
+
+                # Dedup: don't re-alert the same wallet on the same market within 24h
+                if self._already_alerted(wallet, cid):
+                    log.debug(
+                        "[insider] Skipping duplicate alert: wallet=%s market=%s",
+                        wallet[:10], question[:40],
+                    )
+                    continue
 
                 # AI research
                 research = self._research_market(question)
