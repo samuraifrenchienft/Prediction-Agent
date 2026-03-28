@@ -98,7 +98,7 @@ from edge_agent import (
     PolymarketAdapter,
     PortfolioState,
 )
-from edge_agent.ai_service import get_chat_response
+from edge_agent.ai_service import get_chat_response, get_model_status, get_retry_eta
 from edge_agent.memory import KnowledgeBase, SessionMemory
 from edge_agent.game_tracker import TrackedGame
 from edge_agent.models import Recommendation
@@ -655,7 +655,13 @@ _ai_svc_mod.set_decision_log(_decision_log)
 # spawning a new DB connection on every /traders, /wallet, /watch invocation
 from edge_agent.memory.trader_cache import TraderCache as _TraderCache
 from edge_agent.insider_alerts import InsiderAlertEngine as _InsiderAlertEngine
-from edge_agent.sportsbook_odds import build_sportsbook_context as _build_sportsbook_context
+from edge_agent.sportsbook_odds import (
+    build_sportsbook_context as _build_sportsbook_context,
+    build_multibook_context as _build_multibook_context,
+    get_line_movement as _get_line_movement,
+    fetch_player_props as _fetch_player_props,
+    format_props as _format_props,
+)
 
 _trader_cache: "_TraderCache | None" = None
 
@@ -769,7 +775,17 @@ _SIGNAL_EMOJI = {
     "PRE_GAME_INJURY_LAG": "🏥",
     "NEWS_LAG": "📰",
     "FAVORITE_LONGSHOT_BIAS": "📈",
+    "CROSS_MARKET_CORRELATION": "🔗",
     "NONE": "📊",
+}
+
+_SIGNAL_DESC = {
+    "INJURY_MOMENTUM_REVERSAL": "Live game — key player just got injured, market hasn't repriced yet",
+    "PRE_GAME_INJURY_LAG": "Pre-game injury news detected, market price hasn't caught up",
+    "NEWS_LAG": "Breaking news strongly suggests a direction the market hasn't priced in",
+    "FAVORITE_LONGSHOT_BIAS": "Market statistically overprices underdogs — favorite is undervalued",
+    "CROSS_MARKET_CORRELATION": "A related market moved; this one hasn't followed yet",
+    "NONE": "General edge detected",
 }
 
 _QUAL_EMOJI = {
@@ -821,13 +837,16 @@ def _fmt_alert(rec: Recommendation) -> str:
     sem = _SIGNAL_EMOJI.get(signal, "📊")
     qem = _QUAL_EMOJI.get(rec.qualification_state.value, "")
     question = _e(rec.metadata.get("question") or rec.market_id)
+    signal_desc = _SIGNAL_DESC.get(signal, "")
 
     lines = [
         f"{sem} <b>{_e(signal)}</b>  {qem} {_e(rec.action)}",
+        f"<i>{_e(signal_desc)}</i>",
         f"<i>{question[:90]}</i>",
         f"Venue: {_e(rec.venue.value)}",
         "",
         f"Market: {rec.market_prob:.1%}  →  Agent: {rec.agent_prob:.1%}",
+        f"<i>Edge = difference between what market prices and what the agent estimates</i>",
         f"Edge: <code>{rec.edge:+.1%}</code>  |  EV net: <code>{rec.ev_net:+.2%}</code>",
         f"Confidence: {rec.confidence:.0%}",
     ]
@@ -1267,48 +1286,54 @@ async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         else "🔓 Alerting on all qualified signals (approve an alert to filter)."
     )
     await update.message.reply_text(
-        "👋 <b>EDGE — Prediction Market Intelligence Agent</b>\n\n"
-        "I scan Polymarket and Kalshi for mispriced markets, vet smart money wallets, "
-        "track injuries, and help you understand prediction market trading.\n\n"
-        "<b>🔍 Market Analysis</b>\n"
-        "/scan — run live market scan for edge opportunities\n"
-        "/top — top 3 highest-EV opportunities right now\n"
-        "/status — last scan summary\n"
-        "/performance — signal history, EDGE win rate + your paper P&amp;L\n\n"
-        "<b>📊 Paper Trading</b>\n"
-        "/mytrades — your open picks + settled history + P&amp;L\n"
-        "<i>Tap 📈 YES / 📉 NO on any alert to paper trade it</i>\n\n"
-        "<b>👛 Trader Intel</b>\n"
-        "/traders — top smart money traders (auto-cached)\n"
-        "/traders politics — filter by category (sports/crypto/politics)\n"
-        "/wallet 0x… — deep vet any Polymarket wallet address\n\n"
-        "<b>🏥 Injury Tracking</b>\n"
-        "/injuries — injury cache summary\n"
-        "/injuries nba|nfl|nhl|cfb|cbb|wnba|ncaaw — full league injury list\n"
-        "/injuries nfl chiefs — filter by team\n"
-        "/tracking — injury game tracking list\n\n"
-        "<b>📊 Standings &amp; Odds</b>\n"
-        "/standings — championship favorites (all sports, Polymarket odds)\n"
-        "/standings nba|nfl|mlb|nhl|wnba|cfb|cbb|ncaaw — full table + odds\n"
-        "/standings mls|epl|laliga|bundesliga|seriea|ligue1|ucl — soccer tables\n"
-        "/standings f1 — F1 driver + constructor standings\n"
-        "/standings pga — PGA Tour current leaderboard\n\n"
-        "<b>🌤️ Specialist Scanners</b>\n"
-        "/weatherscan — weather market gaps vs Open-Meteo 7-day forecast\n"
-        "/cryptoscan — crypto market gaps vs Binance lognormal model\n"
-        "/fedscan — Fed/econ market gaps vs NY Fed + Treasury yield curve\n\n"
-        "<b>🔍 Insider Alerts</b>\n"
-        "/insider — recent insider alert log (fresh wallet + large bet signals)\n\n"
-        "<b>⚙️ Settings</b>\n"
-        "/profile — see what EDGE knows about you\n"
-        "/forget &lt;key&gt; — remove stored info (e.g. /forget city)\n"
-        "/approvals — manage alert signal filters\n"
-        "/help — show this message\n\n"
+        "👋 <b>EDGE — Prediction Market Intelligence Agent</b>\n"
+        "I scan Polymarket and Kalshi for mispriced markets, track injuries, vet smart money, "
+        "and help you learn prediction market trading.\n\n"
+
+        "━━━━━━━━━━━━━━━━━━━━\n"
+        "🆕 <b>NEW HERE? Start with these 3 steps:</b>\n"
+        "1️⃣ Ask me: <i>\"how do I get started on Polymarket?\"</i>\n"
+        "2️⃣ Run /scan to see live opportunities\n"
+        "3️⃣ Tap 📈 YES or 📉 NO on any alert to paper trade risk-free\n"
+        "💬 <b>Ask me anything</b> — odds, strategies, how markets work, what a signal means\n\n"
+
+        "━━━━━━━━━━━━━━━━━━━━\n"
+        "📊 <b>CORE COMMANDS</b>\n"
+        "/scan — find mispriced markets right now\n"
+        "/top — top 3 highest-edge opportunities\n"
+        "/mytrades — your paper trade picks + P&amp;L\n"
+        "/performance — your win rate and signal history\n"
+        "/injuries [sport] — live injury reports (nba/nfl/nhl/mlb)\n"
+        "/standings [sport] — championship odds + league tables\n\n"
+
+        "━━━━━━━━━━━━━━━━━━━━\n"
+        "🧠 <b>SMART MONEY</b>\n"
+        "/traders — top Polymarket wallets ranked by win rate\n"
+        "/insider — large bets + fresh wallet activity\n"
+        "/wallet 0x… — deep profile of any Polymarket wallet\n\n"
+
+        "━━━━━━━━━━━━━━━━━━━━\n"
+        "📈 <b>SPORTSBOOK TOOLS</b>\n"
+        "/lines [sport] — live odds across DraftKings/FanDuel/BetMGM + line movement\n"
+        "/props &lt;team&gt; [sport] [player] — player prop bets for tonight's game\n"
+        "/search [keyword] — search Polymarket for any topic or market\n\n"
+
+        "━━━━━━━━━━━━━━━━━━━━\n"
+        "🔬 <b>SPECIALIST SCANNERS</b>\n"
+        "/cryptoscan — crypto markets vs Binance live prices\n"
+        "/fedscan — Fed/econ markets vs yield curve data\n"
+        "/weatherscan — weather markets vs forecast data\n\n"
+
+        "━━━━━━━━━━━━━━━━━━━━\n"
+        "⚙️ <b>SETTINGS</b>\n"
+        "/profile — your stored preferences\n"
+        "/setstake &lt;amount&gt; — set paper trade stake size (default $10)\n"
+        "/approvals — filter which signals alert you\n"
+        "/mlstatus — AI engine + model rotation status\n\n"
+
         f"{filter_note}\n"
         f"⏱ Auto-scan every {SCAN_INTERVAL_MIN // 60}h | "
-        "Injury refresh: 9am, 1:30pm, 4:30pm PT | Specialist scan: every 4h\n\n"
-        "💬 <b>Chat with me anytime</b> — ask about markets, platform setup, "
-        "how to deposit USDC, Kalshi fees, or anything prediction market related.",
+        "Injuries: 9am/1:30pm/4:30pm PT",
         parse_mode=ParseMode.HTML,
     )
 
@@ -1387,6 +1412,50 @@ async def cmd_forget(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         )
 
 
+def _get_user_stake(user_id: int) -> float:
+    """Return the user's configured paper trade stake (default $10)."""
+    try:
+        profile = _profiles.get_or_create(user_id)
+        return float(profile.get("trading_prefs", {}).get("paper_stake", 10.0))
+    except Exception:
+        return 10.0
+
+
+async def cmd_setstake(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    """
+    /setstake <amount>  — set your paper trade stake size (e.g. /setstake 25).
+    Range: $1–$10,000. This is virtual money — no real funds are used.
+    """
+    user_id = update.effective_user.id
+    raw = " ".join(ctx.args or []).strip().lstrip("$")
+    if not raw:
+        current = _get_user_stake(user_id)
+        await update.message.reply_text(
+            f"Your current paper stake is <b>${current:.0f}</b> per trade.\n\n"
+            "Usage: <code>/setstake 25</code> — sets stake to $25\n"
+            "Range: $1–$10,000 (virtual money only)",
+            parse_mode=ParseMode.HTML,
+        )
+        return
+
+    try:
+        amount = float(raw)
+    except ValueError:
+        await update.message.reply_text("Please enter a number. Example: <code>/setstake 25</code>", parse_mode=ParseMode.HTML)
+        return
+
+    if amount < 1 or amount > 10_000:
+        await update.message.reply_text("Stake must be between $1 and $10,000.")
+        return
+
+    _profiles.set_trading_pref(user_id, "paper_stake", round(amount, 2))
+    await update.message.reply_text(
+        f"✅ Paper stake set to <b>${amount:.0f}</b> per trade.\n"
+        "This is virtual money — no real funds are used.",
+        parse_mode=ParseMode.HTML,
+    )
+
+
 async def cmd_scan(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     await update.message.reply_text("🔍 Running scan...")
     result = await _run_scan(ctx.bot, notify=True)
@@ -1449,6 +1518,220 @@ async def cmd_top(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
                 "All markets were priced efficiently or below depth/volume thresholds.\n"
                 "Try again after more markets open."
             )
+
+
+async def cmd_search(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    """
+    /search <keyword>  — search Polymarket for markets matching a keyword/topic.
+    Examples: /search bitcoin  /search election  /search fed rate
+    """
+    import requests as _req
+
+    query = " ".join(ctx.args or []).strip()
+    if not query:
+        await update.message.reply_text(
+            "Usage: <code>/search &lt;keyword&gt;</code>\n"
+            "Examples:\n"
+            "  /search bitcoin\n"
+            "  /search fed rate\n"
+            "  /search trump\n"
+            "  /search nba finals",
+            parse_mode=ParseMode.HTML,
+        )
+        return
+
+    await update.message.chat.send_action("typing")
+    try:
+        resp = _req.get(
+            "https://gamma-api.polymarket.com/markets",
+            params={
+                "active": "true",
+                "closed": "false",
+                "limit": 8,
+                "sort_by": "volume24hr",
+                "ascending": "false",
+                "search": query,
+            },
+            timeout=8,
+        )
+        resp.raise_for_status()
+        markets = resp.json()
+    except Exception as exc:
+        await update.message.reply_text(f"Search failed: {exc}")
+        return
+
+    if not markets:
+        await update.message.reply_text(
+            f"No active Polymarket markets found for <b>{_e(query)}</b>.\n"
+            "Try a broader term (e.g. 'bitcoin' instead of 'BTC price').",
+            parse_mode=ParseMode.HTML,
+        )
+        return
+
+    lines = [f"🔍 <b>Polymarket: \"{_e(query)}\"</b>  ({len(markets)} results)\n"]
+    for m in markets:
+        question = _e((m.get("question") or m.get("groupItemTitle") or "Unknown")[:80])
+        try:
+            prices = json.loads(m.get("outcomePrices") or "[0.5,0.5]")
+            yes_prob = float(prices[0]) * 100
+        except Exception:
+            yes_prob = 50.0
+        vol = m.get("volume24hr") or m.get("volumeNum") or 0
+        vol_str = f"${float(vol):,.0f}" if vol else "—"
+        end = (m.get("endDate") or "")[:10]
+        lines.append(
+            f"• <i>{question}</i>\n"
+            f"  YES: <b>{yes_prob:.0f}%</b>  |  Vol 24h: {vol_str}  |  Ends: {end}"
+        )
+
+    lines.append("\n💬 Ask me about any of these markets for full analysis.")
+    await _send_chunked(
+        update.message.reply_text,
+        "\n".join(lines),
+        parse_mode=ParseMode.HTML,
+    )
+
+
+async def cmd_lines(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    """
+    /lines [sport]  — show live sportsbook lines across all books + recent line movement.
+    Defaults to NBA. Use /lines nfl, /lines mlb, /lines nhl, etc.
+    """
+    sport = (ctx.args[0] if ctx.args else "nba").lower()
+    _VALID_SPORTS = {"nba", "nfl", "mlb", "nhl", "ncaa", "wnba", "ufc", "soccer", "epl", "mls"}
+    if sport not in _VALID_SPORTS:
+        await update.message.reply_text(
+            f"Unknown sport <b>{_e(sport)}</b>.\n"
+            f"Options: {', '.join(sorted(_VALID_SPORTS))}",
+            parse_mode=ParseMode.HTML,
+        )
+        return
+
+    await update.message.chat.send_action("typing")
+
+    import asyncio
+    loop = asyncio.get_event_loop()
+
+    try:
+        from edge_agent.sportsbook_odds import fetch_odds as _fetch_odds_raw
+        games = await loop.run_in_executor(None, _fetch_odds_raw, sport)
+    except Exception as exc:
+        await update.message.reply_text(f"Failed to fetch lines: {exc}")
+        return
+
+    if not games:
+        await update.message.reply_text(
+            f"No {sport.upper()} lines available. Check that <code>THE_ODDS_API_KEY</code> is set "
+            "and the sport is in-season.",
+            parse_mode=ParseMode.HTML,
+        )
+        return
+
+    # Build multi-book blocks for each game (up to 5 games)
+    out_parts: list[str] = [f"📋 <b>{sport.upper()} — Live Lines</b>"]
+    shown = 0
+    for game in games[:5]:
+        home = game.get("home_team", "")
+        away = game.get("away_team", "")
+        mb = await loop.run_in_executor(None, _build_multibook_context, [home, away], sport)
+        if mb:
+            out_parts.append(mb)
+            shown += 1
+
+    if shown == 0:
+        out_parts.append("No bookmaker lines found for today's games.")
+
+    # Line movement section
+    try:
+        movement_text = await loop.run_in_executor(None, _get_line_movement, sport)
+        if movement_text:
+            out_parts.append("\n" + movement_text)
+        else:
+            out_parts.append("\n📊 <i>No line movement detected since last check.</i>")
+    except Exception:
+        pass
+
+    out_parts.append(
+        "\n<i>★ = best available line across books. "
+        "Refresh in 30 min to detect new movement.</i>"
+    )
+
+    await _send_chunked(
+        update.message.reply_text,
+        "\n".join(out_parts),
+        parse_mode=ParseMode.HTML,
+    )
+
+
+async def cmd_props(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    """
+    /props <team> [sport] [player]
+    Show player prop bets for tonight's game featuring the given team.
+
+    Examples:
+      /props lakers          — all Lakers player props (NBA assumed)
+      /props lakers nba      — explicit sport
+      /props lakers nba lebron — filter to LeBron's props only
+    """
+    args = ctx.args or []
+    if not args:
+        await update.message.reply_text(
+            "Usage: <code>/props &lt;team&gt; [sport] [player name]</code>\n\n"
+            "Examples:\n"
+            "  /props lakers\n"
+            "  /props chiefs nfl\n"
+            "  /props yankees mlb judge",
+            parse_mode=ParseMode.HTML,
+        )
+        return
+
+    team = args[0]
+    sport = "nba"
+    player_filter = ""
+
+    if len(args) >= 2:
+        _VALID_SPORTS = {"nba", "nfl", "mlb", "nhl", "ncaa", "wnba"}
+        if args[1].lower() in _VALID_SPORTS:
+            sport = args[1].lower()
+            player_filter = " ".join(args[2:]) if len(args) > 2 else ""
+        else:
+            # Second arg not a sport — treat rest as player filter
+            player_filter = " ".join(args[1:])
+
+    await update.message.chat.send_action("typing")
+
+    import asyncio
+    loop = asyncio.get_event_loop()
+
+    try:
+        props = await loop.run_in_executor(None, _fetch_player_props, sport, team)
+    except Exception as exc:
+        await update.message.reply_text(f"Props fetch failed: {exc}")
+        return
+
+    if not props:
+        await update.message.reply_text(
+            f"No player props found for <b>{_e(team)}</b> ({sport.upper()}).\n\n"
+            "This could mean:\n"
+            "• Game hasn't opened for props yet\n"
+            "• Team not playing today\n"
+            "• Sport not in season\n"
+            "• <code>THE_ODDS_API_KEY</code> not set",
+            parse_mode=ParseMode.HTML,
+        )
+        return
+
+    formatted = _format_props(props, player_filter=player_filter)
+    header = (
+        f"🎯 <b>{team.title()} Props</b> ({sport.upper()})"
+        + (f" — <i>{_e(player_filter)}</i>" if player_filter else "")
+        + f"\n{len(props)} lines from DraftKings/FanDuel/BetMGM\n"
+    )
+    await _send_chunked(
+        update.message.reply_text,
+        header + formatted,
+        parse_mode=ParseMode.HTML,
+    )
 
 
 async def cmd_traders(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
@@ -2240,7 +2523,7 @@ async def cmd_watch(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
 
     cache.watchlist_add(
         address=addr,
-        display_name="",
+        display_name=note,
         added_by=str(update.effective_user.id),
         note=note,
     )
@@ -2583,20 +2866,22 @@ async def handle_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> Non
                 return
             signal_id = sig_row["signal_id"]
             entry_prob = sig_row["entry_prob"]
+            user_stake = _get_user_stake(user_id)
             recorded = _ot.record_user_pick(
                 signal_id=signal_id,
                 market_id=rec.market_id,
                 user_id=user_id,
                 side=f"FADE_{fade_side}",  # tagged as fade in DB
+                stake=user_stake,
             )
             if not recorded:
                 await query.answer("You already picked this one.", show_alert=True)
                 return
             prob = entry_prob or rec.market_prob or 0.5
             f_prob = (1 - prob) if fade_side == "YES" else prob
-            payout = round(10 * (1 / max(f_prob, 0.01) - 1), 2)
+            payout = round(user_stake * (1 / max(f_prob, 0.01) - 1), 2)
             await query.answer(
-                f"{fade_label}\nPaper $10 @ {f_prob:.0%} — Win = +${payout:.2f} | Loss = -$10.00\n"
+                f"{fade_label}\nPaper ${user_stake:.0f} @ {f_prob:.0%} — Win = +${payout:.2f} | Loss = -${user_stake:.0f}\n"
                 "EDGE will track resolution automatically.",
                 show_alert=True,
             )
@@ -2636,12 +2921,14 @@ async def handle_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> Non
 
             signal_id = sig_row["signal_id"]
             entry_prob = sig_row["entry_prob"]
+            user_stake = _get_user_stake(user_id)
 
             recorded = _ot.record_user_pick(
                 signal_id=signal_id,
                 market_id=rec.market_id,
                 user_id=user_id,
                 side=side,
+                stake=user_stake,
             )
 
             if not recorded:
@@ -2651,14 +2938,14 @@ async def handle_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> Non
             # Show confirmation with implied payout
             prob = entry_prob or rec.market_prob or 0.5
             payout = (
-                round(10 * (1 / max(prob, 0.01) - 1), 2)
+                round(user_stake * (1 / max(prob, 0.01) - 1), 2)
                 if side.upper() == "YES"
-                else round(10 * (1 / max(1 - prob, 0.01) - 1), 2)
+                else round(user_stake * (1 / max(1 - prob, 0.01) - 1), 2)
             )
             side_emoji = "📈" if side.upper() == "YES" else "📉"
             await query.answer(
-                f"{side_emoji} Picked {side.upper()} — paper $10 @ {prob:.0%}\n"
-                f"Win = +${payout:.2f} | Loss = -$10.00\n"
+                f"{side_emoji} Picked {side.upper()} — paper ${user_stake:.0f} @ {prob:.0%}\n"
+                f"Win = +${payout:.2f} | Loss = -${user_stake:.0f}\n"
                 "EDGE will track resolution automatically.",
                 show_alert=True,
             )
@@ -4178,6 +4465,23 @@ async def handle_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None
     # Checked before AI so the right handler runs with the right data.
     _q = user_msg.lower().strip()
 
+    # Greeting shortcut — no AI needed, instant reply
+    _greetings = {
+        "hi", "hey", "hello", "yo", "sup", "wassup", "what's up", "whats up",
+        "morning", "good morning", "gm", "afternoon", "good afternoon",
+        "evening", "good evening", "howdy", "hiya", "heya",
+    }
+    if _q in _greetings or _q.rstrip("!. ") in _greetings:
+        import random
+        _greeting_replies = [
+            "Hey! What can I help you with? Try /scan for live edges or /help for all commands.",
+            "Morning! Ready to find some edges. Try /scan or ask me about any market.",
+            "Hey! Markets are live. Type /scan to find edges or ask me anything.",
+            "Hi! What are we looking at today? /scan, /odds, /search, or just ask.",
+        ]
+        await update.message.reply_text(random.choice(_greeting_replies))
+        return
+
     # Helper: set ctx.args and call a command handler, then return
     async def _route(handler, args: list[str] | None = None):
         ctx.args = args or []
@@ -4295,6 +4599,48 @@ async def handle_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None
     )):
         await _route(cmd_fedscan)
         return
+
+    # Odds converter — handle inline so the AI gets a pre-computed answer injected
+    _odds_convert_triggers = (
+        "convert ", "what is ", "what does ", "what's ", "explain ",
+        "to probability", "in probability", "implied prob", "as a percent",
+        "american odds", "decimal odds", "fractional odds",
+    )
+    _odds_value_pattern = re.search(r"([+-]\d{2,4}|\d+\.\d+|\d+/\d+)\s*(odds)?", _q)
+    if _odds_value_pattern and any(p in _q for p in _odds_convert_triggers):
+        from edge_agent.sportsbook_odds import convert_odds as _convert_odds
+        _raw = _odds_value_pattern.group(1)
+        try:
+            _conv = _convert_odds(_raw)
+            if _conv:
+                _fmt_label = {
+                    "american": "American",
+                    "decimal": "Decimal (European)",
+                    "fractional": "Fractional (UK)",
+                }.get(_conv["format"], _conv["format"].title())
+                _msg = (
+                    f"🎲 <b>Odds Converter</b>\n\n"
+                    f"Input: <code>{_conv['input']}</code> ({_fmt_label})\n\n"
+                    f"<b>Implied probability: {_conv['implied_pct']}%</b>\n\n"
+                    f"Other formats:\n"
+                    f"  American: <code>{_conv['american']}</code>\n"
+                    f"  Decimal:  <code>{_conv['decimal']}</code>\n"
+                    f"  Fractional: <code>{_conv['fractional']}</code>\n\n"
+                )
+                # Add bet-to-win example for American odds
+                if _conv["format"] == "american":
+                    _n = int(_conv["american"])
+                    _profit = 100 if _n < 0 else _n
+                    _stake = abs(_n) if _n < 0 else 100
+                    _msg += f"Bet ${_stake} to win ${_profit} profit\n"
+                _msg += (
+                    f"<i>Polymarket tip: A market at {_conv['implied_pct']}% is equivalent to "
+                    f"these odds — compare against sportsbook lines to find edge.</i>"
+                )
+                await update.message.reply_text(_msg, parse_mode=ParseMode.HTML)
+                return
+        except Exception:
+            pass  # fall through to AI if parsing fails
 
     # /status — bot system status
     if any(p in _q for p in (
@@ -5877,13 +6223,15 @@ async def handle_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None
                             entry_prob=_entry_prob,
                             question=_pt_title,
                         )
+                        _pt_user_stake = _get_user_stake(user_id)
                         _ot.record_user_pick(
-                            _pt_signal_id, _pt_market_id, user_id, _pt_side
+                            _pt_signal_id, _pt_market_id, user_id, _pt_side,
+                            stake=_pt_user_stake,
                         )
                         await update.message.reply_text(
                             f"✅ Paper trade logged!\n"
                             f"Market: {_pt_title[:60]}\n"
-                            f"Side: {_pt_side} @ {_entry_prob * 100:.1f}¢  |  $10 virtual stake\n\n"
+                            f"Side: {_pt_side} @ {_entry_prob * 100:.1f}¢  |  ${_pt_user_stake:.0f} virtual stake\n\n"
                             f"Use /mytrades to track it."
                         )
                         return
@@ -6219,7 +6567,14 @@ async def handle_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None
         ]
         if _player_names:
             _pname = _player_names[0]
-            _p_query = f"{_pname} current team roster {_chat_sport.upper()} 2026"
+            # Detect if user is asking about game stats vs roster/injury
+            _stats_kw = ("points", "scored", "score", "stats", "rebounds", "assists",
+                         "performance", "game", "last game", "last night", "tonight")
+            _is_stats_q = any(kw in q for kw in _stats_kw)
+            if _is_stats_q:
+                _p_query = f"{_pname} {_chat_sport.upper()} stats last game points tonight 2026"
+            else:
+                _p_query = f"{_pname} current team roster {_chat_sport.upper()} 2026"
             _ploop = asyncio.get_running_loop()
             _player_search_context = await _ploop.run_in_executor(
                 None, _tavily_search, _p_query
@@ -6229,11 +6584,12 @@ async def handle_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None
                     None, _serper_search, _p_query
                 )
             if _player_search_context:
+                _label = "stats" if _is_stats_q else "current team info"
                 _player_search_context = (
-                    f"\n[Live player lookup for {_pname} — use this for current team info, "
+                    f"\n[Live player lookup for {_pname} — use this for {_label}, "
                     f"NOT your training data]\n" + _player_search_context
                 )
-                log.debug("[player_lookup] Searched for player: %s", _pname)
+                log.debug("[player_lookup] Searched for player: %s (stats=%s)", _pname, _is_stats_q)
 
     # 6. Real-time data refresh — fires when sport detected OR user corrects us.
     #    On correction + team mention: bypass cache and re-query Polymarket live.
@@ -6269,12 +6625,22 @@ async def handle_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None
             search_context = search_context + "\n" + _corr_web
 
     elif _chat_sport or _is_correction:
-        if _is_correction and _chat_sport:
-            _query = f"{user_msg} {_chat_sport.upper()} latest update today"
-        elif _is_correction:
-            _query = f"{user_msg} latest confirmed data today"
+        if _is_correction:
+            # Build search query from last bot answer + user correction message
+            # so we search for what the bot got wrong, not just the correction phrase
+            _last_bot_ans = _mem_user.get_last_bot_question() or ""
+            _corr_base = _last_bot_ans[:120] if _last_bot_ans else user_msg
+            _sport_tag = f" {_chat_sport.upper()}" if _chat_sport else ""
+            _query = f"{_corr_base}{_sport_tag} correct latest data 2026"
         else:
-            _query = f"{user_msg} {_chat_sport.upper()} injury report today"
+            # Stats/result question → search for the actual stat, not injury report
+            _stats_sport_kw = ("points", "scored", "score", "stats", "rebounds",
+                               "assists", "goals", "last game", "last night", "tonight",
+                               "performance", "result", "won", "lost", "win", "loss")
+            if any(kw in q for kw in _stats_sport_kw):
+                _query = f"{user_msg} {_chat_sport.upper()} result stats tonight 2026"
+            else:
+                _query = f"{user_msg} {_chat_sport.upper()} injury report today"
         loop = asyncio.get_running_loop()
         search_context = await loop.run_in_executor(None, _tavily_search, _query)
         if not search_context:
@@ -6520,17 +6886,20 @@ async def handle_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None
 
     # ── Correction mode instruction — prepended to system prompt ─────────────
     correction_instruction = (
-        "CORRECTION MODE ACTIVE — the user told you your previous answer was wrong or stale.\n"
-        "Rules:\n"
-        "1. Start your reply by briefly acknowledging the mistake — be direct and natural "
-        "(e.g. 'My bad, let me pull fresh data.' or 'You're right, that was off — here's "
-        "what I'm seeing now:'). Keep the acknowledgment to ONE sentence.\n"
-        "2. Use ONLY the [Polymarket] or [Market data refreshed] block below for prices — "
-        "NEVER repeat the price you gave before.\n"
-        "3. If the refreshed block shows different data, lead with that and explain the delta.\n"
-        "4. If you still can't find accurate data, say honestly: 'I'm not finding a live feed "
-        "for that right now — check polymarket.com directly.' Do NOT guess or hallucinate.\n"
-        "5. Never be defensive or make excuses — just correct and move forward.\n\n"
+        "CORRECTION MODE ACTIVE — the user is telling you your previous answer was wrong.\n"
+        "OVERRIDE ALL OTHER RULES. In correction mode:\n"
+        "1. Acknowledge the mistake in ONE short sentence — natural, not robotic. "
+        "('My bad.' / 'You're right, let me fix that.' / 'Good catch — here's what I'm seeing:')\n"
+        "2. Check ALL data blocks in this prompt — [Polymarket], [Market data refreshed], "
+        "[Live web search results], [Live player lookup] — and use whatever is there to give "
+        "the correct answer. Do NOT say you don't have data if ANY block is present.\n"
+        "3. If [Live web search results] is present: pull the correct facts directly from it. "
+        "Quote the relevant stat, result, or price you find there.\n"
+        "4. NEVER repeat the same wrong answer. NEVER give a fallback message like "
+        "'I don't have the box score' or 'use /injuries to refresh' — you have live data, USE IT.\n"
+        "5. If zero data blocks are present and you genuinely cannot answer: say "
+        "'I searched but couldn't find that — try rephrasing or check ESPN/Polymarket directly.'\n"
+        "6. Never be defensive. Correct and move forward.\n\n"
         if _is_correction
         else ""
     )
@@ -6590,14 +6959,25 @@ async def handle_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None
         "NHL standings, politics news, etc. Treat this as ground truth for current events.\n"
         "• When [Live web search results] is present: cite the headlines/facts naturally. "
         "Do NOT say 'I don't have access to current information' — you literally do.\n\n"
+        "ODDS EDUCATION — teach once, then convert:\n"
+        "• If a user asks what -110, +130, -200, or any American odds mean, EXPLAIN IT briefly "
+        "then convert to probability. Example: '-200 means bet $200 to win $100 profit — that's "
+        "a 66.7% implied win probability.' Then add: 'On prediction markets, you'd see this as a 67¢ YES contract.'\n"
+        "• If a user asks what vig or juice is, explain: 'The vig is the bookmaker's cut built "
+        "into the odds. A standard -110/-110 line adds up to 104.8% — the extra 4.8% is profit "
+        "for the book. Prediction markets like Polymarket have no vig.'\n"
+        "• If a user asks to convert odds (e.g. 'convert -150 to probability', 'what is 2.5 decimal'), "
+        "calculate and show it. American negative: |odds|/(|odds|+100). American positive: 100/(odds+100). "
+        "Decimal: (1/odds)*100. Fractional (e.g. 5/2): denominator/(numerator+denominator)*100.\n"
+        "• After explaining odds ONCE in a conversation, switch to probability language going forward.\n\n"
         "SPORTSBOOK LINES & EDGE DETECTION:\n"
         "• A [Sportsbook Lines] block may appear with live moneyline, spread, and total from "
         "DraftKings/FanDuel/BetMGM. These contain the 'implied win%' with vig removed.\n"
         "• Use the sportsbook implied win% to compare against Polymarket price. If they differ "
         "significantly (>5pp), that gap IS the edge. Example: 'DraftKings implies 67% but "
         "Polymarket has them at 55% — 12pp gap, strong BUY signal on YES.'\n"
-        "• NEVER output spread, moneyline numbers, or juice/vig in your reply. ALWAYS translate "
-        "to probability. Say 'Sportsbooks imply 67%' not 'they are -200 favorites'.\n"
+        "• In normal conversation, translate moneyline to probability. Say 'Sportsbooks imply 67%' "
+        "not 'they are -200 favorites' — UNLESS the user is specifically asking about the odds format.\n"
         "• The spread is context only — use it to understand line movement, not to advise "
         "spread betting. We trade YES/NO contracts, not ATS.\n\n"
         f"IN-SEASON SPORTS (month {datetime.now(timezone.utc).month}):\n"
@@ -6606,19 +6986,24 @@ async def handle_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None
         "If asked about NFL, say 'NFL is in the off-season (season starts September).' "
         "NFL futures/championship markets are still valid.\n"
         "• NCAA March Madness (CBB): IN SEASON March–April.\n\n"
-        "INJURY DATA RULES — apply ONLY when the user's current message explicitly "
-        "asks about injuries, player health, roster status, or a specific game matchup:\n"
+        "INJURY DATA RULES — apply ONLY when the user explicitly asks about injuries, "
+        "player health, or roster status:\n"
         "• If injury data IS in [Live injury data] or [Live web search results]: cite it.\n"
-        "• If the player/team is NOT in those blocks: say 'I don't have current data "
+        "• If the player/team is NOT in those blocks: say 'I don't have current injury data "
         "for [name] — use /injuries nba (or nfl/nhl) to refresh.'\n"
         "• NEVER invent or recall injury statuses from training memory.\n"
         "• ROSTER ACCURACY: NEVER cite a player's team affiliation from your training "
-        "data — rosters change constantly (trades, free agency, waivers). Only reference "
-        "a player's current team if it appears in [Live injury data] or [Live web search results] "
-        "in this prompt. If unsure, say 'I'd need to check current rosters' rather than guessing.\n"
+        "data — rosters change constantly. Only reference a player's current team if it "
+        "appears in [Live web search results] in this prompt.\n"
+        "GAME STATS RULES — when user asks about points scored, game results, stats:\n"
+        "• Use [Live web search results] or [Live player lookup] if present — these have "
+        "the actual game stats. Quote the numbers directly.\n"
+        "• If no stats block is present, say: 'I don't have the box score for that game — "
+        "try asking again and I'll search for it, or check ESPN directly.'\n"
+        "• NEVER refuse a stats question by saying 'I don't have live market data' — "
+        "game stats are NOT market prices.\n"
         "• For ALL other questions (scan results, market edges, strategy, commands, "
-        "general chat): answer normally — do NOT mention injuries or data blocks "
-        "unless the user directly asked about them.\n\n"
+        "general chat): answer normally.\n\n"
         "PAPER TRADING — THIS IS A BUILT-IN FEATURE, NOT A MISSING FEATURE:\n"
         "• ON-DEMAND: Users can paper trade ANY market instantly by saying "
         "'paper trade [team/topic] YES' or 'paper trade [team/topic] NO'. "
@@ -6758,7 +7143,7 @@ async def handle_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None
         correction_mode=_is_correction,
         regime_safe=_regime.is_ml_safe,
         user_id=str(update.effective_user.id),
-        max_tokens=600,  # ~450 words — enough for multi-market analysis without verbosity
+        max_tokens=800 if _is_correction else 600,  # more room for corrections to explain
     )
 
     if reply:
@@ -6793,10 +7178,36 @@ async def handle_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None
             max_tokens=300,
         )
 
-    reply = (
-        reply
-        or "Sorry, I couldn't generate a response right now. The AI service may be temporarily unavailable. Please try again in a few minutes."
-    )
+    if reply is None:
+        # Build an informative message showing which providers failed and when to retry
+        eta = get_retry_eta()
+        retry_hint = f"Try again in ~{eta}s." if eta > 0 else "Try again shortly."
+        statuses = get_model_status("creative")
+        provider_lines = []
+        for m in statuses:
+            icon = "⏳" if m["status"] == "cooldown" else "✅"
+            secs = f" ({m['cooldown_secs_remaining']}s)" if m["status"] == "cooldown" else ""
+            provider_lines.append(f"{icon} {m['model'].split('/')[-1].replace(':free','')}{secs}")
+        status_block = "\n".join(provider_lines)
+        reply = (
+            f"⚠️ All free AI providers are currently rate-limited. {retry_hint}\n\n"
+            f"<b>Model rotation status:</b>\n<code>{status_block}</code>"
+        )
+        # Alert the owner so they know the AI engine is exhausted
+        if OWNER_ID:
+            try:
+                await ctx.bot.send_message(
+                    chat_id=int(OWNER_ID),
+                    text=(
+                        f"🚨 <b>AI Engine Exhausted</b>\n"
+                        f"User <code>{user_id}</code> got no response.\n\n"
+                        f"<b>Rotation status:</b>\n<code>{status_block}</code>\n\n"
+                        f"Earliest retry in {eta}s."
+                    ),
+                    parse_mode=ParseMode.HTML,
+                )
+            except Exception:
+                pass
 
     # Save to per-user session memory
     if reply:
@@ -6807,7 +7218,7 @@ async def handle_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None
         reply = reply[:4000] + "\n\n(truncated)"
 
     log.info("[handle_message] Sending reply (%d chars) to user_id=%s", len(reply), user_id)
-    await update.message.reply_text(reply)
+    await update.message.reply_text(reply, parse_mode=ParseMode.HTML)
 
 
 # ---------------------------------------------------------------------------
@@ -7615,7 +8026,25 @@ async def cmd_mlstatus(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     except Exception:
         pass
 
-    # ── 7. Prompt Registry ────────────────────────────────────────────────
+    # ── 7. Live Model Rotation Status ─────────────────────────────────────
+    try:
+        model_rotation = get_model_status("creative")
+        lines.append("<b>🔄 AI Model Rotation (creative)</b>")
+        all_available = all(m["status"] == "available" for m in model_rotation)
+        lines.append(f"  Overall: {'✅ All available' if all_available else '⚠️ Some rate-limited'}")
+        for m in model_rotation:
+            icon = "✅" if m["status"] == "available" else "⏳"
+            label = m["model"].split("/")[-1].replace(":free", "")
+            detail = f"  cooldown {m['cooldown_secs_remaining']}s" if m["status"] == "cooldown" else ""
+            lines.append(f"  {icon} {label}{detail}")
+        eta = get_retry_eta()
+        if eta > 0:
+            lines.append(f"  Next available in: {eta}s")
+        lines.append("")
+    except Exception:
+        pass
+
+    # ── 8. Prompt Registry ────────────────────────────────────────────────
     try:
         prompts = _prompt_registry.list_prompts()
         lines.append("<b>📝 Prompt Registry</b>")
@@ -8310,6 +8739,10 @@ def main() -> None:
     )
     app.add_handler(CommandHandler("cryptoscan", cmd_cryptoscan, filters=_auth_filter))
     app.add_handler(CommandHandler("fedscan", cmd_fedscan, filters=_auth_filter))
+    app.add_handler(CommandHandler("search", cmd_search, filters=_auth_filter))
+    app.add_handler(CommandHandler("lines", cmd_lines, filters=_auth_filter))
+    app.add_handler(CommandHandler("props", cmd_props, filters=_auth_filter))
+    app.add_handler(CommandHandler("setstake", cmd_setstake, filters=_auth_filter))
     # Inline keyboard (callback queries are always scoped to the chat they came from)
     app.add_handler(CallbackQueryHandler(handle_callback))
 

@@ -278,6 +278,140 @@ Polymarket:
 Summary: Use Kalshi for macro/economic markets. Use Polymarket for political/crypto/sports with high volume.""",
     ),
 
+    # ── What is a good win rate ───────────────────────────────────────────────
+    (
+        "What is a good win rate in prediction markets?",
+        "education",
+        "win rate good winning percentage break even profitable roi returns",
+        """Win rate needed to be profitable depends on what odds you're buying at:
+- Buying at 50% (even money): need >50% win rate to profit
+- Buying at 40% (underdog): need >40% win rate to profit (higher payout offsets lower hit rate)
+- Buying at 70% (favorite): need >70% win rate to profit (lower payout means you need to hit often)
+
+Benchmarks for prediction market traders:
+- Break-even: match your average entry price as a win rate
+- Good: 55-60% win rate at near 50/50 markets
+- Elite: 60%+ sustained over 50+ resolved bets
+- Top Polymarket wallets tracked by EDGE average 58-65% win rate
+
+Why win rate alone is misleading: a trader who only bets 95% favorites can have a 94% win rate and still lose money. Focus on ROI (return on investment) and EV (expected value) instead.
+Rule of thumb: if your win rate consistently beats the market price you entered at, you have edge.""",
+    ),
+
+    # ── Vig, juice, and sportsbook odds explained ─────────────────────────────
+    (
+        "What is vig, juice, and how to read American odds?",
+        "education",
+        "vig juice -110 american odds moneyline plus minus sportsbook what means",
+        """American odds tell you how much you win relative to your bet:
+- Negative odds (-110, -200): how much you must bet to win $100
+  -110 means bet $110 to win $100 profit (risk more to win less — you're the favorite)
+  -200 means bet $200 to win $100 profit (heavy favorite)
+- Positive odds (+130, +300): how much you win if you bet $100
+  +130 means bet $100 to win $130 profit (underdog)
+  +300 means bet $100 to win $300 profit (big underdog)
+
+Implied probability from American odds:
+- Negative: implied% = |odds| / (|odds| + 100) → -200 = 200/300 = 66.7%
+- Positive: implied% = 100 / (odds + 100) → +130 = 100/230 = 43.5%
+
+Vig (juice): the bookmaker's cut. A standard -110/-110 line adds up to 104.8% — the extra 4.8% is the vig. It's why sportsbooks profit regardless of outcome.
+Vig-free line: remove the vig to get true implied probability. At -110/-110, each side is truly 50%.
+
+Prediction markets like Polymarket have no vig — prices reflect pure crowd probability.""",
+    ),
+
+    # ── Bankroll management and bet sizing ────────────────────────────────────
+    (
+        "How much should I bet? Bankroll management guide",
+        "education",
+        "how much bet bankroll size kelly criterion unit risk management stake",
+        """Never risk more than you can afford to lose. Start small — even $5-10 per trade teaches you the mechanics.
+
+Simple unit system (recommended for beginners):
+- Set your bankroll (e.g. $100 total)
+- 1 unit = 1-2% of bankroll ($1-2 on $100)
+- Standard bet: 1 unit. High confidence: 2 units. Never exceed 5 units on one trade.
+
+Kelly Criterion (math-based sizing):
+Kelly% = (edge / odds_received)
+Example: You think 70% chance, market at 60% → edge = 10%, odds = 60¢ payout on $1
+Kelly% = 0.10 / 1.67 = 6% of bankroll. Use half-Kelly (3%) for safety.
+
+EDGE shows kelly-adjusted sizing in every alert. Look for the "Recommended size" field.
+
+Rules for beginners:
+1. Never put more than 5% of bankroll on one market
+2. Diversify — 10-20 small positions beats 2 large ones
+3. Paper trade first until you hit 20+ resolved bets with positive ROI
+4. Scale up only after proving consistent edge""",
+    ),
+
+    # ── Disputed market resolution ────────────────────────────────────────────
+    (
+        "What happens if a prediction market resolves disputed or wrong?",
+        "education",
+        "disputed resolution wrong resolve invalid void cancel refund NaN",
+        """Disputed resolutions do happen — here's what to expect on each platform:
+
+Polymarket:
+- Uses UMA (Universal Market Access) as the resolution oracle
+- Anyone can dispute a resolution by staking UMA tokens within 48 hours
+- Disputed markets go to a vote among UMA token holders (~72h process)
+- If overturned, all positions are refunded at original entry price (no profit/loss)
+- If upheld, original resolution stands
+- Edge cases: if a market question is ambiguous or the event is too close to call, UMA may resolve N/A — all positions refunded
+
+Kalshi:
+- CFTC-regulated — Kalshi itself is the resolution authority
+- Resolution disputes go through Kalshi's formal appeals process
+- Email support@kalshi.com within 24h of resolution
+- If Kalshi made an error, positions are corrected and P&L adjusted
+- N/A resolutions: all contracts settle at $0.50 (halfway) — not a full refund
+- Kalshi has a legal obligation to resolve accurately under CFTC rules
+
+Best practices:
+- Read the resolution criteria BEFORE buying (shown on every market page)
+- Avoid markets with vague resolution criteria ("Will X happen soon?")
+- After a market resolves, check your portfolio immediately — credits appear within minutes on Polymarket, within 1 business day on Kalshi""",
+    ),
+
+    # ── Getting started checklist ─────────────────────────────────────────────
+    (
+        "Getting started checklist — new user guide",
+        "education",
+        "getting started new user first time checklist beginner guide onboarding step by step",
+        """Welcome to prediction markets. Here's the fastest path from zero to your first trade:
+
+Step 1 — Pick a platform
+- Polymarket: best for variety, no US restrictions on most markets, crypto wallet required
+- Kalshi: best for US users, regulated, bank deposit accepted, easier for beginners
+
+Step 2 — Create an account (5 min)
+- Polymarket: go to polymarket.com → connect wallet (MetaMask or use Magic Link email login)
+- Kalshi: go to kalshi.com → sign up → verify ID (KYC, takes ~1 day)
+
+Step 3 — Deposit (minimum ~$10-20 to start)
+- Polymarket: deposit USDC (buy on Coinbase or Kraken → send to your Polygon wallet)
+- Kalshi: link bank account → ACH transfer (free, 1-3 days)
+
+Step 4 — Find a market
+- Use /scan or /top in this bot for high-edge opportunities
+- Or browse Polymarket/Kalshi directly and pick something you have a strong opinion on
+
+Step 5 — Paper trade first
+- Tap YES or NO on any EDGE alert to paper trade it risk-free
+- Track results with /mytrades and /performance
+- Wait for 10-20 resolved bets before committing real money
+
+Step 6 — Make your first real trade
+- Start with 1 unit (1-2% of bankroll)
+- Buy during high-liquidity hours (US market hours, 9am-5pm ET)
+- Check the spread — if bid/ask spread is >5%, consider waiting
+
+You can ask me anything at any stage — setup, deposits, strategy, or understanding a specific market.""",
+    ),
+
     # ── Withdrawals ───────────────────────────────────────────────────────────
     (
         "How to withdraw winnings",

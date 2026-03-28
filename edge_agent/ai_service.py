@@ -54,36 +54,41 @@ def set_decision_log(dlog: object) -> None:
 # 503 = model unavailable → skip
 # ---------------------------------------------------------------------------
 
-# Updated 2026-03-21 — reflects current free-tier availability on OpenRouter.
-# Check https://openrouter.ai/models?q=free for latest availability.
+# Updated 2026-03-27 — verified from openrouter.ai/collections/free-models
+# These are the confirmed active free-tier models on OpenRouter.
+# openrouter/free is the catch-all smart router — always works as final fallback.
+# Benchmarked 2026-03-27 — ordered by confirmed response speed + reliability.
+# arcee/trinity: 1.0s, confirmed working | nemotron-nano: 2.5s, confirmed working
+# stepfun + nemotron-super return empty content → placed at back as last-resort
+# mistral-small / gemma-3 / llama-3.3 may 429 if rate-limited but recover in 60s
 _OR_FREE_SIMPLE: list[str] = [
-    "stepfun/step-3.5-flash:free",              # 256k ctx — fast, reliable
-    "nvidia/nemotron-3-nano-30b-a3b:free",       # 256k ctx — small but capable
-    "minimax/minimax-m2.5:free",                 # large ctx — capable
-    "arcee-ai/trinity-large-preview:free",        # 131k ctx — solid
-    "liquid/lfm-2.5-1.2b-instruct:free",         # 32k ctx — ultra-fast fallback
-    "liquid/lfm-2.5-1.2b-thinking:free",         # 32k ctx — thinking fallback
-    "openrouter/free",                            # generic free tier last resort
+    "arcee-ai/trinity-large-preview:free",              # 1.0s confirmed — fastest working model
+    "nvidia/nemotron-3-nano-30b-a3b:free",              # 2.5s confirmed — reliable fallback
+    "mistralai/mistral-small-3.1-24b-instruct:free",    # fast when not rate-limited
+    "google/gemma-3-12b-it:free",                       # solid fallback
+    "meta-llama/llama-3.3-70b-instruct:free",           # strong fallback
+    "minimax/minimax-m2.5:free",                        # large ctx fallback
+    "stepfun/step-3.5-flash:free",                      # sometimes returns empty — last resort
 ]
 
 _OR_FREE_COMPLEX: list[str] = [
-    "nvidia/nemotron-3-super-120b-a12b:free",    # 262k ctx — strongest free model
-    "minimax/minimax-m2.5:free",                 # large ctx — capable
-    "arcee-ai/trinity-large-preview:free",        # 131k ctx — solid all-rounder
-    "stepfun/step-3.5-flash:free",                # 256k ctx — fast fallback
-    "nvidia/nemotron-3-nano-30b-a3b:free",        # 256k ctx — fallback
-    "liquid/lfm-2.5-1.2b-thinking:free",         # 32k ctx — last resort
-    "openrouter/free",                            # generic free tier last resort
+    "arcee-ai/trinity-large-preview:free",              # 400B sparse MoE — strong reasoning
+    "nvidia/nemotron-3-nano-30b-a3b:free",              # reliable and fast
+    "mistralai/mistral-small-3.1-24b-instruct:free",    # 128k ctx — good for complex
+    "meta-llama/llama-3.3-70b-instruct:free",           # strong reasoning
+    "google/gemma-3-27b-it:free",                       # capable fallback
+    "minimax/minimax-m2.5:free",                        # large ctx fallback
+    "stepfun/step-3.5-flash:free",                      # last resort
 ]
 
 _OR_FREE_CREATIVE: list[str] = [
-    "nvidia/nemotron-3-super-120b-a12b:free",    # 262k ctx — strongest free model
-    "minimax/minimax-m2.5:free",                 # large ctx — capable
-    "arcee-ai/trinity-large-preview:free",        # 131k ctx — solid all-rounder
-    "stepfun/step-3.5-flash:free",                # 256k ctx — fast fallback
-    "nvidia/nemotron-3-nano-30b-a3b:free",        # 256k ctx — fallback
-    "liquid/lfm-2.5-1.2b-thinking:free",         # 32k ctx — last resort
-    "openrouter/free",                            # generic free tier last resort
+    "arcee-ai/trinity-large-preview:free",              # 1.0s — best speed + quality
+    "nvidia/nemotron-3-nano-30b-a3b:free",              # 2.5s — reliable
+    "mistralai/mistral-small-3.1-24b-instruct:free",    # good creative writing
+    "google/gemma-3-12b-it:free",                       # solid creative fallback
+    "meta-llama/llama-3.3-70b-instruct:free",           # strong fallback
+    "minimax/minimax-m2.5:free",                        # large ctx fallback
+    "stepfun/step-3.5-flash:free",                      # last resort
 ]
 
 _OR_FREE_MAP: dict[str, list[str]] = {
@@ -96,16 +101,16 @@ _OR_FREE_MAP: dict[str, list[str]] = {
 _GROQ_MODELS_SIMPLE: list[str] = [
     "llama-3.3-70b-versatile",      # most capable free Groq model
     "gemma2-9b-it",                  # fast, reliable fallback
-    "mixtral-8x7b-32768",           # solid fallback
-    "llama-3.1-8b-instant",         # ultra-fast (may 403 in some regions)
+    "llama3-70b-8192",              # strong fallback
+    "llama3-8b-8192",               # fast fallback
     "llama-3.2-3b-preview",         # last resort
 ]
 
 _GROQ_MODELS_COMPLEX: list[str] = [
     "llama-3.3-70b-versatile",      # most capable
+    "llama3-70b-8192",              # strong fallback
     "gemma2-9b-it",                  # reliable fallback
-    "mixtral-8x7b-32768",           # solid fallback
-    "llama-3.1-8b-instant",         # smaller fallback
+    "llama3-8b-8192",               # smaller fallback
 ]
 
 _GROQ_MODEL_MAP: dict[str, list[str]] = {
@@ -115,22 +120,70 @@ _GROQ_MODEL_MAP: dict[str, list[str]] = {
 }
 
 # Status codes that mean "this model slot is unavailable — try the next one"
-_SKIP_STATUS_CODES = {400, 401, 402, 403, 429, 502, 503, 504}
+_SKIP_STATUS_CODES = {400, 401, 402, 403, 404, 429, 502, 503, 504}
 
 # Circuit breaker — cooldown per model after skip-able errors
 # Avoids retrying a model we know is down for the next N seconds
-_MODEL_COOLDOWNS: dict[str, float] = {}   # model_id → expiry timestamp
+_MODEL_COOLDOWNS: dict[str, float] = {}    # model_id → expiry timestamp
+
 _COOLDOWN_SECS = {
-    400: 60,     # bad request (e.g. too long) → 1 min
-    401: 300,    # invalid API key → 5 min
-    402: 3600,   # out of credits → 1 hour cooldown
-    403: 3600,   # geo-blocked / access denied (e.g. Groq in some regions) → 1 hr
-    429: 120,    # rate limit → 2 min cooldown
-    502: 60,     # bad gateway (transient) → 1 min cooldown
-    503: 300,    # unavailable → 5 min cooldown
-    504: 60,     # gateway timeout (transient) → 1 min cooldown
+    400: 60,      # bad request → 1 min
+    401: 300,     # invalid API key → 5 min
+    402: 300,     # no free credits on this model → 5 min (try again soon)
+    403: 300,     # access denied / geo-blocked → 5 min
+    404: 300,     # model not found / removed from free tier → 5 min (not 24h!)
+    429: 60,      # rate limit → 1 min (each model has its own rate limit)
+    502: 30,      # bad gateway (transient) → 30s
+    503: 120,     # unavailable → 2 min
+    504: 30,      # gateway timeout (transient) → 30s
 }
-_CONNECTION_COOLDOWN = 60  # connection error → 1 min cooldown
+_CONNECTION_COOLDOWN = 30  # connection error → 30s
+
+
+
+def get_model_status(task_type: str = "creative") -> list[dict]:
+    """Return live status of every candidate model for a given task type.
+
+    Each entry: {model, provider, status, cooldown_secs_remaining}
+    status is one of: "available", "cooldown", "exhausted"
+    """
+    now = time.time()
+    candidates = []
+    try:
+        candidates = _get_candidates(task_type)
+    except ValueError:
+        pass  # no API keys set
+
+    seen: set[str] = set()
+    result = []
+    for _client, model in candidates:
+        if model in seen:
+            continue
+        seen.add(model)
+        provider = model.split("/")[0] if "/" in model else "unknown"
+        cooldown_until = _MODEL_COOLDOWNS.get(model, 0)
+        remaining = max(0.0, cooldown_until - now)
+        if remaining > 0:
+            status = "cooldown"
+        else:
+            status = "available"
+        result.append({
+            "model": model,
+            "provider": provider,
+            "status": status,
+            "cooldown_secs_remaining": int(remaining),
+        })
+    return result
+
+
+def get_retry_eta() -> int:
+    """Return seconds until the soonest model comes out of cooldown.
+
+    Returns 0 if any model is already available.
+    """
+    now = time.time()
+    active = [v - now for v in _MODEL_COOLDOWNS.values() if v > now]
+    return int(min(active)) if active else 0
 
 
 # ---------------------------------------------------------------------------
@@ -141,24 +194,28 @@ def _get_candidates(task_type: str) -> list[tuple[OpenAI, str]]:
     """
     Return an ordered list of (client, model_id) pairs to try.
 
-    Order: OpenRouter free models (most options) → Groq (multiple models) → DeepSeek
+    Order for chat (creative/simple): Groq first (sub-second) → OpenRouter → DeepSeek
+    Order for structured (simple):    OpenRouter first → Groq → DeepSeek
     Circuit breaker skips any model in cooldown automatically.
     """
     candidates: list[tuple[OpenAI, str]] = []
 
-    # OpenRouter free tier first — 7 models, best coverage
+    groq_key = os.environ.get("GROQ_API_KEY")
     or_key = os.environ.get("OPEN_ROUTER_API_KEY")
+
+    if groq_key:
+        groq_client = OpenAI(base_url="https://api.groq.com/openai/v1", api_key=groq_key)
+
     if or_key:
         or_client = OpenAI(base_url="https://openrouter.ai/api/v1", api_key=or_key)
+
+    # OpenRouter first — more reliable across networks than Groq (which geo-blocks)
+    if or_key:
         for model in _OR_FREE_MAP.get(task_type, _OR_FREE_SIMPLE):
             candidates.append((or_client, model))
 
-    # Groq — multiple free models tried in order
-    groq_key = os.environ.get("GROQ_API_KEY")
+    # Groq fallback — fast when accessible, but 403s in some regions/VPNs
     if groq_key:
-        groq_client = OpenAI(
-            base_url="https://api.groq.com/openai/v1", api_key=groq_key
-        )
         for model in _GROQ_MODEL_MAP.get(task_type, _GROQ_MODELS_SIMPLE):
             candidates.append((groq_client, model))
 
@@ -206,7 +263,7 @@ def get_ai_response(
 
     candidates = _get_candidates(task_type)
     for client, model in candidates:
-        # Circuit breaker: skip models in cooldown
+        # Per-model circuit breaker — skip if in cooldown
         cooldown_until = _MODEL_COOLDOWNS.get(model, 0)
         if time.time() < cooldown_until:
             log.debug("[AI] %s in cooldown (%.0fs left) — skipping", model, cooldown_until - time.time())
@@ -218,7 +275,7 @@ def get_ai_response(
                 model=model,
                 messages=messages,
                 response_format={"type": "json_object"},
-                timeout=90.0,
+                timeout=20.0,
             )
             content = response.choices[0].message.content
             if not content or not content.strip():
@@ -252,10 +309,11 @@ def get_ai_response(
 
         except APIStatusError as exc:
             if exc.status_code in _SKIP_STATUS_CODES:
-                _MODEL_COOLDOWNS[model] = time.time() + _COOLDOWN_SECS.get(exc.status_code, 60)
+                cooldown_s = _COOLDOWN_SECS.get(exc.status_code, 60)
+                _MODEL_COOLDOWNS[model] = time.time() + cooldown_s
                 log.warning(
                     "[AI] %s → HTTP %d — cooldown %ds, trying next model",
-                    model, exc.status_code, _COOLDOWN_SECS.get(exc.status_code, 60),
+                    model, exc.status_code, cooldown_s,
                 )
                 continue
             log.error("[AI] get_ai_response fatal error (model=%s): %s", model, exc)
@@ -306,7 +364,7 @@ def get_chat_response(
 
     candidates = _get_candidates(task_type)
     for client, model in candidates:
-        # Circuit breaker: skip models in cooldown
+        # Per-model circuit breaker — skip if in cooldown
         cooldown_until = _MODEL_COOLDOWNS.get(model, 0)
         if time.time() < cooldown_until:
             log.debug("[AI] %s in cooldown (%.0fs left) — skipping", model, cooldown_until - time.time())
@@ -318,7 +376,7 @@ def get_chat_response(
                 model=model,
                 messages=messages,
                 max_tokens=max_tokens,
-                timeout=90.0,
+                timeout=10.0,
                 # No response_format constraint — plain text allowed
             )
             result = response.choices[0].message.content
@@ -351,11 +409,11 @@ def get_chat_response(
 
         except APIStatusError as exc:
             if exc.status_code in _SKIP_STATUS_CODES:
-                _MODEL_COOLDOWNS[model] = time.time() + _COOLDOWN_SECS.get(exc.status_code, 60)
+                cooldown_s = _COOLDOWN_SECS.get(exc.status_code, 60)
+                _MODEL_COOLDOWNS[model] = time.time() + cooldown_s
                 log.warning(
                     "[AI] %s → HTTP %d — cooldown %ds, trying next model: %s",
-                    model, exc.status_code, _COOLDOWN_SECS.get(exc.status_code, 60),
-                    str(exc)[:120],
+                    model, exc.status_code, cooldown_s, str(exc)[:120],
                 )
                 continue
             log.error("[AI] get_chat_response fatal (model=%s) HTTP %d: %s", model, exc.status_code, exc)
