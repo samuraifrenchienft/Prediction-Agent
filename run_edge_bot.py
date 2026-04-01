@@ -6599,9 +6599,10 @@ async def handle_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None
 
     injury_context = _build_injury_context(q)
 
-    # Hard guardrail: if user is asking about a player's injury/availability but
-    # the cache returned nothing, inject a forced NO_INJURY_DATA block — same
-    # pattern as the NO_LIVE_MARKET_DATA block. Prevents hallucinated statuses.
+    # Auto-refresh: if user is asking about a player's injury/availability but
+    # the cache returned nothing, silently force-fetch the injury data right now
+    # and re-build the context. This way the bot can answer immediately instead
+    # of telling the user to run a command manually.
     _INJURY_QUESTION_KW = (
         "playing", "play tonight", "play tomorrow", "play today", "play this",
         "out ", " out?", "injured", "injury", "status", "available", "active",
@@ -6609,15 +6610,36 @@ async def handle_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None
     )
     _asking_about_injury = any(kw in q for kw in _INJURY_QUESTION_KW)
     if _asking_about_injury and not injury_context:
+        # Determine which sport to refresh — fall back to NBA if not detected
+        _inj_sport = _chat_sport or "nba"
+        log.info(
+            "[injury_context] Injury question with empty cache — auto-refreshing %s",
+            _inj_sport.upper(),
+        )
+        try:
+            _inj_loop = asyncio.get_running_loop()
+            _inj_client = _InjuryClient()
+            await _inj_loop.run_in_executor(None, _inj_client.fetch_and_store, _inj_sport)
+            injury_context = _build_injury_context(q)
+            if injury_context:
+                log.info("[injury_context] Auto-refresh succeeded — injury data now available")
+            else:
+                log.info("[injury_context] Auto-refresh returned no data for this player")
+        except Exception as _inj_exc:
+            log.warning("[injury_context] Auto-refresh failed: %s", _inj_exc)
+
+    # Hard guardrail: if STILL no data after auto-refresh, force the model to
+    # say it doesn't know rather than hallucinate from training memory.
+    if _asking_about_injury and not injury_context:
         injury_context = (
             "\n\n[NO INJURY DATA AVAILABLE]\n"
-            "The injury cache is empty or does not contain data for the player(s) mentioned.\n"
-            "You MUST tell the user: 'I don't have current injury data for that — use "
-            "/injuries nba (or /injuries nhl) to pull the latest report.'\n"
+            "Live injury fetch was attempted but returned no data for the player(s) mentioned.\n"
+            "You MUST tell the user: 'I tried pulling the latest injury report but couldn't "
+            "find data for that player — check ESPN or the team injury report directly.'\n"
             "Do NOT guess, invent, or recall injury statuses from your training memory. "
             "Any injury status you state without a [Live injury data] block is a HALLUCINATION."
         )
-        log.info("[injury_context] Asking about injury but cache empty — injecting NO_INJURY_DATA block")
+        log.info("[injury_context] Auto-refresh empty — injecting NO_INJURY_DATA guardrail")
 
     # 5b. Player-name detection — when user mentions a specific player by name,
     #     trigger a web search for their current team/status to avoid stale roster data.
