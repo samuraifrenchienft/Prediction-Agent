@@ -23,14 +23,35 @@ import json
 import logging
 import os
 import time
+from pathlib import Path
 
 from dotenv import find_dotenv, load_dotenv
 from openai import OpenAI, APIStatusError, APIConnectionError
 
 from .models import AIAnalysis  # noqa: F401 — re-exported for other modules
 
-# Search current dir and all parent dirs for .env
-load_dotenv(find_dotenv(usecwd=True) or find_dotenv())
+
+def _load_dotenv_chain() -> None:
+    """Match run_edge_bot: local .env then parents fill missing keys (worktree inherits main)."""
+    seen: list[Path] = []
+    cur = Path(__file__).resolve().parent
+    for _ in range(14):
+        p = cur / ".env"
+        if p.is_file():
+            rp = p.resolve()
+            if rp not in seen:
+                seen.append(rp)
+        cur = cur.parent
+        if cur == cur.parent:
+            break
+    if not seen:
+        load_dotenv(find_dotenv(usecwd=True) or find_dotenv())
+        return
+    for i, p in enumerate(seen):
+        load_dotenv(p, override=(i == 0))
+
+
+_load_dotenv_chain()
 
 log = logging.getLogger(__name__)
 

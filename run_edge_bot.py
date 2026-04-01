@@ -77,6 +77,30 @@ except ImportError:
     _PACIFIC = _dt.timezone(_dt.timedelta(hours=-8))  # PST fallback (no DST)
 
 from dotenv import find_dotenv, load_dotenv
+
+
+def _load_dotenv_chain() -> None:
+    """Load .env from this file's dir upward. Local .env first; parent dirs fill missing keys."""
+    seen: list[Path] = []
+    cur = Path(__file__).resolve().parent
+    for _ in range(14):
+        p = cur / ".env"
+        if p.is_file():
+            rp = p.resolve()
+            if rp not in seen:
+                seen.append(rp)
+        cur = cur.parent
+        if cur == cur.parent:
+            break
+    if not seen:
+        load_dotenv(find_dotenv(usecwd=True) or find_dotenv())
+        return
+    for i, p in enumerate(seen):
+        load_dotenv(p, override=(i == 0))
+
+
+_load_dotenv_chain()
+
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.constants import ParseMode
 from telegram.ext import (
@@ -332,9 +356,6 @@ _TOPIC_NEWS_QUERIES: dict[str, str] = {
     "trump": "Trump latest news today executive order policy 2026",
     "biden": "Biden latest news today 2026",
 }
-
-# Load .env from project root (finds it when run from worktree or main dir)
-load_dotenv(find_dotenv(usecwd=True) or find_dotenv())
 
 # ---------------------------------------------------------------------------
 # Tavily real-time web search
@@ -5601,7 +5622,8 @@ async def handle_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None
             a2 = _SLUG_ABBR.get(teams[1], teams[1].lower().replace(" ", ""))
             prefix = _sport_prefix(teams[0], teams[1])
             today = date.today()
-            for delta in (0, 1, -1, 2):
+            # Wider date window: catches early-posted and delayed event slugs.
+            for delta in (0, 1, -1, 2, -2, 3, -3, 4, -4, 5, -5, 6, -6, 7, -7):
                 d = (today + timedelta(days=delta)).isoformat()
                 for slug in (f"{prefix}-{a1}-{a2}-{d}", f"{prefix}-{a2}-{a1}-{d}"):
                     try:
@@ -5626,6 +5648,7 @@ async def handle_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None
         # ── Fallback: tag_slug search for the team's sport ────────────────────
         # tag_slug=nba/nhl/nfl returns actual games, not championship futures.
         _CITY_NAMES: dict[str, str] = {
+            # NBA
             "Warriors": "golden state",
             "Lakers": "los angeles",
             "Clippers": "los angeles",
@@ -5656,6 +5679,53 @@ async def handle_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None
             "Wizards": "washington",
             "Trail Blazers": "portland",
             "Timberwolves": "minnesota",
+            # NHL
+            "Bruins": "boston",
+            "Maple Leafs": "toronto",
+            "Canadiens": "montreal",
+            "Lightning": "tampa bay",
+            "Capitals": "washington",
+            "Rangers": "new york",
+            "Flyers": "philadelphia",
+            "Ducks": "anaheim",
+            "Penguins": "pittsburgh",
+            "Red Wings": "detroit",
+            "Blackhawks": "chicago",
+            "Blues": "st louis",
+            "Avalanche": "colorado",
+            "Golden Knights": "vegas",
+            "Oilers": "edmonton",
+            "Flames": "calgary",
+            "Canucks": "vancouver",
+            # NFL
+            "Chiefs": "kansas city",
+            "Eagles": "philadelphia",
+            "Cowboys": "dallas",
+            "Ravens": "baltimore",
+            "Bills": "buffalo",
+            "Bengals": "cincinnati",
+            "Dolphins": "miami",
+            "Steelers": "pittsburgh",
+            "49ers": "san francisco",
+            "Rams": "los angeles",
+            "Seahawks": "seattle",
+            "Packers": "green bay",
+            "Lions": "detroit",
+            "Bears": "chicago",
+            "Vikings": "minnesota",
+            "Giants": "new york",
+            "Commanders": "washington",
+            "Saints": "new orleans",
+            "Falcons": "atlanta",
+            "Panthers": "carolina",
+            "Buccaneers": "tampa bay",
+            "Texans": "houston",
+            "Colts": "indianapolis",
+            "Jaguars": "jacksonville",
+            "Titans": "tennessee",
+            "Broncos": "denver",
+            "Raiders": "las vegas",
+            "Chargers": "los angeles",
         }
         try:
             prefix = _sport_prefix(teams[0], teams[-1])
@@ -5664,7 +5734,7 @@ async def handle_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None
                 params={
                     "tag_slug": prefix,
                     "active": "true",
-                    "limit": 50,
+                    "limit": 150,
                     "order": "startDate",
                     "ascending": "false",
                 },
@@ -5708,7 +5778,7 @@ async def handle_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None
                     params={
                         "active": "true",
                         "closed": "false",
-                        "limit": 30,
+                        "limit": 200,
                         "order": "volume24hrClob",
                         "ascending": "false",
                     },
@@ -6640,7 +6710,10 @@ async def handle_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None
             if any(kw in q for kw in _stats_sport_kw):
                 _query = f"{user_msg} {_chat_sport.upper()} result stats tonight 2026"
             else:
-                _query = f"{user_msg} {_chat_sport.upper()} injury report today"
+                _query = (
+                    f"{user_msg} {_chat_sport.upper()} matchup analysis odds injuries "
+                    "lineup news today 2026"
+                )
         loop = asyncio.get_running_loop()
         search_context = await loop.run_in_executor(None, _tavily_search, _query)
         if not search_context:
@@ -7020,8 +7093,9 @@ async def handle_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None
         "tell them: 'Just say paper trade [topic] YES or NO — I'll log it instantly!'\n"
         "• NEVER say paper trading is unavailable or that they need to find a scan alert first.\n\n"
         "CRITICAL — YOU ARE A PREDICTION MARKET ANALYST, NOT A SPORTSBOOK:\n"
-        "• NEVER use sportsbook spread language: no '+3.5', '-7.5', 'moneyline', "
-        "'ATS', 'cover', 'over/under', 'juice', '-110', or point spreads.\n"
+        "• In normal analysis, avoid sportsbook jargon like '+3.5', '-7.5', "
+        "'moneyline', 'ATS', 'cover', 'over/under', and point spreads. "
+        "Only use that language if the user explicitly asks about odds format.\n"
         "• ALWAYS frame edges as probability: "
         "'Market: 61% | Model: 56% | Edge: -5pp — sell the favourite.'\n"
         "• For injury impact say: 'Mahomes out shifts KC win prob ~-7pp from 65% to 58%' "

@@ -1,0 +1,11 @@
+---
+description: Always use the main repo as the workspace, not git worktrees.
+globs:
+alwaysApply: true
+---
+
+# Workspace root
+
+- **Primary workspace** is the main project root: `Prediction Agent` (the repo that contains `run_edge_bot.py` at the top level).
+- **Do not** use `.claude/worktrees/*` (or any other worktree path) as the default workspace for edits, runs, or “source of truth.” Worktrees are other branches / parallel agent work — treat them as read-only or merge targets unless the user explicitly asks to work inside one.
+- Apply fixes, run commands, and resolve paths under the **main** repo unless the user clearly directs otherwise.
