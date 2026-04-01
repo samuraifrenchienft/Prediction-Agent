@@ -6599,6 +6599,26 @@ async def handle_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None
 
     injury_context = _build_injury_context(q)
 
+    # Hard guardrail: if user is asking about a player's injury/availability but
+    # the cache returned nothing, inject a forced NO_INJURY_DATA block — same
+    # pattern as the NO_LIVE_MARKET_DATA block. Prevents hallucinated statuses.
+    _INJURY_QUESTION_KW = (
+        "playing", "play tonight", "play tomorrow", "play today", "play this",
+        "out ", " out?", "injured", "injury", "status", "available", "active",
+        "questionable", "doubtful", "scratched", "lineup",
+    )
+    _asking_about_injury = any(kw in q for kw in _INJURY_QUESTION_KW)
+    if _asking_about_injury and not injury_context:
+        injury_context = (
+            "\n\n[NO INJURY DATA AVAILABLE]\n"
+            "The injury cache is empty or does not contain data for the player(s) mentioned.\n"
+            "You MUST tell the user: 'I don't have current injury data for that — use "
+            "/injuries nba (or /injuries nhl) to pull the latest report.'\n"
+            "Do NOT guess, invent, or recall injury statuses from your training memory. "
+            "Any injury status you state without a [Live injury data] block is a HALLUCINATION."
+        )
+        log.info("[injury_context] Asking about injury but cache empty — injecting NO_INJURY_DATA block")
+
     # 5b. Player-name detection — when user mentions a specific player by name,
     #     trigger a web search for their current team/status to avoid stale roster data.
     #     Pattern: 2+ capitalized words that aren't team names (e.g. "Klay Thompson",
