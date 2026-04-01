@@ -25,6 +25,10 @@ python-dateutil>=2.9.0
 # ── Async support ────────────────────────────────────────────────────────────
 aiohttp>=3.9.0
 
+# ── Social / news signals ────────────────────────────────────────────────────
+praw>=7.7.1        # Reddit API (crowd sentiment from r/sportsbook etc.)
+pytrends>=4.9.2    # Google Trends (attention spike detection, no API key)
+
 # ── Utilities ────────────────────────────────────────────────────────────────
 # sqlite3 is in stdlib — no pip install needed
 # json, hashlib, pathlib, dataclasses — all stdlib

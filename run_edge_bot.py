@@ -683,6 +683,11 @@ from edge_agent.sportsbook_odds import (
     fetch_player_props as _fetch_player_props,
     format_props as _format_props,
 )
+from edge_agent.trends import get_trends_context as _get_trends_context
+from edge_agent.reddit_sentiment import (
+    get_reddit_sentiment as _get_reddit_sentiment,
+    get_reddit_buzz_score as _get_reddit_buzz_score,
+)
 
 _trader_cache: "_TraderCache | None" = None
 
@@ -6855,6 +6860,42 @@ async def handle_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None
         except Exception as _sb_exc:
             log.debug("[sportsbook] Context build failed: %s", _sb_exc)
 
+    # 7f. Reddit sentiment — fires when sport + teams detected or topic detected.
+    #     Pulls crowd opinion from betting/prediction subreddits (r/sportsbook,
+    #     r/nba, r/politics, r/Polymarket etc.) to detect public bias vs smart money.
+    reddit_context = ""
+    _reddit_topic = _mentioned_teams[0] if _mentioned_teams else None
+    if not _reddit_topic and _player_names:
+        _reddit_topic = _player_names[0]
+    if not _reddit_topic and _chat_sport:
+        _reddit_topic = None  # skip if only sport with no specific topic
+    if _reddit_topic:
+        try:
+            reddit_context = await asyncio.to_thread(
+                _get_reddit_sentiment, _reddit_topic, _chat_sport
+            )
+            if reddit_context:
+                log.debug("[reddit] Got sentiment for '%s'", _reddit_topic)
+        except Exception as _rd_exc:
+            log.debug("[reddit] Sentiment fetch failed: %s", _rd_exc)
+
+    # 7g. Google Trends — fires when specific team/player/topic is mentioned.
+    #     Detects search volume spikes (2x+ above 7-day avg) as a leading
+    #     indicator of public attention before odds adjust.
+    trends_context = ""
+    _trends_query = _mentioned_teams[0] if _mentioned_teams else None
+    if not _trends_query and _player_names:
+        _trends_query = _player_names[0]
+    if _trends_query:
+        try:
+            trends_context = await asyncio.to_thread(
+                _get_trends_context, _trends_query
+            )
+            if trends_context:
+                log.debug("[trends] Got spike data for '%s'", _trends_query)
+        except Exception as _tr_exc:
+            log.debug("[trends] Fetch failed: %s", _tr_exc)
+
     # 8. Smart money positions — injected when user asks about trading or markets.
     #    Shows what top-scored vetted wallets are currently positioned on so the
     #    AI can surface copy-trade ideas and smart money alignment signals.
@@ -7095,6 +7136,14 @@ async def handle_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None
         "not 'they are -200 favorites' — UNLESS the user is specifically asking about the odds format.\n"
         "• The spread is context only — use it to understand line movement, not to advise "
         "spread betting. We trade YES/NO contracts, not ATS.\n\n"
+        "CROWD SIGNALS (Reddit + Google Trends):\n"
+        "• A [Reddit Sentiment] block contains crowd opinion from r/sportsbook, r/nba, "
+        "r/politics, r/Polymarket etc. Use it to detect public bias vs smart money.\n"
+        "• If Reddit is BULLISH but Polymarket price lags, that's a buy signal. "
+        "If Reddit is BEARISH but price is high, consider fading.\n"
+        "• A [Google Trends] block signals a search volume spike — public attention "
+        "is rising ahead of odds adjustment. Mention it as a supporting signal.\n"
+        "• These are SENTIMENT signals, not hard facts. Weight them alongside market data.\n\n"
         f"IN-SEASON SPORTS (month {datetime.now(timezone.utc).month}):\n"
         "• NBA, NHL: IN SEASON — provide game prices and injury analysis.\n"
         "• NFL, CFB: OFF SEASON — do NOT show game lines or injury reports. "
@@ -7167,6 +7216,8 @@ async def handle_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None
         or crypto_price_context
         or econ_rate_context
         or sportsbook_context
+        or reddit_context
+        or trends_context
     )
     if _has_live:
         _blocks = []
@@ -7188,6 +7239,10 @@ async def handle_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None
             _blocks.append("crypto prices")
         if econ_rate_context:
             _blocks.append("economic rates")
+        if reddit_context:
+            _blocks.append("Reddit crowd sentiment")
+        if trends_context:
+            _blocks.append("Google Trends data")
         _data_available_hint = (
             f"\n\n⚡ LIVE DATA LOADED: You have real-time {', '.join(_blocks)} below. "
             "USE THIS DATA. Do NOT say 'I don't have live data' or 'I don't have access "
@@ -7212,6 +7267,8 @@ async def handle_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None
         + todays_games_context  # today's game schedule when asked
         + crypto_price_context  # live Binance prices (BTC, ETH, SOL)
         + econ_rate_context  # live NY Fed rates + Treasury yields
+        + reddit_context     # crowd sentiment from r/sportsbook, r/politics etc.
+        + trends_context     # Google Trends search volume spike detection
     )
 
     # Build context block list for decision_log (which blocks were non-empty)
@@ -7246,6 +7303,10 @@ async def handle_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None
         _active_ctx_blocks.append("crypto_prices")
     if econ_rate_context:
         _active_ctx_blocks.append("econ_rates")
+    if reddit_context:
+        _active_ctx_blocks.append("reddit_sentiment")
+    if trends_context:
+        _active_ctx_blocks.append("google_trends")
 
     # Run in thread pool — get_chat_response is sync and can take 30–90s; blocking would
     # freeze the event loop and make the bot appear unresponsive to all messages.
