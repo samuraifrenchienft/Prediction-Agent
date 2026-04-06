@@ -232,11 +232,22 @@ def _get_candidates(task_type: str) -> list[tuple[OpenAI, str]]:
     groq_key = os.environ.get("GROQ_API_KEY")
     or_key = os.environ.get("OPEN_ROUTER_API_KEY")
 
+    # All clients get a hard 20s max timeout so a hung TCP never stalls the loop
+    _client_timeout = 20.0
+
     if groq_key:
-        groq_client = OpenAI(base_url="https://api.groq.com/openai/v1", api_key=groq_key)
+        groq_client = OpenAI(
+            base_url="https://api.groq.com/openai/v1",
+            api_key=groq_key,
+            timeout=_client_timeout,
+        )
 
     if or_key:
-        or_client = OpenAI(base_url="https://openrouter.ai/api/v1", api_key=or_key)
+        or_client = OpenAI(
+            base_url="https://openrouter.ai/api/v1",
+            api_key=or_key,
+            timeout=_client_timeout,
+        )
 
     # OpenRouter first — more reliable across networks than Groq (which geo-blocks)
     if or_key:
@@ -249,6 +260,7 @@ def _get_candidates(task_type: str) -> list[tuple[OpenAI, str]]:
         _mm_client = OpenAI(
             base_url="https://api.minimax.io/v1",
             api_key=minimax_key,
+            timeout=_client_timeout,
         )
         candidates.append((_mm_client, "MiniMax-M2.7"))
 
@@ -260,7 +272,11 @@ def _get_candidates(task_type: str) -> list[tuple[OpenAI, str]]:
     # DeepSeek last — often 402 (free tier depleted)
     deepseek_key = os.environ.get("DEEPSEEK_API_KEY", "").strip()
     if deepseek_key:
-        _ds_client = OpenAI(base_url="https://api.deepseek.com", api_key=deepseek_key)
+        _ds_client = OpenAI(
+            base_url="https://api.deepseek.com",
+            api_key=deepseek_key,
+            timeout=_client_timeout,
+        )
         candidates.append((_ds_client, "deepseek-chat"))
 
     if not candidates:
