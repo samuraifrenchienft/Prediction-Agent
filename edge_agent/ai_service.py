@@ -22,6 +22,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import time
 from pathlib import Path
 
@@ -160,6 +161,13 @@ _COOLDOWN_SECS = {
 }
 _CONNECTION_COOLDOWN = 30  # connection error → 30s
 
+# Regex to strip reasoning model <think>…</think> traces (e.g. MiniMax M2.7)
+_THINK_RE = re.compile(r"<think>.*?</think>", re.DOTALL)
+
+
+def _strip_think(text: str) -> str:
+    """Remove <think>…</think> blocks from reasoning model output."""
+    return _THINK_RE.sub("", text).strip()
 
 
 def get_model_status(task_type: str = "creative") -> list[dict]:
@@ -307,8 +315,8 @@ def get_ai_response(
                 response_format={"type": "json_object"},
                 timeout=20.0,
             )
-            content = response.choices[0].message.content
-            if not content or not content.strip():
+            content = _strip_think(response.choices[0].message.content or "")
+            if not content:
                 log.warning("[AI] Model %s returned empty response", model)
                 continue
             result = json.loads(content)
@@ -409,8 +417,8 @@ def get_chat_response(
                 timeout=10.0,
                 # No response_format constraint — plain text allowed
             )
-            result = response.choices[0].message.content
-            if not result or not str(result).strip():
+            result = _strip_think(response.choices[0].message.content or "")
+            if not result:
                 log.warning("[AI] %s returned empty content — trying next model", model)
                 continue
             latency_ms = int((time.monotonic() - t0) * 1000)
