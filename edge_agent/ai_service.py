@@ -235,6 +235,15 @@ def _get_candidates(task_type: str) -> list[tuple[OpenAI, str]]:
         for model in _OR_FREE_MAP.get(task_type, _OR_FREE_SIMPLE):
             candidates.append((or_client, model))
 
+    # MiniMax direct API — paid, reliable, 1M context window
+    minimax_key = os.environ.get("MINIMAX_API_KEY", "").strip()
+    if minimax_key:
+        _mm_client = OpenAI(
+            base_url="https://api.minimax.io/v1",
+            api_key=minimax_key,
+        )
+        candidates.append((_mm_client, "MiniMax-M2.7"))
+
     # Groq fallback — fast when accessible, but 403s in some regions/VPNs
     if groq_key:
         for model in _GROQ_MODEL_MAP.get(task_type, _GROQ_MODELS_SIMPLE):
