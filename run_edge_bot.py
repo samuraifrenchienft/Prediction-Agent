@@ -3099,9 +3099,40 @@ def _build_injury_context(query: str) -> str:
                 matched_sport = sport
                 break
 
+        # Nickname → canonical star name mapping
+        _NICKNAMES: dict[str, str] = {
+            "wemby": "victor wembanyama",
+            "bron": "lebron james",
+            "lebron": "lebron james",
+            "giannis": "giannis antetokounmpo",
+            "the greek freak": "giannis antetokounmpo",
+            "joker": "nikola jokic",
+            "jokic": "nikola jokic",
+            "steph": "stephen curry",
+            "curry": "stephen curry",
+            "kd": "kevin durant",
+            "durant": "kevin durant",
+            "embiid": "joel embiid",
+            "luka": "luka doncic",
+            "sga": "shai gilgeous-alexander",
+            "tatum": "jayson tatum",
+            "dame": "damian lillard",
+            "ad": "anthony davis",
+            "ja": "ja morant",
+            "kawhi": "kawhi leonard",
+            "ant": "anthony edwards",
+            "ant-man": "anthony edwards",
+        }
+
         # Also check for player name mentions (covers "is LeBron playing?")
-        # Match full name ("kawhi leonard") or partial (just "kawhi" or "leonard")
+        # Match full name, nickname, or partial (just first/last name)
         player_mentioned = next((k for k in _star_keys if k in q), None)
+        # Try nickname first if no full name matched
+        if not player_mentioned:
+            for nick, full_name in _NICKNAMES.items():
+                if nick in q and full_name in _star_keys:
+                    player_mentioned = full_name
+                    break
         if not player_mentioned:
             # Try partial: check if any word from a star name appears in query
             # Only match first names 4+ chars or last names to avoid false positives
@@ -7082,20 +7113,21 @@ async def handle_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None
 
     # ── Correction mode instruction — prepended to system prompt ─────────────
     correction_instruction = (
-        "CORRECTION MODE ACTIVE — the user is telling you your previous answer was wrong.\n"
+        "CORRECTION MODE ACTIVE — the user is questioning your previous answer.\n"
         "OVERRIDE ALL OTHER RULES. In correction mode:\n"
-        "1. Acknowledge the mistake in ONE short sentence — natural, not robotic. "
-        "('My bad.' / 'You're right, let me fix that.' / 'Good catch — here's what I'm seeing:')\n"
-        "2. Check ALL data blocks in this prompt — [Polymarket], [Market data refreshed], "
-        "[Live web search results], [Live player lookup] — and use whatever is there to give "
-        "the correct answer. Do NOT say you don't have data if ANY block is present.\n"
-        "3. If [Live web search results] is present: pull the correct facts directly from it. "
-        "Quote the relevant stat, result, or price you find there.\n"
-        "4. NEVER repeat the same wrong answer. NEVER give a fallback message like "
-        "'I don't have the box score' or 'use /injuries to refresh' — you have live data, USE IT.\n"
-        "5. If zero data blocks are present and you genuinely cannot answer: say "
-        "'I searched but couldn't find that — try rephrasing or check ESPN/Polymarket directly.'\n"
-        "6. Never be defensive. Correct and move forward.\n\n"
+        "1. Check ALL data blocks in this prompt FIRST before responding:\n"
+        "   - [Live NBA/NFL/NHL injury data from verified cache] → use this for player availability\n"
+        "   - [Polymarket] / [Market data refreshed] → use this for market prices\n"
+        "   - [Live web search results] / [Live player lookup] → use this for stats/news\n"
+        "2. If a [Live injury data] block is present: state the player's status from it directly. "
+        "Do NOT say 'I don't have live market data' — injury data is NOT market data.\n"
+        "3. If the previous answer was CORRECT and supported by the injury/data blocks: "
+        "STAND YOUR GROUND. Say 'Actually my original answer was correct — here's what the data shows:' "
+        "and cite the specific block. Do NOT back down from correct answers.\n"
+        "4. If the previous answer was WRONG: acknowledge briefly ('My bad.') and give the correct answer.\n"
+        "5. NEVER say 'I don't have live market data for that' for injury/player questions.\n"
+        "6. NEVER say 'I tried pulling the latest injury report but couldn't find data' if an injury block is present.\n"
+        "7. If zero data blocks: say 'I searched but couldn't find that — try rephrasing or check ESPN directly.'\n\n"
         if _is_correction
         else ""
     )
