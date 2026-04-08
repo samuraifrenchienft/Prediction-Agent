@@ -3115,8 +3115,28 @@ def _build_injury_context(query: str) -> str:
                     break
         if player_mentioned and not matched_sport:
             matched_sport = detect_sport(q)  # let keyword scorer decide
+            # If detect_sport fails, infer sport from which section the star is in
+            if not matched_sport or matched_sport.upper() == "UNKNOWN":
+                # Build a quick player→sport map from _STAR_MULTIPLIERS comments
+                # NBA stars are listed first, then NFL, then NHL in injury_api.py
+                _nba_stars = {
+                    "lebron james", "giannis antetokounmpo", "nikola jokic",
+                    "stephen curry", "steph curry", "kevin durant", "joel embiid",
+                    "luka doncic", "shai gilgeous-alexander", "victor wembanyama",
+                    "jayson tatum", "damian lillard", "anthony davis", "ja morant",
+                    "tyrese haliburton", "donovan mitchell", "devin booker",
+                    "jimmy butler", "paolo banchero", "bam adebayo",
+                    "kawhi leonard", "paul george", "james harden", "kyrie irving",
+                    "jaylen brown", "trae young", "zion williamson",
+                    "karl-anthony towns", "anthony edwards", "de'aaron fox",
+                    "lamelo ball", "chet holmgren",
+                }
+                if player_mentioned in _nba_stars:
+                    matched_sport = "nba"
+                else:
+                    matched_sport = "nfl"  # default for non-NBA stars
 
-        if not matched_sport:
+        if not matched_sport or matched_sport.upper() == "UNKNOWN":
             return ""
 
         # ── Pull from cache ───────────────────────────────────────────────────
