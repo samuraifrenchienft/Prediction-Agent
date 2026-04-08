@@ -3038,25 +3038,14 @@ def _build_injury_context(query: str) -> str:
         # Quick bail-out: if none of the sport-indicator words appear, skip.
         _SPORT_TRIGGERS = {
             "nba": {
-                "nba",
-                "basketball",
-                "lakers",
-                "celtics",
-                "warriors",
-                "bucks",
-                "heat",
-                "nets",
-                "knicks",
-                "nuggets",
-                "suns",
-                "sixers",
-                "raptors",
-                "mavericks",
-                "mavs",
-                "spurs",
-                "thunder",
-                "grizzlies",
-                "pelicans",
+                "nba", "basketball",
+                "lakers", "celtics", "warriors", "bucks", "heat", "nets",
+                "knicks", "nuggets", "suns", "sixers", "76ers", "raptors",
+                "mavericks", "mavs", "spurs", "thunder", "grizzlies",
+                "pelicans", "clippers", "rockets", "pistons", "hornets",
+                "pacers", "hawks", "cavaliers", "cavs", "wizards", "kings",
+                "timberwolves", "wolves", "blazers", "trail blazers", "jazz",
+                "magic", "bulls",
             },
             "nfl": {
                 "nfl",
@@ -3111,7 +3100,19 @@ def _build_injury_context(query: str) -> str:
                 break
 
         # Also check for player name mentions (covers "is LeBron playing?")
+        # Match full name ("kawhi leonard") or partial (just "kawhi" or "leonard")
         player_mentioned = next((k for k in _star_keys if k in q), None)
+        if not player_mentioned:
+            # Try partial: check if any word from a star name appears in query
+            # Only match first names 4+ chars or last names to avoid false positives
+            for star_name in _star_keys:
+                parts = star_name.split()
+                for part in parts:
+                    if len(part) >= 4 and part in q:
+                        player_mentioned = star_name
+                        break
+                if player_mentioned:
+                    break
         if player_mentioned and not matched_sport:
             matched_sport = detect_sport(q)  # let keyword scorer decide
 
@@ -3126,12 +3127,25 @@ def _build_injury_context(query: str) -> str:
 
         # If a specific player was mentioned, show just that player + team.
         # Otherwise try to match a team from the query, then fall back to top-10.
+        _player_not_injured_note = ""
         if player_mentioned:
             relevant = [
                 r
                 for r in all_records
                 if player_mentioned in r.get("player_name", "").lower()
             ]
+            if not relevant:
+                # Player NOT on injury report — they're likely available.
+                # Pull their team's injuries instead so AI has context.
+                _player_not_injured_note = (
+                    f"\n  ✅ {player_mentioned.title()} is NOT on the injury report "
+                    f"— likely available to play.\n"
+                )
+                # Try to find team injuries via team alias matching in query
+                relevant = [
+                    r for r in all_records
+                    if any(w in q for w in r.get("team", "").lower().split())
+                ]
         else:
             # Try substring team match
             relevant = [
@@ -3141,7 +3155,7 @@ def _build_injury_context(query: str) -> str:
             ]
 
         # Fallback: show the most-severe players (top 10) for the detected sport
-        if not relevant:
+        if not relevant and not _player_not_injured_note:
             relevant = all_records[:10]
 
         # ── Format — split starters vs role players ───────────────────────────
@@ -3176,6 +3190,8 @@ def _build_injury_context(query: str) -> str:
         role_players = [r for r in relevant if not r.get("is_starter")]
 
         lines = [f"\n[Live {matched_sport.upper()} injury data from verified cache]"]
+        if _player_not_injured_note:
+            lines.append(_player_not_injured_note)
         if starters:
             lines.append("⭐ STARTERS:")
             for r in starters[:10]:
@@ -5835,6 +5851,15 @@ async def handle_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None
         (["election", "president", "trump"], "KXPRES"),
     ]
     q = user_msg.lower()
+
+    # Early injury-question detection — used to suppress irrelevant market data blocks
+    _INJURY_QUESTION_KW = (
+        "playing", "play tonight", "play tomorrow", "play today", "play this",
+        "out ", " out?", "injured", "injury", "status", "available", "active",
+        "questionable", "doubtful", "scratched", "lineup",
+    )
+    _asking_about_injury = any(kw in q for kw in _INJURY_QUESTION_KW)
+
     market_context = ""
 
     # ── Priority 1: specific game matchup detected → search Polymarket directly ──
@@ -6044,7 +6069,7 @@ async def handle_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None
     # ── Inject hard "NO LIVE DATA" block when lookup was attempted but failed ──
     # Without this, market_context is "" and the AI can silently ignore the lack
     # of data and hallucinate prices from training memory.
-    _wanted_market_data = bool(_mentioned_teams)
+    _wanted_market_data = bool(_mentioned_teams) and not _asking_about_injury
     if _wanted_market_data and not market_context:
         market_context = (
             "\n\n[NO LIVE MARKET DATA AVAILABLE]\n"
@@ -6608,12 +6633,7 @@ async def handle_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None
     # the cache returned nothing, silently force-fetch the injury data right now
     # and re-build the context. This way the bot can answer immediately instead
     # of telling the user to run a command manually.
-    _INJURY_QUESTION_KW = (
-        "playing", "play tonight", "play tomorrow", "play today", "play this",
-        "out ", " out?", "injured", "injury", "status", "available", "active",
-        "questionable", "doubtful", "scratched", "lineup",
-    )
-    _asking_about_injury = any(kw in q for kw in _INJURY_QUESTION_KW)
+    # (_asking_about_injury and _INJURY_QUESTION_KW already defined near line 5828)
     if _asking_about_injury and not injury_context:
         # Determine which sport to refresh — fall back to NBA if not detected
         _inj_sport = _chat_sport or "nba"
