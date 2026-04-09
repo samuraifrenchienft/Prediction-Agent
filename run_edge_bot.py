@@ -6722,6 +6722,7 @@ async def handle_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None
     #     Pattern: 2+ capitalized words that aren't team names (e.g. "Klay Thompson",
     #     "LeBron James", "Steph Curry"). Only fires in sport context.
     _player_search_context = ""
+    _player_names = []
     if _chat_sport:
         _player_pat = re.findall(r"\b([A-Z][a-z]+(?:\s+[A-Z][a-z]+)+)\b", user_msg)
         # Filter out known team names, cities, and common non-player phrases
